@@ -685,12 +685,12 @@ static void test_link_rebases_loclists(void) {
                    "int helper(int v);\n"
                    "int main(void) { int m; m = helper(4); return m % 100; }\n",
                    1, 1, &b);
-    /* Second module's ranges start at its own offset 0 before linking. */
+    /* Second module's ranges are still module-local before linking. */
     const DebugVar *m_before = find_var(find_func(&b, "main"), "m");
     T_ASSERT(m_before != NULL);
     T_ASSERT(m_before->num_ranges > 0);
 
-    T_ASSERT(m_before->ranges[0].pc_start < a.text.len);
+    T_ASSERT(m_before->ranges[0].pc_start < b.text.len);
 
     const char *path = TMP_DIR PATH_SEP "fakecc_test_debug_rebase";
     EmitModule *mods[2] = { &a, &b };

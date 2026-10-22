@@ -20,6 +20,7 @@ typedef enum {
     IR_ADD,         /* dst = a + b */
     IR_SUB,         /* dst = a - b */
     IR_MUL,         /* dst = a * b */
+    IR_UMULH,       /* dst = high 64 bits of unsigned 64x64 multiply */
     IR_DIV,         /* dst = a / b  (signed) */
     IR_MOD,         /* dst = a % b  (signed) */
     IR_NEG,         /* dst = -a */
@@ -39,13 +40,13 @@ typedef enum {
     IR_FCMP,        /* dst = (a op b) ? 1 : 0 (float comparison; signedness
                        encodes the ordered comparison: 0 = LT,1=LE,2=GT,3=GE,
                        4 = EQ, 5 = NE).  Result width 4 (int). */
-    IR_VADD,        /* dst = a + b (vector SIMD; width=vec_sz, imm=elem_sz, is_float) */
-    IR_VSUB,        /* dst = a - b (vector SIMD) */
-    IR_VMUL,        /* dst = a * b (vector SIMD) */
-    IR_VDIV,        /* dst = a / b (vector SIMD) */
-    IR_VBAND,       /* dst = a & b (vector SIMD) */
-    IR_VBOR,        /* dst = a | b (vector SIMD) */
-    IR_VBXOR,       /* dst = a ^ b (vector SIMD) */
+    IR_VADD,        /* *dst = *a + *b (vector SIMD; width=vec_sz, imm=elem_sz) */
+    IR_VSUB,        /* *dst = *a - *b (vector SIMD) */
+    IR_VMUL,        /* *dst = *a * *b (vector SIMD) */
+    IR_VDIV,        /* *dst = *a / *b (vector SIMD) */
+    IR_VBAND,       /* *dst = *a & *b (vector SIMD) */
+    IR_VBOR,        /* *dst = *a | *b (vector SIMD) */
+    IR_VBXOR,       /* *dst = *a ^ *b (vector SIMD) */
     IR_SITOFP,      /* dst = (float)a — signed int → float; width = target */
     IR_FPTOSI,      /* dst = (int)a — float → signed int; width = target */
     IR_FPEXT,       /* dst = (double)(float)a — float → double */

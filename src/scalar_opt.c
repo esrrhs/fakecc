@@ -219,6 +219,12 @@ int scalar_dce(IRFunction *fn) {
         if (inst->a >= 0 && inst->a < fn->next_value_id) used[inst->a] = 1;
         if (inst->op != IR_CBR && inst->op != IR_CALL &&
             inst->b >= 0 && inst->b < fn->next_value_id) used[inst->b] = 1;
+        /* Vector SIMD ops store through `dst` — keep the address alive. */
+        if ((inst->op == IR_VADD || inst->op == IR_VSUB || inst->op == IR_VMUL
+             || inst->op == IR_VDIV || inst->op == IR_VBAND || inst->op == IR_VBOR
+             || inst->op == IR_VBXOR)
+            && inst->dst >= 0 && inst->dst < fn->next_value_id)
+            used[inst->dst] = 1;
         /* An IR_RETURN's c and d are the third/fourth wide-HFA eightbytes;
          * mark them used so the loads that produce them survive. */
         if (inst->op == IR_RETURN) {

@@ -378,9 +378,19 @@ static void test_pair_modes(void) {
     a64_free(&a);
 }
 
+static void test_umulh(void) {
+    A64Asm a;
+    a64_init(&a);
+    /* `umulh x0, x1, x2`, verified against clang's integrated assembler. */
+    a64_umulh(&a, A64_X0, A64_X1, A64_X2);
+    T_ASSERT_EQ_INT(word_at(&a, 0), 0x9BC27C20u);
+    a64_free(&a);
+}
+
 int main(void) {
     test_golden_match();
     test_mov_imm64();
+    test_umulh();
     test_pair_modes();
     test_b26_boundaries();
     test_b19_boundaries();
