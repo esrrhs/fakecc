@@ -3339,6 +3339,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             gv.sym_name = g->name;
             gv.alloca_ssa = -1;
             gv.param_idx = -1;
+            /* Section + offset for DW_OP_addr (PE may use sec_vaddr[] or
+             * absolute symbols; ELF rebases symbols and passes NULL). */
+            gv.addr_sect = (int)shndx;
+            gv.addr_off = off;
             emit_module_add_dbg_global(out, &gv);
         }
     }

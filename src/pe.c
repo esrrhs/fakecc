@@ -2666,19 +2666,21 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
                 emit_module_add_dbg_global(&dbg, &gv);
             }
         }
-        uint64_t sec_vaddr[16];
-        memset(sec_vaddr, 0, sizeof sec_vaddr);
-        sec_vaddr[SECT_TEXT]   = L.text_va;
-        sec_vaddr[SECT_RODATA] = L.rdata_va;
-        sec_vaddr[SECT_DATA]   = L.data_va;
-        sec_vaddr[SECT_BSS]    = L.data_va + (uint64_t)data.len;
-        if (have_tls) {
-            sec_vaddr[SECT_TDATA] = L.tls_va;
-            sec_vaddr[SECT_TBSS]  = L.tls_va + (uint64_t)tdata.len;
+        /* Match the ELF linker: stash absolute final addresses in the
+         * scratch module's symbol table and pass sec_vaddr=NULL so
+         * DW_OP_addr comes from resolve_sym_addr.  The x86-64 codegen
+         * path historically left addr_sect zero; symbols cover that and
+         * older .obj debug records. */
+        for (size_t si = 0; si < ngs; si++) {
+            GSym *e = &gs[si];
+            if (!e->name || e->imp || !e->strong) continue;
+            emit_module_add_symbol(&dbg, e->name, 1 /* STB_GLOBAL */,
+                                   1 /* STT_OBJECT */, SECT_DATA,
+                                   e->addr, 0);
         }
         debug_emit_dwarf(&dbg, L.text_va, &debug_abbrev, &debug_info,
                          &debug_str, &debug_line, &debug_frame, &debug_loc,
-                         sec_vaddr);
+                         NULL);
         emit_module_free(&dbg);
     }
 
