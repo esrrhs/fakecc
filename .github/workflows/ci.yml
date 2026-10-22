@@ -278,9 +278,9 @@ jobs:
           fail_ci_if_error: true
 
   # Same jobs Linux runs, on the Windows x64 target: plain gcc, gcc -O2,
-  # clang ASan/UBSan (MinGW gcc does not ship libasan), clang, clang -O2,
-  # and gcov.  ctest is the shared roster, including the fork-isolated unit
-  # tests, difftest, and the DWARF gdb suite.
+  # clang ASan/UBSan (CLANG64 only; MINGW64 compiler-rt has no ASan), clang,
+  # clang -O2, and gcov.  ctest is the shared roster, including the
+  # fork-isolated unit tests, difftest, and the DWARF gdb suite.
   build-and-test-windows:
     name: ${{ matrix.config.label }}
     runs-on: windows-latest
@@ -293,54 +293,68 @@ jobs:
       matrix:
         config:
           - label: windows-latest · gcc
+            msystem: MINGW64
             cc: gcc
             cxx: g++
             cflags: ""
-            pkgs: ""
+            pacboy: gcc:p cmake:p ninja:p gdb:p
+            install: ""
           - label: windows-latest · gcc -O2
+            msystem: MINGW64
             cc: gcc
             cxx: g++
             cflags: "-O2"
-            pkgs: ""
+            pacboy: gcc:p cmake:p ninja:p gdb:p
+            install: ""
+          # ASan/UBSan runtimes ship only in the CLANG64 compiler-rt package.
+          # MINGW64's mingw-w64-x86_64-compiler-rt has builtins/profile/fuzzer
+          # only, so clang -fsanitize=address links against missing
+          # libclang_rt.asan_dynamic*.  Keep the job; switch the environment.
           - label: windows-latest · clang ASan
+            msystem: CLANG64
             cc: clang
             cxx: clang++
             cflags: "-fsanitize=address,undefined -g -fno-omit-frame-pointer"
             ctest_args: "-E difftest_O1"
-            pkgs: mingw-w64-x86_64-clang mingw-w64-x86_64-compiler-rt
+            pacboy: clang:p compiler-rt:p cmake:p ninja:p gdb:p
+            # Real MinGW gcc for the difftest oracle (not clang64 gcc-compat).
+            install: mingw-w64-x86_64-gcc
           - label: windows-latest · clang
+            msystem: MINGW64
             cc: clang
             cxx: clang++
             cflags: ""
-            pkgs: mingw-w64-x86_64-clang
+            pacboy: gcc:p clang:p cmake:p ninja:p gdb:p
+            install: ""
           - label: windows-latest · clang -O2
+            msystem: MINGW64
             cc: clang
             cxx: clang++
             cflags: "-O2"
-            pkgs: mingw-w64-x86_64-clang
+            pacboy: gcc:p clang:p cmake:p ninja:p gdb:p
+            install: ""
           - label: windows-latest · gcc coverage
+            msystem: MINGW64
             cc: gcc
             cxx: g++
             cflags: ""
             cov: true
             ctest_args: "-E difftest"
-            pkgs: mingw-w64-x86_64-lcov
+            pacboy: gcc:p cmake:p ninja:p gdb:p lcov:p
+            install: ""
     steps:
       - uses: actions/checkout@v4
 
       - name: Install MSYS2 toolchain
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: ${{ matrix.config.msystem }}
           update: true
+          pacboy: ${{ matrix.config.pacboy }}
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-gdb
             diffutils
             python
-            ${{ matrix.config.pkgs }}
+            ${{ matrix.config.install }}
 
       - name: Require gdb
         run: |
@@ -352,6 +366,11 @@ jobs:
 
       - name: Configure
         run: |
+          # CLANG64 PATH does not include /mingw64/bin; append it so the
+          # difftest oracle can still find real MinGW gcc.
+          if [ "${{ matrix.config.msystem }}" = "CLANG64" ]; then
+            export PATH="$PATH:/mingw64/bin"
+          fi
           EXTRA_FLAGS=""
           if [ "${{ matrix.config.cov }}" = "true" ]; then
             EXTRA_FLAGS="-DUSE_COV=ON"
@@ -362,14 +381,21 @@ jobs:
             -DCMAKE_C_FLAGS="${{ matrix.config.cflags }}" \
             $EXTRA_FLAGS
           if echo "${{ matrix.config.cflags }}" | grep -q sanitize; then
-            find /mingw64/lib/clang -iname '*asan*' -o -iname '*ubsan*' | head -50 || true
+            find /clang64/lib/clang /mingw64/lib/clang -iname '*asan*' -o -iname '*ubsan*' 2>/dev/null | head -50 || true
           fi
 
       - name: Build
-        run: cmake --build build --parallel
+        run: |
+          if [ "${{ matrix.config.msystem }}" = "CLANG64" ]; then
+            export PATH="$PATH:/mingw64/bin"
+          fi
+          cmake --build build --parallel
 
       - name: Test
         run: |
+          if [ "${{ matrix.config.msystem }}" = "CLANG64" ]; then
+            export PATH="$PATH:/mingw64/bin"
+          fi
           CTEST_ARGS="${{ matrix.config.ctest_args }}"
           ctest --test-dir build --output-on-failure $CTEST_ARGS
 
