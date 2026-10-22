@@ -305,7 +305,7 @@ jobs:
           - label: windows-latest · clang ASan
             cc: clang
             cxx: clang++
-            cflags: "-fsanitize=address,undefined -static-libsan -g -fno-omit-frame-pointer"
+            cflags: "-fsanitize=address,undefined -g -fno-omit-frame-pointer"
             ctest_args: "-E difftest_O1"
             pkgs: mingw-w64-x86_64-clang mingw-w64-x86_64-compiler-rt
           - label: windows-latest · clang
@@ -708,7 +708,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  # A fixed point alone does not prove correctness — a deterministic but
+  # A fixed point alone does not prove correctness �?a deterministic but
   # wrong compiler also reproduces itself.  Re-run the functional suites
   # with the self-hosted binary.  -O0 and -O1 differ in whether scalars are
   # promoted out of memory, so they stay separate matrix legs.
