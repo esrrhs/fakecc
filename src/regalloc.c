@@ -1198,8 +1198,6 @@ static void coalesce_copies(IRFunction *fn, int *colors, const InterfGraph *g,
      * as a folded address after LiveInfo has dropped the use, and the
      * self-hosted compiler then segfaults. */
     (void)liv;
-    (void)colors;
-    return;
     for (int pass = 0; pass < 8; pass++) {
         int changed = 0;
         for (size_t i = 0; i < fn->insts.len; i++) {

@@ -2275,32 +2275,15 @@ typedef struct {
 
 /* Compute which callee-saved registers this function actually uses.
  * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 (0 or 1). */
-/* Callee-saved homes that codegen actually reads/writes.  IR_ALLOCA is a
- * frame-slot id addressed via alloca_off; RA may still colour it, but the
- * body never uses that GP home — counting it only forced dead push/pop
- * (chacha quarter saved rbx/r12/r13 unused). */
-static void collect_callee_saved(const RAResult *ra, const IRFunction *fn,
-                                 int used[3]) {
+static void collect_callee_saved(const RAResult *ra, int used[3]) {
     used[0] = used[1] = used[2] = 0;
     if (!ra) return;
-    char *is_alloca = NULL;
-    if (fn && ra->num_values > 0) {
-        is_alloca = xmalloc((size_t)ra->num_values);
-        memset(is_alloca, 0, (size_t)ra->num_values);
-        for (size_t j = 0; j < fn->insts.len; j++) {
-            const IRInst *in = &fn->insts.data[j];
-            if (in->op == IR_ALLOCA && in->dst >= 0 && in->dst < ra->num_values)
-                is_alloca[in->dst] = 1;
-        }
-    }
     for (int v = 0; v < ra->num_values; v++) {
-        if (is_alloca && is_alloca[v]) continue;
         int r = ra->reg[v];
         if (r == REG_RBX) used[0] = 1;
         else if (r == REG_R12) used[1] = 1;
         else if (r == REG_R13) used[2] = 1;
     }
-    free(is_alloca);
 }
 
 /* mov [base+off], %reg  →  REX.W 89 [mod=01/10 reg=src rm=base] disp. */
@@ -4381,7 +4364,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
         /* ---- Prologue ---- */
         int cs_used[3];
-        collect_callee_saved(ra, fn, cs_used);
+        collect_callee_saved(ra, cs_used);
         int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
         curr_cs_count = cs_count;
         int cs_save_area = 8 * cs_count;  /* bytes occupied by callee-saved reg pushes */
@@ -5116,39 +5099,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
         }
-        for (size_t uj = 0; uj < fn->insts.len; uj++) {
-            if (skip_body[uj] || fused_skip[uj] || mask_nop[uj]) continue;
-            const IRInst *d = &fn->insts.data[uj];
-            int src_w = 0;
-            int want_u = 0;
-            if (d->op == IR_ZEXT) {
-                src_w = (int)d->imm;
-                want_u = 1;
-            } else if (d->op == IR_TRUNC && d->is_unsigned) {
-                src_w = d->width;
-                want_u = 1;
-            } else {
-                continue;
-            }
-            if (src_w != 4 || !want_u || d->a < 0 || d->a >= nvals_f)
-                continue;
-            IRValue src = d->a;
-            for (int depth = 0; depth < 4 && src >= 0 && src < nvals_f
-                 && ssa_def[src] >= 0; depth++) {
-                const IRInst *s = &fn->insts.data[ssa_def[src]];
-                if (s->op == IR_COPY) {
-                    src = s->a;
-                    continue;
-                }
-                if (((s->op == IR_LOAD || s->op == IR_LOAD_PTR) && s->width == 4)
-                    || ((s->op == IR_ADD || s->op == IR_SUB || s->op == IR_MUL
-                         || s->op == IR_BAND || s->op == IR_BOR || s->op == IR_BXOR
-                         || s->op == IR_SHL || s->op == IR_SHR)
-                        && s->width == 4))
-                    mask_nop[uj] = 1;
-                break;
-            }
-        }
+        /* Width-4 unsigned ZEXT/TRUNC-as-nop after 32-bit LOAD/ALU was
+         * removed: a width-4 IR producer does not guarantee the GP home is
+         * already zero-extended (e.g. prior SEXT/movsxd), and skipping
+         * mask_to_width left high bits set (fuzz seed 167 g6). */
         /* x = x + imm / x = x ^ y into a folded stack slot → addl/xorl mem. */
         char *mem_rmw = xmalloc(ninst_f ? ninst_f : 1);
         memset(mem_rmw, 0, ninst_f ? ninst_f : 1);
