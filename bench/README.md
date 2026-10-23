@@ -34,7 +34,20 @@ bench/
     ├── init.c      # designated initializers, compound literals
     ├── stmt.c      # statement expressions, typeof
     ├── vec.c       # integer vectors
-    └── i128.c      # __int128
+    ├── i128.c      # __int128
+    ├── complex.c   # _Complex float/double
+    ├── bitops.c    # __builtin_clz/ctz/popcount/ffs/bswap
+    ├── overflow.c  # __builtin_*_overflow
+    ├── flex.c      # flexible array members
+    ├── tls.c       # __thread TLS
+    ├── sync.c      # __sync_* atomics
+    ├── align.c     # aligned/packed structs, _Alignof
+    ├── ldouble.c   # long double (x87)
+    ├── fl_cvar.c   # fakelua-style CVar tagged union / SET_* / boxes
+    ├── fl_opcode.c # fakelua interp dense opcode switch
+    ├── fl_table.c  # fakelua VarTable quick/hash/array part
+    ├── fl_closure.c # fakelua VarClosure indirect call + upvalues
+    └── fl_spec.c   # fakelua specialized-table STRINGID switch / memcmp
 ```
 
 ```bash
@@ -56,6 +69,10 @@ Timing follows [Google Benchmark](https://github.com/google/benchmark)-style rep
 - Summaries report mean, median, sample standard deviation (divide by n−1), and coefficient of variation. CV above 5% is marked `noisy`; a median-ratio vs pairwise-median gap above 5% is marked `drift`; a 15-point preemption-fraction gap is marked `sched`.
 
 Each case mutates its own global data, so the function body cannot be re-looped inside one process (a second pass would measure already-filled tables). What is repeated is the whole process — the counterpart of `--benchmark_repetitions`.
+
+## Fakelua-inspired cases
+
+The `fl_*` cases distill patterns from [fakelua](https://github.com/esrrhs/fakelua)'s JIT C runtime header (`c_runtime_header.h`) and interpreter opcode layout, so future fakecc↔fakelua integration can stress similar control flow and data shapes: tagged-union `CVar`, dense opcode `switch`, table quick/hash paths, closure indirect calls, and specialized-table `STRINGID`/`memcmp` dispatch. They are freestanding microbenchmarks with no Lua runtime dependency.
 
 ## Results
 

@@ -208,7 +208,8 @@ void mem2reg_writeback(
         size_t term_idx = blk->end;
         if (blk->end > blk->start) {
             IROpcode last_op = fn->insts.data[blk->end - 1].op;
-            if (last_op == IR_BR || last_op == IR_CBR || last_op == IR_RETURN)
+            if (last_op == IR_BR || last_op == IR_CBR || last_op == IR_BR_TABLE
+                || last_op == IR_JMP_PTR || last_op == IR_RETURN)
                 term_idx = blk->end - 1;
         }
 

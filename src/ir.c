@@ -3121,6 +3121,92 @@ static int fold_const_float(const Expr *e, long double *out, const IRModule *ir)
 static IRValue lower_lvalue_addr(IRFunction *fn, IRSymTable *st, const Expr *e);
 static IRValue lower_sizeof_type(IRFunction *fn, IRSymTable *st, Type t, SourceLoc loc);
 
+/* Dense switch → jump table when the value span is small and mostly filled.
+ * call_args on IR_BR_TABLE hold label ids (not SSA).  Thresholds match the
+ * kind of table gcc -O0 emits for a 0..15 masked dense switch. */
+static int switch_emit_jump_table(IRFunction *fn, IRValue v, int vw,
+                                  SwitchCase *cases, int n, int default_lbl,
+                                  SourceLoc loc) {
+    if (n <= 0 || vw <= 0 || vw > 8) return 0;
+    int nd = 0;
+    for (int i = 0; i < n; i++)
+        if (!cases[i].is_default) nd++;
+    if (nd < 3) return 0;
+
+    int64_t min_v = 0, max_v = 0;
+    int have = 0;
+    int filled = 0;
+    for (int i = 0; i < n; i++) {
+        SwitchCase *arm = &cases[i];
+        if (arm->is_default) continue;
+        int64_t lo = arm->value;
+        int64_t hi = arm->is_range ? arm->high_value : arm->value;
+        if (hi < lo) { int64_t t = lo; lo = hi; hi = t; }
+        if (!arm->label_name) return 0;
+        if (hi - lo > 256) return 0;
+        if (!have) { min_v = lo; max_v = hi; have = 1; }
+        else {
+            if (lo < min_v) min_v = lo;
+            if (hi > max_v) max_v = hi;
+        }
+        filled += (int)(hi - lo + 1);
+    }
+    if (!have) return 0;
+    if (max_v < min_v) return 0;
+    /* span in int64; reject overflow / huge tables */
+    if (max_v - min_v > 255) return 0;
+    int span = (int)(max_v - min_v + 1);
+    if (span < 4 || span > 256) return 0;
+    if (filled * 2 < span) return 0; /* density < 50% */
+
+    int *table = xmalloc((size_t)span * sizeof(int));
+    for (int i = 0; i < span; i++) table[i] = default_lbl;
+    for (int i = 0; i < n; i++) {
+        SwitchCase *arm = &cases[i];
+        if (arm->is_default) continue;
+        int tgt = labelmap_find(g_ir_label_map, arm->label_name);
+        int64_t lo = arm->value;
+        int64_t hi = arm->is_range ? arm->high_value : arm->value;
+        if (hi < lo) { int64_t t = lo; lo = hi; hi = t; }
+        for (int64_t k = lo; k <= hi; k++)
+            table[(int)(k - min_v)] = tgt;
+    }
+
+    IRValue idx = v;
+    if (min_v != 0) {
+        IRValue cmin = new_value(fn);
+        emit_inst_w(fn, IR_CONST, cmin, -1, -1, min_v, vw, 1, loc);
+        idx = emit_bin_w(fn, IR_SUB, v, cmin, vw, 1, loc);
+    }
+    /* unsigned: idx > span-1 → default */
+    IRValue clim = new_value(fn);
+    emit_inst_w(fn, IR_CONST, clim, -1, -1, (int64_t)span - 1, vw, 1, loc);
+    IRValue too_big = emit_bin_w(fn, IR_GT, idx, clim, vw, 1, loc);
+    int Ldispatch = new_label(fn);
+    emit_cbr(fn, too_big, default_lbl, Ldispatch, loc);
+    emit_label(fn, Ldispatch, loc);
+
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.c = -1;
+    inst.d = -1;
+    inst.op = IR_BR_TABLE;
+    inst.dst = -1;
+    inst.a = idx;
+    inst.b = -1;
+    inst.imm = default_lbl;
+    inst.width = 0;
+    inst.loc = loc;
+    inst.call_callee = -1;
+    ir_call_reserve_args(&inst, span);
+    for (int i = 0; i < span; i++)
+        inst.call_args[i] = table[i];
+    ir_inst_array_push(&fn->insts, inst);
+    free(table);
+    return 1;
+}
+
+
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                        const FunctionDecl *cur_fd);
 
@@ -4543,29 +4629,86 @@ static int init_covers_object(const Type *ty, const Expr *e) {
             return ty->length > 0 && e->u.str.len >= ty->length;
         return 0;
     }
-    if (e->u.init_list.desig_kind) return 0;
     if (ty->kind == TY_ARRAY || ty->is_vector) {
-        if (!ty->elem_type || ty->length < 0) return 0;
+        if (!ty->elem_type || ty->length < 0 || ty->length > 4096) return 0;
         long long esz = type_size(*ty->elem_type);
         if (esz <= 0 || type_size(*ty) != esz * ty->length) return 0;
-        if (e->u.init_list.num_elements != ty->length) return 0;
-        for (int i = 0; i < ty->length; i++)
-            if (!init_covers_object(ty->elem_type, e->u.init_list.elements[i]))
+        /* Track which slots a designated (or positional) list writes.  A
+         * fully written aggregate needs no background zero at -O0. */
+        char *hit = calloc((size_t)ty->length, 1);
+        if (!hit) return 0;
+        int cur = 0;
+        int n = e->u.init_list.num_elements;
+        for (int i = 0; i < n; i++) {
+            int idx = cur;
+            if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+                idx = e->u.init_list.desig_index[i];
+                cur = idx + 1;
+            } else {
+                cur = idx + 1;
+            }
+            if (idx < 0 || idx >= ty->length || !e->u.init_list.elements[i]
+                || !init_covers_object(ty->elem_type, e->u.init_list.elements[i])) {
+                free(hit);
                 return 0;
+            }
+            hit[idx] = 1;
+        }
+        for (int i = 0; i < ty->length; i++) {
+            if (!hit[i]) { free(hit); return 0; }
+        }
+        free(hit);
         return 1;
     }
     const StructDef *sd = struct_registry_find_c(g_ir_structs, ty->tag);
-    if (!sd || sd->is_union || e->u.init_list.num_elements != sd->num_members)
+    if (!sd || sd->is_union || sd->num_members <= 0 || sd->num_members > 4096)
         return 0;
+    char *hit = calloc((size_t)sd->num_members, 1);
+    if (!hit) return 0;
+    int cur = 0;
+    int n = e->u.init_list.num_elements;
+    for (int i = 0; i < n; i++) {
+        int mi = -1;
+        if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 1
+            && e->u.init_list.desig_member[i]) {
+            for (int j = 0; j < sd->num_members; j++) {
+                if (sd->members[j].name
+                    && strcmp(sd->members[j].name, e->u.init_list.desig_member[i]) == 0) {
+                    mi = j;
+                    break;
+                }
+            }
+            cur = mi + 1;
+        } else if (e->u.init_list.desig_kind && e->u.init_list.desig_kind[i] == 0) {
+            mi = e->u.init_list.desig_index[i];
+            cur = mi + 1;
+        } else {
+            mi = cur++;
+        }
+        if (mi < 0 || mi >= sd->num_members || !e->u.init_list.elements[i]) {
+            free(hit);
+            return 0;
+        }
+        const StructMember *sm = &sd->members[mi];
+        if (sm->bit_width >= 0
+            || !init_covers_object(&sm->type, e->u.init_list.elements[i])) {
+            free(hit);
+            return 0;
+        }
+        hit[mi] = 1;
+    }
     long long expect = 0;
     for (int i = 0; i < sd->num_members; i++) {
         const StructMember *sm = &sd->members[i];
-        if (sm->bit_width >= 0 || sm->offset != expect) return 0;
+        if (!hit[i] || sm->bit_width >= 0 || sm->offset != expect) {
+            free(hit);
+            return 0;
+        }
         int sz = type_size(sm->type);
-        if (sz < 0) return 0;
-        if (!init_covers_object(&sm->type, e->u.init_list.elements[i])) return 0;
+        if (sz < 0) { free(hit); return 0; }
         expect += sz;
     }
+    free(hit);
     return expect == type_size(*ty);
 }
 
@@ -10863,6 +11006,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         if (s->u.label_s.stmt) lower_stmt(fn, st, s->u.label_s.stmt, cur_fd);
         break;
     }
+
     case ST_SWITCH: {
         /* Lowering (fall-through semantics):
          *   v = <cond>
@@ -10902,36 +11046,42 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 }
             }
 
-            for (int i = 0; i < n; i++) {
-                SwitchCase *arm = &s->u.switch_s.cases[i];
-                if (arm->is_default) continue;
-                int target_lbl = arm->label_name ? labelmap_find(g_ir_label_map, arm->label_name) : exit_label;
-                int next_check = new_label(fn);
-                if (is_i128) {
-                    int64_t arm_lo = arm->value;
-                    int64_t arm_hi = (arm_lo < 0 && !vu) ? -1LL : 0LL;
-                    IRValue eq_lo = emit_bin_w(fn, IR_EQ, vlo, i64imm(fn, arm_lo, s->loc), 8, 1, s->loc);
-                    IRValue eq_hi = emit_bin_w(fn, IR_EQ, vhi, i64imm(fn, arm_hi, s->loc), 8, 1, s->loc);
-                    IRValue eq = emit_bin_w(fn, IR_BAND, eq_lo, eq_hi, 4, 0, s->loc);
-                    emit_cbr(fn, eq, target_lbl, next_check, s->loc);
-                } else if (arm->is_range) {
-                    IRValue low_val = new_value(fn);
-                    emit_inst_w(fn, IR_CONST, low_val, -1, -1, arm->value, vw, vu, s->loc);
-                    IRValue high_val = new_value(fn);
-                    emit_inst_w(fn, IR_CONST, high_val, -1, -1, arm->high_value, vw, vu, s->loc);
-                    IRValue ge = emit_bin_w(fn, IR_GE, v, low_val, vw, vu, s->loc);
-                    IRValue le = emit_bin_w(fn, IR_LE, v, high_val, vw, vu, s->loc);
-                    IRValue in_range = emit_bin_w(fn, IR_BAND, ge, le, vw, vu, s->loc);
-                    emit_cbr(fn, in_range, target_lbl, next_check, s->loc);
-                } else {
-                    IRValue cmp_val = new_value(fn);
-                    emit_inst_w(fn, IR_CONST, cmp_val, -1, -1, arm->value, vw, vu, s->loc);
-                    IRValue eq = emit_bin_w(fn, IR_EQ, v, cmp_val, vw, vu, s->loc);
-                    emit_cbr(fn, eq, target_lbl, next_check, s->loc);
+            int used_jt = 0;
+            if (!is_i128)
+                used_jt = switch_emit_jump_table(fn, v, vw, s->u.switch_s.cases, n,
+                                                 fallthrough_label, s->loc);
+            if (!used_jt) {
+                for (int i = 0; i < n; i++) {
+                    SwitchCase *arm = &s->u.switch_s.cases[i];
+                    if (arm->is_default) continue;
+                    int target_lbl = arm->label_name ? labelmap_find(g_ir_label_map, arm->label_name) : exit_label;
+                    int next_check = new_label(fn);
+                    if (is_i128) {
+                        int64_t arm_lo = arm->value;
+                        int64_t arm_hi = (arm_lo < 0 && !vu) ? -1LL : 0LL;
+                        IRValue eq_lo = emit_bin_w(fn, IR_EQ, vlo, i64imm(fn, arm_lo, s->loc), 8, 1, s->loc);
+                        IRValue eq_hi = emit_bin_w(fn, IR_EQ, vhi, i64imm(fn, arm_hi, s->loc), 8, 1, s->loc);
+                        IRValue eq = emit_bin_w(fn, IR_BAND, eq_lo, eq_hi, 4, 0, s->loc);
+                        emit_cbr(fn, eq, target_lbl, next_check, s->loc);
+                    } else if (arm->is_range) {
+                        IRValue low_val = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, low_val, -1, -1, arm->value, vw, vu, s->loc);
+                        IRValue high_val = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, high_val, -1, -1, arm->high_value, vw, vu, s->loc);
+                        IRValue ge = emit_bin_w(fn, IR_GE, v, low_val, vw, vu, s->loc);
+                        IRValue le = emit_bin_w(fn, IR_LE, v, high_val, vw, vu, s->loc);
+                        IRValue in_range = emit_bin_w(fn, IR_BAND, ge, le, vw, vu, s->loc);
+                        emit_cbr(fn, in_range, target_lbl, next_check, s->loc);
+                    } else {
+                        IRValue cmp_val = new_value(fn);
+                        emit_inst_w(fn, IR_CONST, cmp_val, -1, -1, arm->value, vw, vu, s->loc);
+                        IRValue eq = emit_bin_w(fn, IR_EQ, v, cmp_val, vw, vu, s->loc);
+                        emit_cbr(fn, eq, target_lbl, next_check, s->loc);
+                    }
+                    emit_label(fn, next_check, s->loc);
                 }
-                emit_label(fn, next_check, s->loc);
+                emit_br(fn, fallthrough_label, s->loc);
             }
-            emit_br(fn, fallthrough_label, s->loc);
 
             push_loop(/*cont*/ exit_label, /*brk*/ exit_label);
             lower_stmt(fn, st, s->u.switch_s.body, cur_fd);
@@ -13092,7 +13242,8 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         int needs_ret = 1;
         if (irfn.insts.len > 0) {
             IROpcode last_op = irfn.insts.data[irfn.insts.len - 1].op;
-            if (last_op == IR_RETURN || last_op == IR_BR)
+            if (last_op == IR_RETURN || last_op == IR_BR
+                || last_op == IR_BR_TABLE || last_op == IR_JMP_PTR)
                 needs_ret = 0;
         }
         if (needs_ret) {

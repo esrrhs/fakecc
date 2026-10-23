@@ -5435,6 +5435,18 @@ static void emit_function(C64 *c, int fi) {
             a64_br_reg(a, r);
             break;
         }
+        case IR_BR_TABLE: {
+            /* Linear compare fallback (x86 emits a real jump table). */
+            int idx = load_op(c, s->a, -1);
+            int n = s->call_nargs;
+            for (int k = 0; k < n; k++) {
+                emit_mov_imm_w(a, A64_X16, k, 1);
+                a64_cmp_reg(a, idx, A64_X16, 1);
+                a64_bcond(a, A64_EQ, vlabels_get(c, s->call_args[k]));
+            }
+            a64_b(a, vlabels_get(c, (int)s->imm));
+            break;
+        }
         case IR_LADDR: {
             int d = dst_reg(c, s->dst);
             int lab = vlabels_get(c, (int)s->imm);
