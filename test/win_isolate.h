@@ -5,8 +5,11 @@
  * shows up as a flaky SIGSEGV in test_link (and would hit any other TU that
  * drives the shim hard).  Force -O0 for the rest of any translation unit that
  * includes this header. */
-#if defined(__GNUC__) && defined(_WIN32)
+#if defined(__GNUC__) && !defined(__clang__) && defined(_WIN32)
 #pragma GCC optimize ("O0")
+#elif defined(__clang__) && defined(_WIN32)
+/* Clang rejects #pragma GCC optimize under -Werror=unknown-pragmas. */
+#pragma clang optimize off
 #endif
 
 /* The POSIX unit tests fork so a crash in one case cannot kill the suite.
