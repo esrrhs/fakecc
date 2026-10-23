@@ -225,6 +225,9 @@ jobs:
             FUZZ_BIN="${FUZZ_BIN}.exe"
           fi
 
+          # Native Windows PE cannot write /tmp; prefer TEMP/TMP when TMPDIR unset.
+          export TMPDIR="${TMPDIR:-${TEMP:-${TMP:-.}}}"
+
           # -rss_limit_mb=0: libFuzzer's default 2 GB cap is reached by ASan
           # plus the growing corpus long before fakecc does anything wrong.
           # GHA shell is bash -eo pipefail: without set +e, a non-zero

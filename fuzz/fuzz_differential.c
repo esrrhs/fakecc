@@ -28,9 +28,20 @@ const char *__asan_default_options(void) {
     return "detect_leaks=0";
 }
 
-static void tmp_path(char *buf, size_t n, const char *suffix) {
+/* Resolve a writable temp dir: TMPDIR, TEMP, TMP, else cwd.
+ * Native Windows PE cannot write /tmp/... via Win32 fopen. */
+static const char *fuzz_tmpdir(void) {
     const char *tmp = getenv("TMPDIR");
-    snprintf(buf, n, "%s/fakecc_fdiff_%ld%s", tmp && tmp[0] ? tmp : "/tmp",
+    if (tmp && tmp[0]) return tmp;
+    tmp = getenv("TEMP");
+    if (tmp && tmp[0]) return tmp;
+    tmp = getenv("TMP");
+    if (tmp && tmp[0]) return tmp;
+    return ".";
+}
+
+static void tmp_path(char *buf, size_t n, const char *suffix) {
+    snprintf(buf, n, "%s/fakecc_fdiff_%ld%s", fuzz_tmpdir(),
              (long)getpid(), suffix);
 }
 
