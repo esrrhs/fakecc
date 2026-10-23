@@ -6232,9 +6232,24 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * re-masking — so `(unsigned)wide64 == 1` compared false
                  * whenever the discarded half was non-zero.
                  *
-                 * Same-width unsigned→signed retag ((int)(u & mask)) still
-                 * hits this path; if the source is a non-negative masked AND,
-                 * zero-extend (movl) instead of movsxd (gcc -O0). */
+                 * Same-width signedness retag ((int)u / (unsigned)i): bits are
+                 * unchanged.  Remasking with movsxd would only matter for a
+                 * later 64-bit use; 32-bit ALU (gcc -O0 shape) does not care,
+                 * and the movsxd shows up hot in init/switch benches. */
+                if ((int)inst->imm == inst->width) {
+                    if (ra && inst->a >= 0 && inst->a < ra->num_values &&
+                        inst->dst >= 0 && inst->dst < ra->num_values &&
+                        ra->reg[inst->dst] == ra->reg[inst->a] &&
+                        ra->reg[inst->dst] >= 0)
+                        break;
+                    if (dr >= 0)
+                        ensure_reg(&out->text, inst->a, dr, ra);
+                    else {
+                        ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    }
+                    break;
+                }
                 int trunc_u = inst->is_unsigned;
                 int trunc_nop = mask_nop[j];
                 if (!trunc_u && inst->width == 4 && inst->a >= 0
@@ -6515,6 +6530,45 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 emit_byte(&out->text, 0x41);
                 emit_byte(&out->text, 0xFF);
                 emit_byte(&out->text, 0xE3);  /* ModRM: mod=11 reg=4(/4) rm=011 → 11100011 = 0xE3 */
+                break;
+            }
+
+            case IR_BR_TABLE: {
+                /* Dense switch: bounds already checked.  Emit
+                 *   lea rdx, table(%rip)
+                 *   movsxd rax, [rdx+rax*4]
+                 *   add rax, rdx
+                 *   jmp *rax
+                 * followed by rel32 offsets (label - table). */
+                int n = inst->call_nargs;
+                if (n <= 0 || !inst->call_args) {
+                    size_t patch = emit_jmp_rel32(&out->text);
+                    size_t after = out->text.len;
+                    ADD_PATCH(patch, inst->imm, after);
+                    break;
+                }
+                /* Index in %rax, zero-extended (table SIB uses 64-bit index). */
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_movzx_rr(&out->text, REG_RAX, REG_RAX, 4);
+                size_t lea_patch = emit_lea_rip(&out->text, REG_RDX);
+                /* movsxd rax, dword ptr [rdx+rax*4] */
+                emit_rex_if(&out->text, 1, REG_RAX, REG_RAX, REG_RDX);
+                emit_byte(&out->text, 0x63); /* movsxd */
+                emit_modrm_sib_disp(&out->text, REG_RAX, REG_RDX, REG_RAX, 2, 0);
+                emit_add_rr(&out->text, REG_RAX, REG_RDX);
+                /* jmp *rax */
+                emit_byte(&out->text, 0xFF);
+                emit_modrm(&out->text, 3, 4, REG_RAX);
+                /* Align table to 4 bytes. */
+                while (out->text.len & 3)
+                    emit_byte(&out->text, 0x90);
+                size_t table_off = out->text.len;
+                patch_rel32(&out->text, lea_patch, table_off);
+                for (int k = 0; k < n; k++) {
+                    size_t e = out->text.len;
+                    emit_int32(&out->text, 0);
+                    ADD_PATCH(e, inst->call_args[k], table_off);
+                }
                 break;
             }
 
@@ -6960,9 +7014,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 } else if (af_kind == AF_RBP_IDX) {
                     int idx_r = af_idx >= 0
                                 ? ensure_index(&out->text, af_idx, ra) : -1;
-                    int val_r = REG_RAX;
-                    if (idx_r == val_r) val_r = REG_RDX;
-                    ensure_reg(&out->text, inst->b, val_r, ra);
+                    int bhome = gp_home(ra, inst->b);
+                    int val_r;
+                    if (bhome >= 0 && bhome != REG_RSP && bhome != idx_r)
+                        val_r = bhome;
+                    else {
+                        val_r = REG_RAX;
+                        if (idx_r == val_r) val_r = REG_RDX;
+                        ensure_reg(&out->text, inst->b, val_r, ra);
+                    }
                     if (af_idx >= 0)
                         emit_store_sib(&out->text, REG_RBP, idx_r, af_sc, af_disp,
                                        val_r, inst->width);
@@ -7087,8 +7147,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_module_add_reloc(out, patch, R_X86_64_PC32,
                                           rip_sym, -4);
                 } else {
-                    int val_r = (ptr_r == REG_RAX) ? REG_RDX : REG_RAX;
-                    ensure_reg(&out->text, inst->b, val_r, ra);
+                    /* Prefer the value's GP home so `add; mov home; store`
+                     * does not bounce through %rax (init hot loop). */
+                    int bhome = gp_home(ra, inst->b);
+                    int val_r;
+                    if (folded && bhome >= 0 && bhome != REG_RSP)
+                        val_r = bhome;
+                    else {
+                        val_r = (ptr_r == REG_RAX) ? REG_RDX : REG_RAX;
+                        ensure_reg(&out->text, inst->b, val_r, ra);
+                    }
                     if (folded)
                         emit_store_disp(&out->text, REG_RBP, val_r, ptr_off,
                                         inst->width);
@@ -9009,7 +9077,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             needs_ret = 1;
         } else {
             IROpcode last = fn->insts.data[fn->insts.len - 1].op;
-            if (last != IR_RETURN && last != IR_BR && last != IR_CBR)
+            if (last != IR_RETURN && last != IR_BR && last != IR_CBR
+                && last != IR_BR_TABLE && last != IR_JMP_PTR)
                 needs_ret = 1;
         }
         if (needs_ret)

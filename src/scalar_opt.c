@@ -93,7 +93,8 @@ static int inst_has_side_effect(const IRInst *inst) {
     if (inst->is_volatile) return 1;
     IROpcode op = inst->op;
     return op == IR_RETURN || op == IR_STORE || op == IR_STORE_PTR ||
-           op == IR_BR || op == IR_CBR || op == IR_LABEL ||
+           op == IR_BR || op == IR_CBR || op == IR_BR_TABLE ||
+           op == IR_JMP_PTR || op == IR_LABEL ||
            op == IR_ALLOCA || op == IR_CALL || op == IR_PARAM ||
            op == IR_VADD || op == IR_VSUB || op == IR_VMUL || op == IR_VDIV ||
            op == IR_VBAND || op == IR_VBOR || op == IR_VBXOR;

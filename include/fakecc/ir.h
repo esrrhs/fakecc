@@ -65,6 +65,10 @@ typedef enum {
     IR_LABEL,       /* imm = label_id — basic-block marker */
     IR_BR,          /* imm = target_label — unconditional branch */
     IR_CBR,         /* a = cond, imm = true_label, b = false_label — conditional branch */
+    IR_BR_TABLE,    /* a = index (0-based), imm = default_label;
+                     * call_nargs = table length; call_args[i] = label id for
+                     * index i (not SSA values — do not renumber).  Dense
+                     * switch lowering. */
     IR_PARAM,       /* dst = incoming param; imm = param_index (0..5) */
     IR_CALL,        /* dst = callee(call.args[0..nargs-1]); callee name in call.name */
     IR_RETURN,      /* return a */
