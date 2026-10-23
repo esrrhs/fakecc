@@ -437,9 +437,47 @@ static void test_packed_member_align(void) {
     tu_free(&tu);
 }
 
+/* Regression: multiple declarators in one declaration used to shallow-copy
+ * the Type into prepend, causing shared ownership of Type::pointee and a
+ * heap-use-after-free on the second stmt_free.  Fixed by cloning the type. */
+static void test_multi_declarator_no_uaf(void) {
+    /* Simple case: two pointer declarators */
+    TranslationUnit tu = lex_parse(
+        "package main;\n"
+        "int main() {\n"
+        "    int *y, *z;\n"
+        "    return 0;\n"
+        "}\n"
+    );
+    tu_free(&tu);
+
+    /* Multiple redeclarations (fuzzer crash input simplified) */
+    TranslationUnit tu2 = lex_parse(
+        "package main;\n"
+        "int main() {\n"
+        "    int *a;\n"
+        "    int *a;\n"
+        "    int *a;\n"
+        "    return 0;\n"
+        "}\n"
+    );
+    tu_free(&tu2);
+
+    /* Three declarators */
+    TranslationUnit tu3 = lex_parse(
+        "package main;\n"
+        "int main() {\n"
+        "    int *a, *b, *c;\n"
+        "    return 0;\n"
+        "}\n"
+    );
+    tu_free(&tu3);
+}
+
 /* ---- main ---- */
 
 int main(void) {
+    test_multi_declarator_no_uaf();
     test_packed_member_align();
     test_valid_program();
     test_return_zero();
