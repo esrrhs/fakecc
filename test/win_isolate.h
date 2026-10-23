@@ -1,5 +1,14 @@
 #ifndef FAKECC_WIN_ISOLATE_H
 #define FAKECC_WIN_ISOLATE_H
+/* The setjmp-based fork()/execl() shim below is not safe under GCC -O2 on
+ * MinGW: the register allocator reuses clobbered locals across longjmp, which
+ * shows up as a flaky SIGSEGV in test_link (and would hit any other TU that
+ * drives the shim hard).  Force -O0 for the rest of any translation unit that
+ * includes this header. */
+#if defined(__GNUC__) && defined(_WIN32)
+#pragma GCC optimize ("O0")
+#endif
+
 /* The POSIX unit tests fork so a crash in one case cannot kill the suite.
  * MinGW has no fork.  The child block runs in this process.  exit() inside
  * the linked compiler is redirected with -Wl,--wrap=exit to the wrapper
