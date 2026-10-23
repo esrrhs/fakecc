@@ -40,7 +40,12 @@ bench/
     ├── tls.c       # __thread TLS
     ├── sync.c      # __sync_* 原子操作
     ├── align.c     # aligned/packed、_Alignof
-    └── ldouble.c   # long double（x87）
+    ├── ldouble.c   # long double（x87）
+    ├── fl_cvar.c   # fakelua 风格 CVar 标签联合 / SET_* / boxes
+    ├── fl_opcode.c # fakelua 解释器稠密 opcode switch
+    ├── fl_table.c  # fakelua VarTable quick/hash/数组部分
+    ├── fl_closure.c # fakelua VarClosure 间接调用 + upvalue
+    └── fl_spec.c   # fakelua 特化表 STRINGID switch / memcmp
 ```
 
 ```bash
@@ -62,6 +67,10 @@ bash bench/run_bench.sh v0/fakecc-1
 - 汇总是 mean、median、样本标准差（除以 n−1）和变异系数。变异系数超过 5% 标 `noisy`；中位数之比和逐对比值的中位数差超过 5% 标 `drift`；两边被抢占的比例差出 15 个百分点标 `sched`。
 
 每个 case 会改自己的全局数据，所以不能在进程里把函数体再循环一遍（第二遍测到的是已经被填满的表）。重复的是整个进程，对应 `--benchmark_repetitions`。
+
+## fakelua 风格 case
+
+`fl_*` 一组从 [fakelua](https://github.com/esrrhs/fakelua) 的 JIT C 运行时头（`c_runtime_header.h`）和解释器 opcode 布局提炼而来，供日后把 fakecc 嵌进 fakelua 时压测相近控制流与数据结构：标签联合 `CVar`、稠密 opcode `switch`、表 quick/hash 路径、闭包间接调用、特化表 `STRINGID`/`memcmp` 分发。它们是自包含微基准，不链接 Lua 运行时。
 
 ## 运行结果
 
