@@ -15,8 +15,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 #include <unistd.h>
+#ifdef _WIN32
+/* MinGW has no <sys/wait.h>; system() returns the process exit code directly. */
+#  define WIFEXITED(s)   (1)
+#  define WEXITSTATUS(s) (s)
+#else
+#  include <sys/wait.h>
+#endif
 
 const char *__asan_default_options(void) {
     return "detect_leaks=0";

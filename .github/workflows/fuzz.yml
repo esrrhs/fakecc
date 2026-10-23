@@ -156,3 +156,105 @@ jobs:
             build_fuzz/timeout-*
             build_fuzz/fuzz_${{ matrix.target }}.log
           if-no-files-found: ignore
+
+  # Windows x64 libFuzzer: same two targets as Linux/macOS.  ASan + fuzzer
+  # runtimes live in CLANG64 compiler-rt; MINGW64 lacks ASan (see ci.yml).
+  # The clang windows-gnu driver rejects -fsanitize=fuzzer, so build_fuzz.sh
+  # falls back to sanitize-coverage + an explicit fuzzer archive link.
+  fuzz-windows:
+    name: libFuzzer · ${{ matrix.target }} (windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_compile, fuzz_differential]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSYS2 CLANG64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          pacboy: clang:p compiler-rt:p cmake:p ninja:p
+          # Real MinGW gcc for fuzz_differential's oracle (not clang64 gcc-compat).
+          install: mingw-w64-x86_64-gcc
+
+      - name: Build fuzz target
+        run: |
+          # CLANG64 PATH omits /mingw64/bin; differential needs real MinGW gcc.
+          export PATH="$PATH:/mingw64/bin"
+          CLANG=clang bash fuzz/build_fuzz.sh
+
+      - name: Run fuzz (${{ matrix.target }})
+        timeout-minutes: 70
+        run: |
+          set -x
+          export PATH="$PATH:/mingw64/bin"
+          cd build_fuzz
+
+          # PR: quick smoke; push to master: 10 min; weekly: 60 min
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            DURATION=60
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            DURATION=${{ github.event.inputs.duration }}
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            DURATION=3600
+          else
+            DURATION=600
+          fi
+          echo "Fuzzing ${{ matrix.target }} for ${DURATION}s..."
+
+          case "${{ matrix.target }}" in
+            fuzz_compile)      CORPUS=corpus/compile; MAXLEN=4096 ;;
+            fuzz_differential) CORPUS=corpus/differential; MAXLEN=2048 ;;
+          esac
+
+          FUZZ_BIN=./bin/${{ matrix.target }}
+          if [ ! -x "$FUZZ_BIN" ] && [ -x "${FUZZ_BIN}.exe" ]; then
+            FUZZ_BIN="${FUZZ_BIN}.exe"
+          fi
+
+          # -rss_limit_mb=0: libFuzzer's default 2 GB cap is reached by ASan
+          # plus the growing corpus long before fakecc does anything wrong.
+          ASAN_OPTIONS=detect_leaks=0 \
+          UBSAN_OPTIONS=print_stacktrace=1 \
+          "$FUZZ_BIN" \
+            "$CORPUS" \
+            -dict=../fuzz/c_keywords.dict \
+            -max_len=${MAXLEN} \
+            -max_total_time=${DURATION} \
+            -error_exitcode=1 \
+            -timeout_exitcode=70 \
+            -rss_limit_mb=0 \
+            -print_final_stats=1 \
+            2>&1 | tee fuzz_${{ matrix.target }}.log
+
+          # 0 = budget exhausted, 1 = bug found, 70 = slow unit (non-fatal)
+          FUZZ_EXIT=${PIPESTATUS[0]}
+          if grep -q "ERROR: libFuzzer: fuzz target exited" "fuzz_${{ matrix.target }}.log"; then
+            echo "::warning::${{ matrix.target }}: fakecc called exit() on an out-of-memory input (non-fatal)"
+          elif [ ${FUZZ_EXIT} -eq 70 ]; then
+            echo "::warning::${{ matrix.target }} hit a per-input timeout, treating as non-fatal"
+          elif [ ${FUZZ_EXIT} -ne 0 ]; then
+            echo "::error::${{ matrix.target }} found a bug (exit ${FUZZ_EXIT})!"
+            exit 1
+          fi
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          # Explicit Windows in the name so it cannot collide with Linux/macOS.
+          name: crash-${{ matrix.target }}-Windows-${{ github.run_id }}
+          path: |
+            build_fuzz/crash-*
+            build_fuzz/oom-*
+            build_fuzz/timeout-*
+            build_fuzz/fuzz_${{ matrix.target }}.log
+          if-no-files-found: ignore

@@ -339,6 +339,7 @@ jobs:
             cxx: g++
             cflags: ""
             cov: true
+            cov_flag: windows
             ctest_args: "-E difftest"
             pacboy: gcc:p cmake:p ninja:p gdb:p lcov:p
             install: ""
@@ -410,6 +411,17 @@ jobs:
           lcov --directory ./ --capture --output-file coverage.info --ignore-errors source
           ls -l coverage.info
           lcov --list coverage.info
+
+      # Mirror the Linux/macOS Codecov upload.  This step is a JS action, so it
+      # does not use the job's msys2 shell default; no shell: override needed.
+      - name: Upload coverage reports to Codecov
+        if: matrix.config.cov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/coverage.info
+          flags: ${{ matrix.config.cov_flag }}
+          fail_ci_if_error: true
 
   # Random programs, same seed count as Linux.  MinGW gcc is the oracle;
   # clang is installed so an order-sensitive seed is AMBIG rather than FAIL.
