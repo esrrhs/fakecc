@@ -116,6 +116,10 @@ jobs:
 
           # -rss_limit_mb=0: libFuzzer's default 2 GB cap is reached by ASan
           # plus the growing corpus long before fakecc does anything wrong.
+          # GHA shell is bash -eo pipefail: without set +e, a non-zero
+          # fuzzer exit (e.g. fakecc calling exit()) aborts before FUZZ_EXIT
+          # / grep handling can treat "fuzz target exited" as non-fatal.
+          set +e
           ASAN_OPTIONS=detect_leaks=0 \
           UBSAN_OPTIONS=print_stacktrace=1 \
           ./bin/${{ matrix.target }} \
@@ -128,9 +132,10 @@ jobs:
             -rss_limit_mb=0 \
             -print_final_stats=1 \
             2>&1 | tee fuzz_${{ matrix.target }}.log
+          FUZZ_EXIT=${PIPESTATUS[0]}
+          set -e
 
           # 0 = budget exhausted, 1 = bug found, 70 = slow unit (non-fatal)
-          FUZZ_EXIT=${PIPESTATUS[0]}
           if grep -q "ERROR: libFuzzer: fuzz target exited" "fuzz_${{ matrix.target }}.log"; then
             # fakecc reports allocation failure by calling exit(1), which kills
             # any process embedding it.  That is not something a fuzzer run can
@@ -222,6 +227,10 @@ jobs:
 
           # -rss_limit_mb=0: libFuzzer's default 2 GB cap is reached by ASan
           # plus the growing corpus long before fakecc does anything wrong.
+          # GHA shell is bash -eo pipefail: without set +e, a non-zero
+          # fuzzer exit (e.g. fakecc calling exit()) aborts before FUZZ_EXIT
+          # / grep handling can treat "fuzz target exited" as non-fatal.
+          set +e
           ASAN_OPTIONS=detect_leaks=0 \
           UBSAN_OPTIONS=print_stacktrace=1 \
           "$FUZZ_BIN" \
@@ -234,9 +243,10 @@ jobs:
             -rss_limit_mb=0 \
             -print_final_stats=1 \
             2>&1 | tee fuzz_${{ matrix.target }}.log
+          FUZZ_EXIT=${PIPESTATUS[0]}
+          set -e
 
           # 0 = budget exhausted, 1 = bug found, 70 = slow unit (non-fatal)
-          FUZZ_EXIT=${PIPESTATUS[0]}
           if grep -q "ERROR: libFuzzer: fuzz target exited" "fuzz_${{ matrix.target }}.log"; then
             echo "::warning::${{ matrix.target }}: fakecc called exit() on an out-of-memory input (non-fatal)"
           elif [ ${FUZZ_EXIT} -eq 70 ]; then

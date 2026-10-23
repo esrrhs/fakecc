@@ -100,7 +100,7 @@ for t in fuzz_compile fuzz_differential; do
         -I"$ROOT/include" -I"$ROOT/src" \
         $FUZZ_LINK_CFLAGS \
         "$ROOT/fuzz/$t.c" "$BUILD/libfakecc.a" \
-        "${FUZZ_EXTRA_LIBS[@]}" \
+        ${FUZZ_EXTRA_LIBS[@]+"${FUZZ_EXTRA_LIBS[@]}"} \
         -o "$OUT"
     # MinGW clang appends .exe when -o has no extension.
     if [ ! -e "$OUT" ] && [ -e "${OUT}.exe" ]; then
