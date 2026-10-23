@@ -4084,13 +4084,15 @@ static Stmt parse_stmt_impl(Parser *p) {
         expect_kind(p, TK_SEMICOLON, "';'");
         type_free(&base);
         /* A stmt slot holds one declaration.  data[0]'s ownership passes back
-         * to the caller; the trailing declarators' ownership moves (shallow
-         * copy) into the prepend queue so they land in the same scope.  No
-         * element's heap fields are freed here — they all live on, either in
-         * the returned stmt or in prepend — only the array buffer is freed. */
+         * to the caller; the trailing declarators' ownership moves into the
+         * prepend queue so they land in the same scope.  Clone each type to
+         * avoid shared ownership of pointee/elem_type/func_ret between stmts. */
         Stmt first = decls.data[0];
-        for (size_t i = 1; i < decls.len; i++)
-            stmt_array_push(&p->prepend, decls.data[i]);
+        for (size_t i = 1; i < decls.len; i++) {
+            Stmt s = decls.data[i];
+            s.u.decl.type = type_clone(s.u.decl.type);
+            stmt_array_push(&p->prepend, s);
+        }
         free(decls.data);
         return first;
     }
