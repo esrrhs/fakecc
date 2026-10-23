@@ -91,7 +91,8 @@ void cfg_build(CFG *g, const IRInstArray *insts) {
             continue;
         }
         cur->end = i + 1;
-        if (inst->op == IR_BR || inst->op == IR_CBR || inst->op == IR_RETURN) {
+        if (inst->op == IR_BR || inst->op == IR_CBR || inst->op == IR_BR_TABLE
+            || inst->op == IR_JMP_PTR || inst->op == IR_RETURN) {
             /* Terminator ends the block */
             if (i + 1 < insts->len) {
                 cur = cfg_new_block(g, i + 1);
@@ -123,6 +124,19 @@ void cfg_build(CFG *g, const IRInstArray *insts) {
             if (f >= 0) cfg_link(g, (int)bi, f);
             break;
         }
+        case IR_BR_TABLE: {
+            int d = cfg_find_label(g, last->imm);
+            if (d >= 0) cfg_link(g, (int)bi, d);
+            for (int k = 0; k < last->call_nargs; k++) {
+                int t = cfg_find_label(g, last->call_args[k]);
+                if (t >= 0) cfg_link(g, (int)bi, t);
+            }
+            break;
+        }
+        case IR_JMP_PTR:
+            /* Indirect: successors unknown; conservatively keep fall-through
+             * unused.  Computed-goto targets are still reachable via labels. */
+            break;
         case IR_RETURN:
             /* No successor */
             break;
