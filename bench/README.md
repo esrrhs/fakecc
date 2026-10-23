@@ -34,7 +34,15 @@ bench/
     ├── init.c      # designated initializers, compound literals
     ├── stmt.c      # statement expressions, typeof
     ├── vec.c       # integer vectors
-    └── i128.c      # __int128
+    ├── i128.c      # __int128
+    ├── complex.c   # _Complex float/double
+    ├── bitops.c    # __builtin_clz/ctz/popcount/ffs/bswap
+    ├── overflow.c  # __builtin_*_overflow
+    ├── flex.c      # flexible array members
+    ├── tls.c       # __thread TLS
+    ├── sync.c      # __sync_* atomics
+    ├── align.c     # aligned/packed structs, _Alignof
+    └── ldouble.c   # long double (x87)
 ```
 
 ```bash
