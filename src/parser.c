@@ -49,6 +49,7 @@ typedef struct {
     ParserLocalArray locals;
     int scope_depth;
     int stmt_depth;
+    int expr_depth;
 } Parser;
 
 /* Recursive descent has no depth limit of its own: a few hundred nested
@@ -56,6 +57,7 @@ typedef struct {
  * which under ASan happens around 500 levels.  Nothing real comes close —
  * the deepest file in the test suite nests 15 — so diagnose instead. */
 #define MAX_STMT_DEPTH 256
+#define MAX_EXPR_DEPTH 512
 
 static const Token *synthesized_eof(void) {
     static Token eof_tok;
@@ -2373,17 +2375,29 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
 /* unary-expr = ("+"|"-"|"&"|"*"|"~") unary-expr | sizeof unary-or-type | primary { postfix } */
 static Expr *parse_unary(Parser *p) {
     if (fakecc_had_error()) return NULL;
+    
+    /* Guard against unbounded recursion in deeply nested unary chains. */
+    if (p->expr_depth >= MAX_EXPR_DEPTH) {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "expression nesting level exceeded maximum of %d", MAX_EXPR_DEPTH);
+        return NULL;
+    }
+    p->expr_depth++;
+    
     TokenKind k = peek(p)->kind;
     if (k == TK_KW_REAL) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
         Expr *op = parse_unary(p);
+        p->expr_depth--;
         return expr_new_member(op, "__real", loc);
     }
     if (k == TK_KW_IMAG) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
         Expr *op = parse_unary(p);
+        p->expr_depth--;
         return expr_new_member(op, "__imag", loc);
     }
     if (k == TK_PLUS || k == TK_MINUS) {
@@ -2391,23 +2405,30 @@ static Expr *parse_unary(Parser *p) {
         advance(p);
         Expr *operand = parse_unary(p);
         UnaryOp op = (k == TK_MINUS) ? UOP_NEG : UOP_POS;
+        p->expr_depth--;
         return expr_new_unary(op, operand, loc);
     }
     if (k == TK_TILDE) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
-        return expr_new_unary(UOP_BITNOT, parse_unary(p), loc);
+        Expr *operand = parse_unary(p);
+        p->expr_depth--;
+        return expr_new_unary(UOP_BITNOT, operand, loc);
     }
     if (k == TK_NOT) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
-        return expr_new_unary(UOP_NOT, parse_unary(p), loc);
+        Expr *operand = parse_unary(p);
+        p->expr_depth--;
+        return expr_new_unary(UOP_NOT, operand, loc);
     }
     if (k == TK_INC || k == TK_DEC) {
         SourceLoc loc = peek(p)->loc;
         int is_inc = (k == TK_INC);
         advance(p);
-        return expr_new_inc_dec(parse_unary(p), is_inc, 1 /* prefix */, loc);
+        Expr *operand = parse_unary(p);
+        p->expr_depth--;
+        return expr_new_inc_dec(operand, is_inc, 1 /* prefix */, loc);
     }
     if (k == TK_ANDAND) {
         SourceLoc loc = peek(p)->loc;
@@ -2416,24 +2437,32 @@ static Expr *parse_unary(Parser *p) {
         if (!is_name_token(lbl->kind)) {
             die_at(lbl->loc.file, lbl->loc.line, lbl->loc.col,
                    "expected label name after '&&' but got '%s'", lbl->text ? lbl->text : "NULL");
+            p->expr_depth--;
             return NULL;
         }
         advance(p);
+        p->expr_depth--;
         return expr_new_label_addr(lbl->text, loc);
     }
     if (k == TK_KW_INLINE || (k == TK_IDENT && (strcmp(peek(p)->text, "__extension__") == 0 || strcmp(peek(p)->text, "__extension") == 0))) {
         advance(p);
-        return parse_unary(p);
+        Expr *result = parse_unary(p);
+        p->expr_depth--;
+        return result;
     }
     if (k == TK_AMP) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
-        return expr_new_addr(parse_unary(p), loc);
+        Expr *operand = parse_unary(p);
+        p->expr_depth--;
+        return expr_new_addr(operand, loc);
     }
     if (k == TK_STAR) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
-        return expr_new_deref(parse_unary(p), loc);
+        Expr *operand = parse_unary(p);
+        p->expr_depth--;
+        return expr_new_deref(operand, loc);
     }
     if (k == TK_KW_SIZEOF) {
         SourceLoc loc = peek(p)->loc;
@@ -2449,13 +2478,18 @@ static Expr *parse_unary(Parser *p) {
                 Expr *init = parse_init_list(p);
                 Expr *cl = expr_new_compound_literal(t, init, loc);
                 type_free(&t);
-                return expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+                Expr *result = expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+                p->expr_depth--;
+                return result;
             }
             Expr *e = expr_new_sizeof_type(t, loc);
             type_free(&t);
+            p->expr_depth--;
             return e;
         }
-        return expr_new_sizeof_expr(parse_unary(p), loc);
+        Expr *operand = parse_unary(p);
+        p->expr_depth--;
+        return expr_new_sizeof_expr(operand, loc);
     }
     if (k == TK_KW_ALIGNOF) {
         SourceLoc loc = peek(p)->loc;
@@ -2466,6 +2500,7 @@ static Expr *parse_unary(Parser *p) {
             {
                 die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                    "expected '(' after '_Alignof'");
+                p->expr_depth--;
                 return NULL;
             }
         advance(p);
@@ -2474,10 +2509,12 @@ static Expr *parse_unary(Parser *p) {
             expect_kind(p, TK_RPAREN, "')'");
             Expr *e = expr_new_alignof_type(t, loc);
             type_free(&t);
+            p->expr_depth--;
             return e;
         }
         Expr *sub = parse_expr(p);
         expect_kind(p, TK_RPAREN, "')'");
+        p->expr_depth--;
         return expr_new_alignof_expr(sub, loc);
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_types_compatible_p") == 0) {
@@ -2491,6 +2528,7 @@ static Expr *parse_unary(Parser *p) {
         int compat = types_compatible_unqual(&t1, &t2);
         type_free(&t1);
         type_free(&t2);
+        p->expr_depth--;
         return expr_new_int(compat ? 1 : 0, loc);
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_constant_p") == 0) {
@@ -2503,6 +2541,7 @@ static Expr *parse_unary(Parser *p) {
         int is_const = arg && (fold_const_int(arg, &v) ||
                                arg->kind == EX_STR || arg->kind == EX_FLOAT_LIT);
         expr_free(arg);
+        p->expr_depth--;
         return expr_new_int(is_const ? 1 : 0, loc);
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_choose_expr") == 0) {
@@ -2524,6 +2563,7 @@ static Expr *parse_unary(Parser *p) {
             expr_free(cond);
             expr_free(then);
             expr_free(else_);
+            p->expr_depth--;
             return NULL;
         }
         long long v;
@@ -2533,14 +2573,17 @@ static Expr *parse_unary(Parser *p) {
             || !fold_const_int(cond, &v)) {
             die_at(cond->loc.file, cond->loc.line, cond->loc.col,
                    "first argument to '__builtin_choose_expr' not a constant");
+            p->expr_depth--;
             return NULL;
         }
         expr_free(cond);
         if (v != 0) {
             expr_free(else_);
+            p->expr_depth--;
             return then;
         } else {
             expr_free(then);
+            p->expr_depth--;
             return else_;
         }
     }
@@ -2569,6 +2612,7 @@ static Expr *parse_unary(Parser *p) {
                         } else {
                             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                                    "no member named '%s'", mname);
+                            p->expr_depth--;
                             return NULL;
                         }
                     }
@@ -2602,8 +2646,10 @@ static Expr *parse_unary(Parser *p) {
         expect_kind(p, TK_RPAREN, "')'");
         type_free(&cur_type);
         type_free(&t);
+        p->expr_depth--;
         return expr_new_int(offset, loc);
     }
+    p->expr_depth--;
     return parse_primary(p);
 }
 
@@ -5396,6 +5442,7 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
     p.locals.cap = 0;
     p.scope_depth = 0;
     p.stmt_depth = 0;
+    p.expr_depth = 0;
 
     g_parser_tu = tu;
     /* must start with package declaration */
