@@ -179,6 +179,7 @@ difftest_one() {
         echo '#ifndef __LONG_MIN__'
         echo '#define __LONG_MIN__ (-9223372036854775807ll - 1ll)'
         echo '#endif'
+        ORACLE_STRIP_JMPBUF=0
         if grep -qE '\b(va_(list|start|arg|end|copy)|__builtin_va_(list|start|arg|end|copy))\b' \
                "$WORK/$name.prep.c"; then
             echo '#include <stdarg.h>'
@@ -216,11 +217,15 @@ static long long fakecc_oracle_syscall(long long n, long long a, long long b, lo
 #endif
 EOF
                 fi
-                # Do not #include <setjmp.h> when the case declares a variable
-                # named jmp_buf (e.g. pr60003's buffer for __builtin_setjmp).
-                # MinGW's typedef jmp_buf would collide.  __builtin_setjmp /
-                # __builtin_longjmp need no header; typedef jmp_buf lines are
-                # stripped from the body below.
+                # Libc setjmp/longjmp need <setjmp.h> and a real-sized jmp_buf.
+                # Skip when a variable is named jmp_buf (pr60003's buffer for
+                # __builtin_setjmp) -- MinGW's typedef would collide.
+                # __builtin_setjmp / __builtin_longjmp need no header.
+                if grep -qE '(^|[^_[:alnum:]])(setjmp|longjmp)[[:space:]]*\(' "$WORK/$name.prep.c" \
+                    && ! grep -vE 'typedef|extern' "$WORK/$name.prep.c" | grep -qE '\bjmp_buf[[:space:]]*\['; then
+                    echo '#include <setjmp.h>'
+                    ORACLE_STRIP_JMPBUF=1
+                fi
                 cat <<'EOF'
 /* MinGW stdout is not a linkable object.  Header dumps declare
  * `extern FILE *stdout`, which we drop; this is the real pointer. */
@@ -453,7 +458,23 @@ EOF
                 fi
                 ;;
         esac
-        cat "$WORK/$name.prep.c"
+        if [ "$ORACLE_STRIP_JMPBUF" = 1 ]; then
+            # Drop undersized port typedef + externs so MinGW <setjmp.h> wins.
+            python3 - "$WORK/$name.prep.c" <<'PY'
+import re, sys
+src = open(sys.argv[1], encoding="latin-1").read()
+src = re.sub(r"typedef\s+[^;]*\bjmp_buf\s*\[[^\]]*\]\s*;", "", src)
+src = re.sub(
+    r"^[ \t]*extern[ \t]+[^;\n]*\b(?:setjmp|longjmp)\s*\([^;\n]*\)\s*;[ \t]*\n?",
+    "",
+    src,
+    flags=re.M,
+)
+sys.stdout.buffer.write(src.encode("latin-1"))
+PY
+        else
+            cat "$WORK/$name.prep.c"
+        fi
     } > "$WORK/$name.gcc.c"
     oracle_host_fixup "$WORK/$name.gcc.c"
     # Header-free gcc must not accept implicit libc decls (`int getenv()`).
@@ -709,7 +730,13 @@ EOF
                     echo '#undef __WINT_TYPE__'
                     echo '#define __WINT_TYPE__ unsigned int'
                     echo '#define __builtin_c23_va_start __builtin_va_start'
-                    # See header-free path: no setjmp.h -- jmp_buf may be a var.
+                    # Libc setjmp/longjmp need <setjmp.h> after the undersized
+                    # typedef/extern strip below.  Skip when jmp_buf is a var
+                    # (pr60003 __builtin_setjmp); MinGW's typedef would collide.
+                    if grep -qE '(^|[^_[:alnum:]])(setjmp|longjmp)[[:space:]]*\(' "$WORK/$name.body.c" \
+                        && ! grep -vE 'typedef|extern' "$WORK/$name.body.c" | grep -qE '\bjmp_buf[[:space:]]*\['; then
+                        echo '#include <setjmp.h>'
+                    fi
                     if grep -qE '^snprintf[[:space:]]*\(' "$WORK/$name.body.c"; then
                         echo '#undef snprintf'
                     fi
