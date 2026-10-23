@@ -32,7 +32,15 @@ bench/
     ├── init.c      # 指定初始化、复合字面量
     ├── stmt.c      # 语句表达式、typeof
     ├── vec.c       # 整型向量
-    └── i128.c      # __int128
+    ├── i128.c      # __int128
+    ├── complex.c   # _Complex float/double
+    ├── bitops.c    # __builtin_clz/ctz/popcount/ffs/bswap
+    ├── overflow.c  # __builtin_*_overflow
+    ├── flex.c      # 柔性数组成员
+    ├── tls.c       # __thread TLS
+    ├── sync.c      # __sync_* 原子操作
+    ├── align.c     # aligned/packed、_Alignof
+    └── ldouble.c   # long double（x87）
 ```
 
 ```bash
