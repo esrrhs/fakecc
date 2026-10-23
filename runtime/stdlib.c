@@ -902,6 +902,101 @@ void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void 
     qsort_rec((char *)base, n, sz, cmp);
 }
 
+double fmod(double x, double y) {
+    double q;
+    double t;
+    union { double d; unsigned long long u; } nanv;
+    if (y == 0.0 || x != x || y != y) {
+        nanv.u = 0x7ff8000000000000ULL;
+        return nanv.d;
+    }
+    q = x / y;
+    if (q >= 0.0) t = floor(q);
+    else t = ceil(q);
+    return x - t * y;
+}
+
+double sinh(double x) {
+    if (x > 700.0) return exp(x) / 2.0;
+    if (x < -700.0) return -exp(-x) / 2.0;
+    return (exp(x) - exp(-x)) / 2.0;
+}
+
+double cosh(double x) {
+    double a;
+    if (x > 700.0 || x < -700.0) {
+        a = x < 0.0 ? -x : x;
+        return exp(a) / 2.0;
+    }
+    return (exp(x) + exp(-x)) / 2.0;
+}
+
+/* glibc TYPE_3 random(): 31-word additive generator, separation 3.
+ * Matches glibc rand() after srand(), including the 310-step warmup, so a
+ * network that was tuned against glibc (genann's XOR trainer) converges.
+ * The simple 1103515245 LCG does not. */
+static int rt_rand_st[31];
+static int rt_rand_f;
+static int rt_rand_r;
+static int rt_rand_ready;
+
+static void rt_rand_step(int *out) {
+    unsigned int val = (unsigned int)rt_rand_st[rt_rand_f] + (unsigned int)rt_rand_st[rt_rand_r];
+    int nstate = 31;
+    rt_rand_st[rt_rand_f] = (int)val;
+    *out = (int)((val >> 1) & 0x7fffffffu);
+    rt_rand_f = rt_rand_f + 1;
+    if (rt_rand_f >= nstate) {
+        rt_rand_f = 0;
+        rt_rand_r = rt_rand_r + 1;
+    } else {
+        rt_rand_r = rt_rand_r + 1;
+        if (rt_rand_r >= nstate) rt_rand_r = 0;
+    }
+}
+
+void srand(unsigned int seed) {
+    int i;
+    int kc;
+    int discard;
+    long word;
+    long hi;
+    long lo;
+    if (seed == 0) seed = 1;
+    rt_rand_st[0] = (int)seed;
+    word = (long)seed;
+    for (i = 1; i < 31; i = i + 1) {
+        hi = word / 127773;
+        lo = word % 127773;
+        word = 16807 * lo - 2836 * hi;
+        if (word < 0) word = word + 2147483647;
+        rt_rand_st[i] = (int)word;
+    }
+    rt_rand_f = 3;
+    rt_rand_r = 0;
+    kc = 310;
+    while (kc > 0) {
+        kc = kc - 1;
+        rt_rand_step(&discard);
+    }
+    rt_rand_ready = 1;
+}
+
+int rand(void) {
+    int r;
+    if (!rt_rand_ready) srand(1);
+    rt_rand_step(&r);
+    return r;
+}
+
+double tanh(double x) {
+    double e;
+    if (x > 20.0) return 1.0;
+    if (x < -20.0) return -1.0;
+    e = exp(2.0 * x);
+    return (e - 1.0) / (e + 1.0);
+}
+
 /* chmod() and getenv() are platform-specific:
  *   - Linux builds use the raw syscall numbers / /proc/self/environ
  *     (see stdlib_linux.c);

@@ -142,6 +142,7 @@ typedef struct {
     /* IR_CALL only: heap array of length call_nargs (NULL if call_nargs==0). */
     IRValue *call_args;
     int      call_nargs;
+    int      call_is_variadic; /* Win64 ABI: duplicate FP args 0..3 into GP regs */
     /* IR_CALL only: for indirect calls, the SSA value holding the function
      * pointer (lowered from the callee expression).  -1 for named calls. */
     IRValue  call_callee;

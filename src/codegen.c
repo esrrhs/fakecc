@@ -292,6 +292,29 @@ static void emit_mov_fs0_reg(Buffer *b, int dst) {
     emit_int32(b, 0);                    /* disp32 = 0 → %fs:0 */
 }
 
+/* Emit `movq %gs:0x58, %dst` — load the ThreadLocalStoragePointer from Win64 TEB.
+ * Encoding: 65 (GS override) REX.W 8B ModRM(mod=00,reg=dst,rm=4) SIB(00,4,5) 0x00000058. */
+static void emit_mov_gs58_reg(Buffer *b, int dst) {
+    emit_byte(b, 0x65);                  /* %gs segment override */
+    emit_rex_wrb(b, 1, dst, 0);          /* REX.W [REX.R if dst>=8] */
+    emit_byte(b, 0x8B);                  /* MOV r64, r/m64 */
+    emit_modrm(b, 0, dst & 7, 4);        /* mod=00 reg=dst rm=4 (SIB follows) */
+    emit_byte(b, 0x25);                  /* SIB: scale=00 index=4 base=5 → [disp32] */
+    emit_int32(b, 0x58);                 /* disp32 = 0x58 → %gs:0x58 */
+}
+
+/* Emit `mov dst, [rip+0]` (RIP-relative 32-bit load zero-extending into 64-bit reg)
+ * and return the disp32 patch offset.  Used to load 32-bit _tls_index. */
+static size_t emit_load_rip32(Buffer *b, int dst) {
+    if (dst >= 8)
+        emit_byte(b, 0x44);              /* REX.R for high reg (R8..R15) */
+    emit_byte(b, 0x8B);                  /* MOV r32, r/m32 */
+    emit_modrm(b, 0, dst & 7, 5);        /* mod=00 reg=dst rm=5 (RIP-relative) */
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
 /* Emit `addq dst, [rip+0]` (RIP-relative qword add) and return the disp32
  * patch offset.  Encoding: REX.W 03 /r with mod=00 rm=5 (RIP-relative).
  * Used for TLS Initial-Exec: add the TPOFF loaded from a GOT slot. */
@@ -931,6 +954,11 @@ static void emit_ld_from_gp_int(Buffer *b, int src, int dst, const int *ld_off,
 /* SysV AMD64: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9. */
 static const int SYSV_ARG_REGS[6] = {
     REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9
+};
+
+/* Microsoft x64: 4 integer args in rcx, rdx, r8, r9. */
+static const int WIN64_ARG_REGS[4] = {
+    REG_RCX, REG_RDX, REG_R8, REG_R9
 };
 
 /* ================================================================== */
@@ -1919,6 +1947,14 @@ static int vec_nslots(int vec_bytes, int is_ld) {
     return 1;
 }
 
+/* Microsoft x64 gives every argument one 8-byte home.  A vector that does
+ * not fit in XMM0–XMM3 is the exception: it occupies its full width on the
+ * stack, 16-byte aligned, so the caller and the callee describe one slot. */
+static int win64_stack_slots(int is_float, int vecb) {
+    if (is_float && vecb >= 16) return vec_nslots(vecb, 0);
+    return 1;
+}
+
 static void stack_idx_align(int *idx, int align) {
     if (align < 16 || !idx) return;
     int slots = align / 8;
@@ -2322,15 +2358,18 @@ typedef struct {
 } DbgObs;
 
 /* Compute which callee-saved registers this function actually uses.
- * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 (0 or 1). */
-static void collect_callee_saved(const RAResult *ra, int used[3]) {
-    used[0] = used[1] = used[2] = 0;
+ * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 / REG_RSI / REG_RDI (0 or 1). */
+static void collect_callee_saved(const RAResult *ra, int used[5]) {
+    used[0] = used[1] = used[2] = used[3] = used[4] = 0;
     if (!ra) return;
+    int is_win = (target_current()->os == TOS_WINDOWS);
     for (int v = 0; v < ra->num_values; v++) {
         int r = ra->reg[v];
         if (r == REG_RBX) used[0] = 1;
         else if (r == REG_R12) used[1] = 1;
         else if (r == REG_R13) used[2] = 1;
+        else if (is_win && r == REG_RSI) used[3] = 1;
+        else if (is_win && r == REG_RDI) used[4] = 1;
     }
 }
 
@@ -2417,7 +2456,7 @@ static void emit_load_base_off32(Buffer *b, int dst, int base, int off) {
 }
 
 
-static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int has_dyn_alloca);
+static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[5], int has_dyn_alloca);
 /* GNU __builtin_apply_args / __builtin_apply block layout for x86-64 SysV,
  * matching gcc/builtins.cc apply_args_size() + ix86_function_arg_regno_p:
  *
@@ -2480,8 +2519,11 @@ static void emit_fill_apply_args(Buffer *b, int base) {
         emit_sse_store_rsp_off(b, x, base + APPLY_ARGS_XMM + 16 * x);
     /* Incoming stack args: after push %rbp / mov %rbp,%rsp they live at
      * [rbp+16] (return address at +8). */
-    emit_lea_rbp(b, REG_RCX, 16);
-    emit_store_rsp_off(b, REG_RCX, base + 0);
+    /* R11 is not an incoming argument register on SysV or Win64.  RCX is
+     * the first Win64 argument, and overwriting it here landed in the
+     * parameter home that the prologue saves immediately afterwards. */
+    emit_lea_rbp(b, REG_R11, 16);
+    emit_store_rsp_off(b, REG_R11, base + 0);
 }
 
 static void emit_builtin_apply_args(Buffer *b, const IRInst *inst, const RAResult *ra,
@@ -2552,7 +2594,7 @@ static void emit_builtin_apply(Buffer *b, const IRInst *inst, const RAResult *ra
 }
 
 static void emit_builtin_return(Buffer *b, const IRInst *inst, const RAResult *ra,
-                                int stack_size, const int cs_used[3], int has_dyn_alloca) {
+                                int stack_size, const int cs_used[5], int has_dyn_alloca) {
     ensure_reg(b, inst->call_args[0], REG_R10, ra);
     emit_load_base_off(b, REG_RAX, REG_R10, APPLY_RES_RAX);
     emit_load_base_off(b, REG_RDX, REG_R10, APPLY_RES_RDX);
@@ -2590,6 +2632,21 @@ static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
                           int gp_offset, int fp_offset, int overflow_off,
                           int reg_save_rbp_off, int ap_frame_off) {
     int ap_reg = REG_RAX;
+    if (target_current()->os == TOS_WINDOWS) {
+        /* Win64 va_list is one pointer.  When ap is a folded frame local,
+         * write the cursor to [rbp+ap_frame_off]; otherwise ap_reg holds &ap.
+         * The old path always stored through RAX, which the param dance often
+         * left holding a named-arg value (e.g. 1) -> ACCESS_VIOLATION. */
+        if (!ap_frame_off) {
+            int ap = inst->call_args[0];
+            ensure_reg(b, ap, REG_RAX, ra);
+        }
+        int base = va_field_base(ap_reg, ap_frame_off);
+        int off = va_field_off(ap_frame_off, 0);
+        emit_lea_rbp(b, REG_RCX, overflow_off);
+        emit_store_base_off(b, base, REG_RCX, off);
+        return;
+    }
     if (!ap_frame_off) {
         int ap = inst->call_args[0];
         ensure_reg(b, ap, REG_RAX, ra);
@@ -2620,6 +2677,30 @@ static void emit_load_gp_viabase(Buffer *b, int dst, int base, int index) {
     emit_load_base_off(b, dst, base, 0);
 }
 
+static void emit_copy_bytes(Buffer *b, int dst_ptr, int src_ptr, int nbytes) {
+    int off = 0;
+    while (off + 8 <= nbytes) {
+        emit_load_base_off(b, REG_RAX, src_ptr, off);
+        emit_store_base_off(b, dst_ptr, REG_RAX, off);
+        off += 8;
+    }
+    if (off + 4 <= nbytes) {
+        emit_load_disp(b, REG_RAX, src_ptr, off, 4, 1);
+        emit_store_disp(b, dst_ptr, REG_RAX, off, 4);
+        off += 4;
+    }
+    if (off + 2 <= nbytes) {
+        emit_load_disp(b, REG_RAX, src_ptr, off, 2, 1);
+        emit_store_disp(b, dst_ptr, REG_RAX, off, 2);
+        off += 2;
+    }
+    if (off < nbytes) {
+        emit_load_disp(b, REG_RAX, src_ptr, off, 1, 1);
+        emit_store_disp(b, dst_ptr, REG_RAX, off, 1);
+        off += 1;
+    }
+}
+
 /* Implement `va_arg(ap, T)`.  Walks the register-save area while the per-class
  * offset lasts, then falls back to the overflow (stack) area.  Branches on the
  * requested type class (GP vs FP) using inline-patched forward branches.
@@ -2637,6 +2718,57 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
     int base = va_field_base(ap_reg, ap_frame_off);
     int dst = inst->dst;
     int is_float = inst->is_float;
+
+    if (target_current()->os == TOS_WINDOWS) {
+        /* Same frame-local vs pointer split as emit_va_start. */
+        int ap_base = va_field_base(ap_reg, ap_frame_off);
+        int ap_off = va_field_off(ap_frame_off, 0);
+        /* 1. Load current cursor into RDX */
+        emit_load_base_off(b, REG_RDX, ap_base, ap_off);
+
+        /* 2. Advance cursor by 8 and store back to *ap */
+        emit_mov_rr(b, REG_R11, REG_RDX);
+        emit_add_imm32(b, REG_R11, 8);
+        emit_store_base_off(b, ap_base, REG_R11, ap_off);
+
+        /* 3. Fetch argument */
+        if (inst->imm > 0 && inst->call_nargs >= 2 && inst->call_args[1] >= 0) {
+            int nbytes = (int)inst->imm;
+            int destv = inst->call_args[1];
+            ensure_reg(b, destv, REG_R10, ra);
+            if (nbytes == 1 || nbytes == 2 || nbytes == 4 || nbytes == 8) {
+                emit_copy_bytes(b, REG_R10, REG_RDX, nbytes);
+            } else {
+                emit_load_base_off(b, REG_R11, REG_RDX, 0);
+                emit_copy_bytes(b, REG_R10, REG_R11, nbytes);
+            }
+            if (dst >= 0) {
+                int dr = (ra && dst < ra->num_values) ? ra->reg[dst] : -1;
+                if (dr >= 0) {
+                    if (dr != REG_R10) emit_mov_rr(b, dr, REG_R10);
+                } else {
+                    spill_if_needed(b, dst, REG_R10, ra);
+                }
+            }
+        } else if (is_float) {
+            int dr = (ra_xmm && dst >= 0 && dst < ra_xmm->num_values) ? ra_xmm->reg[dst] : -1;
+            int target_xmm = (dr >= 0) ? dr : 0;
+            int w = inst->width ? inst->width : 8;
+            emit_sse_load_disp(b, target_xmm, REG_RDX, 0, w == 4);
+            if (dr < 0 && dst >= 0) {
+                spill_if_needed_xmm(b, dst, target_xmm, ra_xmm, gp_spill_area);
+            }
+        } else {
+            int dr = (ra && dst >= 0 && dst < ra->num_values) ? ra->reg[dst] : -1;
+            int target_gp = (dr >= 0) ? dr : REG_RAX;
+            int w = inst->width ? inst->width : 8;
+            emit_load_disp(b, target_gp, REG_RDX, 0, w, inst->is_unsigned);
+            if (dr < 0 && dst >= 0) {
+                spill_if_needed(b, dst, target_gp, ra);
+            }
+        }
+        return;
+    }
 
     if (dst >= 0 && value_is_ld(fn, dst)) {
         /* long double (X87 class): always passed on the stack. */
@@ -3180,9 +3312,10 @@ DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
     }
 }
 
-static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int has_dyn_alloca) {
+static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[5], int has_dyn_alloca) {
     if (has_dyn_alloca) {
-        int cs_count = (cs_used[0]?1:0) + (cs_used[1]?1:0) + (cs_used[2]?1:0);
+        int cs_count = (cs_used[0]?1:0) + (cs_used[1]?1:0) + (cs_used[2]?1:0)
+                     + (cs_used[3]?1:0) + (cs_used[4]?1:0);
         int cs_bytes = cs_count * 8;
         if (cs_bytes > 0) {
             /* lea -cs_bytes(%rbp), %rsp: 48 8D 65 (256-cs_bytes) */
@@ -3199,6 +3332,8 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int h
     } else if (stack_size != 0) {
         emit_add_rsp_imm32(b, stack_size);
     }
+    if (cs_used[4]) emit_pop_r(b, REG_RDI);
+    if (cs_used[3]) emit_pop_r(b, REG_RSI);
     if (cs_used[2]) emit_pop_r(b, REG_R13);
     if (cs_used[1]) emit_pop_r(b, REG_R12);
     if (cs_used[0]) emit_pop_r(b, REG_RBX);
@@ -3474,9 +3609,13 @@ static const char *peel_gaddr_name_unique(const IRFunction *fn, const int *def,
     return NULL;
 }
 
-/* Local non-TLS global defined in this TU — safe for R_X86_64_32S. */
+/* Local non-TLS global defined in this TU — safe for R_X86_64_32S on ELF
+ * small-code-model hosts.  PE ImageBase is 0x140000000, so a 32-bit absolute
+ * cannot encode the VA; keep RIP-relative on Windows. */
 static int gaddr_is_local_abs(const IRModule *ir, const char *name) {
     if (!ir || !name) return 0;
+    if (target_current()->objfmt == TARGET_OBJFMT_PE)
+        return 0;
     for (size_t i = 0; i < ir->globals.len; i++) {
         const IRGlobal *g = &ir->globals.data[i];
         if (g->name && strcmp(g->name, name) == 0)
@@ -4377,6 +4516,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             gv.sym_name = g->name;
             gv.alloca_ssa = -1;
             gv.param_idx = -1;
+            /* Section + offset for DW_OP_addr (PE may use sec_vaddr[] or
+             * absolute symbols; ELF rebases symbols and passes NULL). */
+            gv.addr_sect = (int)shndx;
+            gv.addr_off = off;
             emit_module_add_dbg_global(out, &gv);
         }
     }
@@ -4412,9 +4555,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
 
         /* ---- Prologue ---- */
-        int cs_used[3];
+        int cs_used[5];
         collect_callee_saved(ra, cs_used);
-        int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
+        int cs_count = cs_used[0] + cs_used[1] + cs_used[2] + cs_used[3] + cs_used[4];
         curr_cs_count = cs_count;
         int cs_save_area = 8 * cs_count;  /* bytes occupied by callee-saved reg pushes */
 
@@ -4476,7 +4619,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         int apply_args_rsp_off = -1, apply_result_rsp_off = -1, apply_saved_sp_rsp_off = -1;
         int aligned_call_saved_sp_rsp_off = -1;
         int bottom_extra = 0;
-        if (fn->is_variadic) bottom_extra = 176;
+        if (fn->is_variadic && target_current()->os != TOS_WINDOWS) bottom_extra = 176;
         if (fn->needs_apply_args) {
             apply_args_rsp_off = bottom_extra;
             bottom_extra += APPLY_ARGS_SIZE;
@@ -4533,6 +4676,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         if (cs_used[0]) emit_push_r(&out->text, REG_RBX);
         if (cs_used[1]) emit_push_r(&out->text, REG_R12);
         if (cs_used[2]) emit_push_r(&out->text, REG_R13);
+        if (cs_used[3]) emit_push_r(&out->text, REG_RSI);
+        if (cs_used[4]) emit_push_r(&out->text, REG_RDI);
+        /* Windows x64 UWOP register numbers for callee-saved pushes after rbp. */
+        int8_t win_pushed[8];
+        int win_npushed = 0;
+        memset(win_pushed, -1, sizeof win_pushed);
+        if (target_current()->os == TOS_WINDOWS) {
+            if (cs_used[0]) win_pushed[win_npushed++] = 3;  /* RBX */
+            if (cs_used[1]) win_pushed[win_npushed++] = 12; /* R12 */
+            if (cs_used[2]) win_pushed[win_npushed++] = 13; /* R13 */
+            if (cs_used[3]) win_pushed[win_npushed++] = 6;  /* RSI */
+            if (cs_used[4]) win_pushed[win_npushed++] = 7;  /* RDI */
+        }
+        (void)win_npushed;
 
         /* Materialize incoming SysV arg registers into their allocated
          * homes.  SysV AMD64 passes the first 6 INTEGER-class args in
@@ -4570,53 +4727,89 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
         }
         int gp_reg_idx = 0, xmm_reg_idx = 0, stack_arg_idx = 0;
-        for (int p = 0; p < nparams; p++) {
-            const IRInst *pi = &fn->insts.data[p];
-            int is_ld = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
-                         value_is_ld(fn, pi->dst));
-            int is_float = !is_ld && (pi->dst >= 0 && pi->dst < fn->next_value_id &&
-                            value_is_float_class(fn, pi->dst));
-            int force_stack = pi->force_stack || is_ld;
-            int vecb = is_float ? value_vec_bytes(fn, pi->dst) : 0;
-            if (!vecb && is_float && (pi->width == 16 || pi->width == 32 || pi->width == 64))
-                vecb = pi->width;
-            int pal = flags_stack_align(0, vecb, pi->align16);
-            if (is_ld && pal < 16) pal = 16;
-            int nslots = vec_nslots(vecb, is_ld);
-            int blob = param_is_mem_blob(pi);
-            if (blob) {
-                nslots = (pi->alloca_bytes + 7) / 8;
-                if (nslots < 1) nslots = 1;
-            }
-            if (force_stack) {
-                /* long double or MEMORY-class eightbyte: stack only. */
-                stack_idx_align(&stack_arg_idx, pal);
-                arrive_reg[p] = -1;
-                arrive_is_xmm[p] = 0;
-                stack_off[p] = 16 + 8 * stack_arg_idx;
-                stack_arg_idx += nslots;
-                if (is_ld)
-                    ld_off[pi->dst] = stack_off[p];
-            } else if (is_float) {
-                if (xmm_reg_idx < 8) {
-                    arrive_reg[p] = xmm_reg_idx; /* native XMM code 0..7 */
-                    arrive_is_xmm[p] = 1;
-                    xmm_reg_idx++;
+        int win_arg_slot = 0;
+        if (target_current()->os == TOS_WINDOWS) {
+            int slot = 0;
+            for (int p = 0; p < nparams; p++) {
+                const IRInst *pi = &fn->insts.data[p];
+                int is_float = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                                value_is_float_class(fn, pi->dst));
+                int vecb = 0;
+                if (is_float) {
+                    vecb = value_vec_bytes(fn, pi->dst);
+                    if (!vecb && (pi->width == 16 || pi->width == 32 || pi->width == 64))
+                        vecb = pi->width;
+                }
+                if (p < 4) {
+                    if (is_float) {
+                        arrive_reg[p] = p; /* XMM0..3 */
+                        arrive_is_xmm[p] = 1;
+                    } else {
+                        arrive_reg[p] = WIN64_ARG_REGS[p];
+                        arrive_is_xmm[p] = 0;
+                    }
+                    stack_off[p] = 16 + 8 * p;
+                    slot++;
                 } else {
+                    int nslots = win64_stack_slots(is_float, vecb);
+                    if (nslots > 1)
+                        stack_idx_align(&slot, nslots * 8);
                     arrive_reg[p] = -1;
                     arrive_is_xmm[p] = 0;
+                    stack_off[p] = 16 + 8 * slot;
+                    slot += nslots;
+                }
+            }
+            win_arg_slot = slot;
+        } else {
+            for (int p = 0; p < nparams; p++) {
+                const IRInst *pi = &fn->insts.data[p];
+                int is_ld = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                             value_is_ld(fn, pi->dst));
+                int is_float = !is_ld && (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                                value_is_float_class(fn, pi->dst));
+                int force_stack = pi->force_stack || is_ld;
+                int vecb = is_float ? value_vec_bytes(fn, pi->dst) : 0;
+                if (!vecb && is_float && (pi->width == 16 || pi->width == 32 || pi->width == 64))
+                    vecb = pi->width;
+                int pal = flags_stack_align(0, vecb, pi->align16);
+                if (is_ld && pal < 16) pal = 16;
+                int nslots = vec_nslots(vecb, is_ld);
+                int blob = param_is_mem_blob(pi);
+                if (blob) {
+                    nslots = (pi->alloca_bytes + 7) / 8;
+                    if (nslots < 1) nslots = 1;
+                }
+                if (force_stack) {
+                    /* long double or MEMORY-class eightbyte: stack only. */
                     stack_idx_align(&stack_arg_idx, pal);
+                    arrive_reg[p] = -1;
+                    arrive_is_xmm[p] = 0;
                     stack_off[p] = 16 + 8 * stack_arg_idx;
                     stack_arg_idx += nslots;
-                }
-            } else {
-                if (gp_reg_idx < 6) {
-                    arrive_reg[p] = SYSV_ARG_REGS[gp_reg_idx++];
-                    arrive_is_xmm[p] = 0;
+                    if (is_ld)
+                        ld_off[pi->dst] = stack_off[p];
+                } else if (is_float) {
+                    if (xmm_reg_idx < 8) {
+                        arrive_reg[p] = xmm_reg_idx; /* native XMM code 0..7 */
+                        arrive_is_xmm[p] = 1;
+                        xmm_reg_idx++;
+                    } else {
+                        arrive_reg[p] = -1;
+                        arrive_is_xmm[p] = 0;
+                        stack_idx_align(&stack_arg_idx, pal);
+                        stack_off[p] = 16 + 8 * stack_arg_idx;
+                        stack_arg_idx += nslots;
+                    }
                 } else {
-                    arrive_reg[p] = -1;
-                    arrive_is_xmm[p] = 0;
-                    stack_off[p] = 16 + 8 * stack_arg_idx++;
+                    if (gp_reg_idx < 6) {
+                        arrive_reg[p] = SYSV_ARG_REGS[gp_reg_idx++];
+                        arrive_is_xmm[p] = 0;
+                    } else {
+                        arrive_reg[p] = -1;
+                        arrive_is_xmm[p] = 0;
+                        stack_off[p] = 16 + 8 * stack_arg_idx++;
+                    }
                 }
             }
         }
@@ -5361,16 +5554,45 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
          * overflow (stack) area starts after the named stack-passed args. */
         int va_gp_offset = 0, va_fp_offset = 0, va_overflow_off = 16;
         if (fn->is_variadic) {
-            va_gp_offset = 8 * gp_reg_idx;
-            va_fp_offset = 48 + 16 * xmm_reg_idx;
-            va_overflow_off = 16 + 8 * stack_arg_idx;
+            if (target_current()->os == TOS_WINDOWS) {
+                va_overflow_off = 16 + 8 * win_arg_slot;
+            } else {
+                va_gp_offset = 8 * gp_reg_idx;
+                va_fp_offset = 48 + 16 * xmm_reg_idx;
+                va_overflow_off = 16 + 8 * stack_arg_idx;
+            }
         }
 
         /* Allocate the frame.  For variadic functions this also reserves the
          * 176-byte register-save area at the bottom.  Leaf red-zone frames
-         * skip the sub (prologue_stack == 0). */
+         * skip the sub (prologue_stack == 0).
+         * Windows commits stack a page at a time.  A single `sub` larger
+         * than that skips the guard page, so touch every page first.
+         * r11 and rax are not incoming argument registers. */
+        if (target_current()->os == TOS_WINDOWS && prologue_stack >= 4096) {
+            emit_byte(&out->text, 0x49); emit_byte(&out->text, 0x89);
+            emit_byte(&out->text, 0xE3);                         /* mov r11, rsp */
+            emit_mov_imm32(&out->text, REG_RAX, prologue_stack);
+            emit_byte(&out->text, 0x49); emit_byte(&out->text, 0x29);
+            emit_byte(&out->text, 0xC3);                         /* sub r11, rax */
+            emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+            emit_byte(&out->text, 0xE0);                         /* mov rax, rsp */
+            size_t probe = out->text.len;
+            emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x2D);
+            emit_int32(&out->text, 0x1000);                      /* sub rax, 0x1000 */
+            emit_byte(&out->text, 0x80); emit_byte(&out->text, 0x38);
+            emit_byte(&out->text, 0x00);                         /* cmp byte [rax], 0 */
+            emit_byte(&out->text, 0x4C); emit_byte(&out->text, 0x39);
+            emit_byte(&out->text, 0xD8);                         /* cmp rax, r11 */
+            emit_byte(&out->text, 0x77);                         /* ja probe */
+            {
+                int rel = (int)probe - (int)(out->text.len + 1);
+                emit_byte(&out->text, (uint8_t)rel);
+            }
+        }
         if (prologue_stack != 0)
             emit_sub_rsp_imm32(&out->text, prologue_stack);
+        size_t after_sub_rsp_pc = out->text.len;
 
         /* Variadic: save the incoming argument registers into the save area at
          * the bottom of the frame BEFORE the param dance clobbers them.  The
@@ -5378,26 +5600,33 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
          * which would destroy the values we need for the save area.  rsp is
          * constant from here on, so [rsp+off] addresses the save area stably. */
         if (fn->is_variadic) {
-            /* GP regs rdi,rsi,rdx,rcx,r8,r9 → [rsp+0..+40]. */
-            emit_store_rsp_off(&out->text, REG_RDI, 0);
-            emit_store_rsp_off(&out->text, REG_RSI, 8);
-            emit_store_rsp_off(&out->text, REG_RDX, 16);
-            emit_store_rsp_off(&out->text, REG_RCX, 24);
-            emit_store_rsp_off(&out->text, REG_R8, 32);
-            emit_store_rsp_off(&out->text, REG_R9, 40);
-            /* FP regs: only when the caller set %al (SysV vector count). */
-            emit_byte(&out->text, 0x84); /* test %al, %al */
-            emit_byte(&out->text, 0xC0);
-            size_t skip_xmm = emit_jcc_rel32(&out->text, 0x84); /* je */
-            emit_sse_store_rsp_off(&out->text, 0, 48);
-            emit_sse_store_rsp_off(&out->text, 1, 64);
-            emit_sse_store_rsp_off(&out->text, 2, 80);
-            emit_sse_store_rsp_off(&out->text, 3, 96);
-            emit_sse_store_rsp_off(&out->text, 4, 112);
-            emit_sse_store_rsp_off(&out->text, 5, 128);
-            emit_sse_store_rsp_off(&out->text, 6, 144);
-            emit_sse_store_rsp_off(&out->text, 7, 160);
-            patch_rel32(&out->text, skip_xmm, out->text.len);
+            if (target_current()->os == TOS_WINDOWS) {
+                emit_store_base_off(&out->text, REG_RBP, REG_RCX, 16);
+                emit_store_base_off(&out->text, REG_RBP, REG_RDX, 24);
+                emit_store_base_off(&out->text, REG_RBP, REG_R8,  32);
+                emit_store_base_off(&out->text, REG_RBP, REG_R9,  40);
+            } else {
+                /* GP regs rdi,rsi,rdx,rcx,r8,r9 -> [rsp+0..+40]. */
+                emit_store_rsp_off(&out->text, REG_RDI, 0);
+                emit_store_rsp_off(&out->text, REG_RSI, 8);
+                emit_store_rsp_off(&out->text, REG_RDX, 16);
+                emit_store_rsp_off(&out->text, REG_RCX, 24);
+                emit_store_rsp_off(&out->text, REG_R8, 32);
+                emit_store_rsp_off(&out->text, REG_R9, 40);
+                /* FP regs: only when the caller set %al (SysV vector count). */
+                emit_byte(&out->text, 0x84); /* test %al, %al */
+                emit_byte(&out->text, 0xC0);
+                size_t skip_xmm = emit_jcc_rel32(&out->text, 0x84); /* je */
+                emit_sse_store_rsp_off(&out->text, 0, 48);
+                emit_sse_store_rsp_off(&out->text, 1, 64);
+                emit_sse_store_rsp_off(&out->text, 2, 80);
+                emit_sse_store_rsp_off(&out->text, 3, 96);
+                emit_sse_store_rsp_off(&out->text, 4, 112);
+                emit_sse_store_rsp_off(&out->text, 5, 128);
+                emit_sse_store_rsp_off(&out->text, 6, 144);
+                emit_sse_store_rsp_off(&out->text, 7, 160);
+                patch_rel32(&out->text, skip_xmm, out->text.len);
+            }
         }
         if (fn->needs_apply_args)
             emit_fill_apply_args(&out->text, apply_args_rsp_off);
@@ -6225,9 +6454,41 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 else if (out->syms[gsym].shndx == SECT_UNDEF
                          && out->syms[gsym].type == 0)
                     out->syms[gsym].type = 6 /* STT_TLS */;
-                emit_mov_fs0_reg(&out->text, target);
-                size_t patch = emit_add_rip(&out->text, target);
-                emit_module_add_reloc(out, patch, R_X86_64_GOTTPOFF, gsym, -4);
+                if (target_current()->os == TOS_WINDOWS) {
+                    /* Native Windows PE x86-64 TLS:
+                     * 1. Load _tls_index (DWORD, zero-extended) into scratch.
+                     *    Scratch is RAX or RDX (staging registers outside ALLOCATABLE_REGS).
+                     * 2. Load ThreadLocalStoragePointer from gs:[0x58] into target.
+                     * 3. Load TLS module block pointer from [target + scratch*8] into target.
+                     * 4. Add per-symbol TLS offset (IMAGE_REL_AMD64_SECREL) to target.
+                     */
+                    int scratch = (target == REG_RAX) ? REG_RDX : REG_RAX;
+                    int isym = emit_module_find_symbol(out, "_tls_index");
+                    if (isym < 0)
+                        isym = emit_module_add_undefined(out, "_tls_index");
+
+                    /* mov scratch32, [_tls_index(%rip)] */
+                    size_t patch_idx = emit_load_rip32(&out->text, scratch);
+                    emit_module_add_reloc(out, patch_idx, R_X86_64_PC32, isym, -4);
+
+                    /* mov target, gs:[0x58] */
+                    emit_mov_gs58_reg(&out->text, target);
+
+                    /* mov target, [target + scratch*8] */
+                    emit_load_sib(&out->text, target, target, scratch, 3, 0, 8, 0);
+
+                    /* add target, $offset (reloc: R_PE_SECREL against gsym) */
+                    emit_rex_wrb(&out->text, 1, 0, target);
+                    emit_byte(&out->text, 0x81);
+                    emit_modrm(&out->text, 3, 0, target);
+                    size_t patch_off = out->text.len;
+                    emit_int32(&out->text, 0);
+                    emit_module_add_reloc(out, patch_off, R_PE_SECREL, gsym, 0);
+                } else {
+                    emit_mov_fs0_reg(&out->text, target);
+                    size_t patch = emit_add_rip(&out->text, target);
+                    emit_module_add_reloc(out, patch, R_X86_64_GOTTPOFF, gsym, -4);
+                }
                 if (dr < 0)
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
@@ -6296,6 +6557,38 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 emit_byte(&out->text, 0x83);
                 emit_byte(&out->text, 0xE0);
                 emit_byte(&out->text, 0xF0);
+                /* Windows commits stack a page at a time.  A dynalloca
+                 * larger than the guard page must touch every page or the
+                 * first write raises STATUS_STACK_OVERFLOW.  rax is the
+                 * byte count; r11 and rcx are volatile here. */
+                if (target_current()->os == TOS_WINDOWS) {
+                    emit_byte(&out->text, 0x49); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xE3);                 /* mov r11, rsp */
+                    emit_byte(&out->text, 0x49); emit_byte(&out->text, 0x29);
+                    emit_byte(&out->text, 0xC3);                 /* sub r11, rax */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x3D);
+                    emit_int32(&out->text, 4096);                /* cmp rax, 4096 */
+                    emit_byte(&out->text, 0x72);                 /* jb skip */
+                    size_t jb_at = out->text.len;
+                    emit_byte(&out->text, 0);                    /* patched */
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xE1);                 /* mov rcx, rsp */
+                    size_t probe = out->text.len;
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x81);
+                    emit_byte(&out->text, 0xE9);
+                    emit_int32(&out->text, 0x1000);              /* sub rcx, 0x1000 */
+                    emit_byte(&out->text, 0x80); emit_byte(&out->text, 0x39);
+                    emit_byte(&out->text, 0x00);                 /* cmp byte [rcx], 0 */
+                    emit_byte(&out->text, 0x4C); emit_byte(&out->text, 0x39);
+                    emit_byte(&out->text, 0xD9);                 /* cmp rcx, r11 */
+                    emit_byte(&out->text, 0x77);                 /* ja probe */
+                    {
+                        int rel = (int)probe - (int)(out->text.len + 1);
+                        emit_byte(&out->text, (uint8_t)rel);
+                    }
+                    int skip = (int)out->text.len - (int)jb_at - 1;
+                    out->text.data[jb_at] = (uint8_t)skip;
+                }
                 /* sub %rax, %rsp: 48 29 C4 */
                 emit_byte(&out->text, 0x48);
                 emit_byte(&out->text, 0x29);
@@ -7214,15 +7507,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     emit_push_r(&out->text, REG_RAX);
                     emit_pop_r(&out->text, REG_RDX);
-                    emit_pop_r(&out->text, REG_RSI);
+                    emit_pop_r(&out->text, REG_R10);
                     emit_pop_r(&out->text, REG_RCX);
-                    emit_load_via_ptr(&out->text, REG_RAX, REG_RSI, w, 1);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_R10, w, 1);
                     emit_push_r(&out->text, REG_RAX);
                     emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
                     emit_pop_r(&out->text, REG_R8);
                     emit_cmp_rr_w(&out->text, REG_RAX, REG_R8, w >= 8 ? 8 : 4);
                     size_t je = emit_jcc_rel32(&out->text, 0x84);
-                    emit_store_via_ptr(&out->text, REG_RSI, REG_RAX, w);
+                    emit_store_via_ptr(&out->text, REG_R10, REG_RAX, w);
                     emit_xor_rr(&out->text, REG_RAX);
                     size_t jmp = emit_jmp_rel32(&out->text);
                     patch_rel32(&out->text, je, out->text.len);
@@ -7251,10 +7544,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     ensure_reg(&out->text, inst->call_args[2], REG_RAX, ra);
                     emit_push_r(&out->text, REG_RAX);
                     emit_pop_r(&out->text, REG_RDX);
-                    emit_pop_r(&out->text, REG_RSI);
+                    emit_pop_r(&out->text, REG_R10);
                     emit_pop_r(&out->text, REG_RCX);
                     emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
-                    emit_cmp_rr_w(&out->text, REG_RAX, REG_RSI, w >= 8 ? 8 : 4);
+                    emit_cmp_rr_w(&out->text, REG_RAX, REG_R10, w >= 8 ? 8 : 4);
                     size_t je = emit_jcc_rel32(&out->text, 0x84);
                     size_t jmp = emit_jmp_rel32(&out->text);
                     patch_rel32(&out->text, je, out->text.len);
@@ -7287,9 +7580,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     for (int k = nargs - 1; k >= 0; k--) {
                         emit_pop_r(&out->text, SYS_ARG_REGS[k]);
                     }
-                    /* Emit `syscall` — 0F 05 */
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x05);
+                    if (target_current()->os == TOS_WINDOWS) {
+                        /* Linux `syscall` is not the Windows ABI.  The PE
+                         * linker defines __fakecc_win_syscall, which reads
+                         * these same registers and calls kernel32. */
+                        size_t patch = emit_call_rel32(&out->text);
+                        int esym = emit_module_find_symbol(out, "__fakecc_win_syscall");
+                        if (esym < 0)
+                            esym = emit_module_add_undefined(out, "__fakecc_win_syscall");
+                        emit_module_add_reloc(out, patch, R_X86_64_PLT32, esym, -4);
+                    } else {
+                        /* Emit `syscall` — 0F 05 */
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0x05);
+                    }
                     /* Result in RAX; move to dst or spill. */
                     if (dr >= 0) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
@@ -7299,6 +7603,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 if (inst->call_name && strcmp(inst->call_name, "__clone") == 0) {
+                    if (target_current()->os == TOS_WINDOWS) {
+                        /* No clone(2).  pthread_create on this target fails
+                         * before it would emit this, but a direct call must
+                         * not issue a Linux syscall either. */
+                        emit_mov_imm32(&out->text, REG_RAX, -1);
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                        break;
+                    }
                     static const int CLONE_ARG_REGS[6] = {
                         REG_RDI, /* fn */
                         REG_RSI, /* child_stack */
@@ -7542,6 +7858,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 ld_off, ap_frame);
                     break;
                 }
+                if (inst->call_name &&
+                    (strcmp(inst->call_name, "unreachable") == 0 ||
+                     strcmp(inst->call_name, "__builtin_unreachable") == 0 ||
+                     strcmp(inst->call_name, "trap") == 0 ||
+                     strcmp(inst->call_name, "__builtin_trap") == 0)) {
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x0B); /* ud2 */
+                    break;
+                }
                 int nargs = inst->call_nargs;
                 /* SysV AMD64 assigns the first 6 INTEGER-class args to
                  * RDI,RSI,RDX,RCX,R8,R9 and the first 8 SSE-class (float/
@@ -7573,36 +7898,52 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         exit(1);
                     }
                 }
+                int is_win = (target_current()->os == TOS_WINDOWS);
                 int max_al = 16;
-                for (int k = 0; k < nargs; k++) {
-                    int is_ld = value_is_ld(fn, inst->call_args[k]);
-                    int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
-                    int vecb = is_float ? value_vec_bytes(fn, inst->call_args[k]) : 0;
-                    unsigned char flags = (inst->call_arg_on_stack && inst->call_arg_on_stack[k])
-                                          ? inst->call_arg_on_stack[k] : 0;
-                    int on_stack = flags & CALL_ARG_STACK;
-                    int force_stack = on_stack || is_ld;
-                    int pal = flags_stack_align(flags, vecb, is_ld ? 16 : 0);
-                    int blob_n = call_arg_blob_bytes(inst, k);
-                    arg_slot[k] = -1;
-                    arg_nslots[k] = 0;
-                    if (force_stack) {
-                        int nslots = blob_n ? (blob_n + 7) / 8 : vec_nslots(vecb, is_ld);
-                        if (nslots < 1) nslots = 1;
-                        stack_idx_align(&n_stack, pal);
-                        if (pal > max_al) max_al = pal;
-                        target_reg[k] = -1;
-                        target_is_xmm[k] = 0;
-                        arg_slot[k] = n_stack;
-                        arg_nslots[k] = nslots;
-                        n_stack += nslots;
-                    } else if (is_float) {
-                        if (n_xmm < 8) {
-                            target_reg[k] = n_xmm; /* XMM0..7 */
-                            target_is_xmm[k] = 1;
-                            n_xmm++;
+                int win_end_slot = 4;
+                if (is_win) {
+                    int slot = 4;
+                    for (int k = 0; k < nargs; k++) {
+                        int is_float = value_is_float_class(fn, inst->call_args[k]);
+                        int vecb = is_float ? value_vec_bytes(fn, inst->call_args[k]) : 0;
+                        if (k < 4) {
+                            if (is_float) {
+                                target_reg[k] = k; /* XMM0..3 */
+                                target_is_xmm[k] = 1;
+                            } else {
+                                target_reg[k] = WIN64_ARG_REGS[k];
+                                target_is_xmm[k] = 0;
+                            }
+                            arg_slot[k] = -1;
+                            arg_nslots[k] = 0;
                         } else {
-                            int nslots = vec_nslots(vecb, 0);
+                            int nslots = win64_stack_slots(is_float, vecb);
+                            if (nslots > 1)
+                                stack_idx_align(&slot, nslots * 8);
+                            target_reg[k] = -1;
+                            target_is_xmm[k] = 0;
+                            arg_slot[k] = slot;
+                            arg_nslots[k] = nslots;
+                            slot += nslots;
+                        }
+                    }
+                    win_end_slot = slot;
+                } else {
+                    for (int k = 0; k < nargs; k++) {
+                        int is_ld = value_is_ld(fn, inst->call_args[k]);
+                        int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
+                        int vecb = is_float ? value_vec_bytes(fn, inst->call_args[k]) : 0;
+                        unsigned char flags = (inst->call_arg_on_stack && inst->call_arg_on_stack[k])
+                                              ? inst->call_arg_on_stack[k] : 0;
+                        int on_stack = flags & CALL_ARG_STACK;
+                        int force_stack = on_stack || is_ld;
+                        int pal = flags_stack_align(flags, vecb, is_ld ? 16 : 0);
+                        int blob_n = call_arg_blob_bytes(inst, k);
+                        arg_slot[k] = -1;
+                        arg_nslots[k] = 0;
+                        if (force_stack) {
+                            int nslots = blob_n ? (blob_n + 7) / 8 : vec_nslots(vecb, is_ld);
+                            if (nslots < 1) nslots = 1;
                             stack_idx_align(&n_stack, pal);
                             if (pal > max_al) max_al = pal;
                             target_reg[k] = -1;
@@ -7610,24 +7951,73 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             arg_slot[k] = n_stack;
                             arg_nslots[k] = nslots;
                             n_stack += nslots;
-                        }
-                    } else {
-                        if (n_gp < 6) {
-                            target_reg[k] = SYSV_ARG_REGS[n_gp++];
-                            target_is_xmm[k] = 0;
+                        } else if (is_float) {
+                            if (n_xmm < 8) {
+                                target_reg[k] = n_xmm; /* XMM0..7 */
+                                target_is_xmm[k] = 1;
+                                n_xmm++;
+                            } else {
+                                int nslots = vec_nslots(vecb, 0);
+                                stack_idx_align(&n_stack, pal);
+                                if (pal > max_al) max_al = pal;
+                                target_reg[k] = -1;
+                                target_is_xmm[k] = 0;
+                                arg_slot[k] = n_stack;
+                                arg_nslots[k] = nslots;
+                                n_stack += nslots;
+                            }
                         } else {
-                            target_reg[k] = -1;
-                            target_is_xmm[k] = 0;
-                            arg_slot[k] = n_stack;
-                            arg_nslots[k] = 1;
-                            n_stack++;
+                            if (n_gp < 6) {
+                                target_reg[k] = SYSV_ARG_REGS[n_gp++];
+                                target_is_xmm[k] = 0;
+                            } else {
+                                target_reg[k] = -1;
+                                target_is_xmm[k] = 0;
+                                arg_slot[k] = n_stack;
+                                arg_nslots[k] = 1;
+                                n_stack++;
+                            }
                         }
                     }
                 }
                 int need_pad = 0;
-                int aligned_call = (max_al >= 32 && n_stack > 0);
+                int aligned_call = (!is_win && max_al >= 32 && n_stack > 0);
                 int stack_bytes = n_stack * 8;
-                if (aligned_call) {
+                int win_total_bytes = 0;
+                if (is_win) {
+                    int total_slots = win_end_slot;
+                    need_pad = (total_slots & 1);
+                    win_total_bytes = (total_slots + need_pad) * 8;
+                    emit_sub_rsp_imm32(&out->text, win_total_bytes);
+                    for (int k = 4; k < nargs; k++) {
+                        int off = 8 * arg_slot[k];
+                        int vecb = value_is_float_class(fn, inst->call_args[k])
+                            ? value_vec_bytes(fn, inst->call_args[k]) : 0;
+                        if (vecb >= 16) {
+                            ensure_reg_xmm(&out->text, inst->call_args[k],
+                                           XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                            if (vecb >= 64)
+                                emit_evex_vmovups_mem(&out->text, XMM_SCRATCH0,
+                                                      REG_RSP, off, 1);
+                            else if (vecb >= 32)
+                                emit_vmovups_mem(&out->text, XMM_SCRATCH0,
+                                                 REG_RSP, off, 1);
+                            else
+                                emit_movups_store_disp(&out->text, REG_RSP,
+                                                       XMM_SCRATCH0, off);
+                        } else if (value_is_float_class(fn, inst->call_args[k])) {
+                            int w = value_width_of(fn, inst->call_args[k]);
+                            ensure_reg_xmm(&out->text, inst->call_args[k],
+                                           XMM_SCRATCH0, ra_xmm, gp_spill_area);
+                            emit_sse_store_disp(&out->text, REG_RSP,
+                                                XMM_SCRATCH0, off, w == 4);
+                        } else {
+                            ensure_reg(&out->text, inst->call_args[k],
+                                       REG_RAX, ra);
+                            emit_store_rsp_off(&out->text, REG_RAX, off);
+                        }
+                    }
+                } else if (aligned_call) {
                     stack_idx_align(&n_stack, max_al);
                     stack_bytes = n_stack * 8;
                     int slack = max_al;
@@ -7844,9 +8234,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     free(node_val);
                     free(node_home);
                 }
-                /* AL = vector-register count: required for variadic callees.
-                 * Skip when the callee is a known non-variadic TU function. */
-                {
+                if (is_win && inst->call_is_variadic) {
+                    for (int k = 0; k < nargs && k < 4; k++) {
+                        if (target_reg[k] >= 0 && target_is_xmm[k]) {
+                            int w = value_width_of(fn, inst->call_args[k]);
+                            if (w == 4)
+                                emit_movd_gp_xmm(&out->text, WIN64_ARG_REGS[k], target_reg[k]);
+                            else
+                                emit_movq_gp_xmm(&out->text, WIN64_ARG_REGS[k], target_reg[k]);
+                        }
+                    }
+                }
+                if (!is_win) {
+                    /* AL = vector-register count: required for variadic callees.
+                     * Skip when the callee is a known non-variadic TU function. */
                     int need_al = 1;
                     if (inst->call_name) {
                         for (size_t fi = 0; fi < ir->functions.len; fi++) {
@@ -7999,7 +8400,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
 
                 /* Tear down stack args + padding. */
-                if (aligned_call) {
+                if (is_win) {
+                    if (win_total_bytes > 0) emit_add_rsp_imm32(&out->text, win_total_bytes);
+                } else if (aligned_call) {
                     if (fn->has_dyn_alloca)
                         emit_load_spill(&out->text, REG_RSP,
                                         aligned_call_saved_sp_rbp_off);
@@ -8768,6 +9171,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         uint8_t binding = fn->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
         emit_module_add_symbol(out, fn->name, binding, 2 /* STT_FUNC */,
                                (uint16_t)SECT_TEXT, start_offset, fn_size);
+        if (target_current()->os == TOS_WINDOWS && fn_size > 0) {
+            EmitWinUnwind wu;
+            memset(&wu, 0, sizeof wu);
+            wu.begin = start_offset;
+            wu.end = start_offset + fn_size;
+            wu.after_push_rbp = after_push_rbp_pc;
+            wu.after_set_fp = after_mov_rbp_pc;
+            wu.after_prolog = after_sub_rsp_pc;
+            wu.stack_alloc = (uint32_t)(stack_size > 0 ? stack_size : 0);
+            memcpy(wu.pushed, win_pushed, sizeof wu.pushed);
+            emit_module_add_win_unwind(out, &wu);
+        }
         if (fn->is_constructor) {
             int fsym = emit_module_find_symbol(out, fn->name);
             size_t slot = out->init_array.len;

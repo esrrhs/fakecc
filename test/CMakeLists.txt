@@ -4,15 +4,11 @@ add_library(test_framework
 )
 target_include_directories(test_framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-# --- Unit tests ---
+# --- Portable unit tests ---
 
 add_executable(test_lexer unit/test_lexer.c)
 target_link_libraries(test_lexer PRIVATE fakecc_core test_framework)
 add_test(NAME test_lexer COMMAND test_lexer)
-
-add_executable(test_parser unit/test_parser.c)
-target_link_libraries(test_parser PRIVATE fakecc_core test_framework)
-add_test(NAME test_parser COMMAND test_parser)
 
 add_executable(test_codegen unit/test_codegen.c)
 target_link_libraries(test_codegen PRIVATE fakecc_core test_framework)
@@ -21,14 +17,6 @@ add_test(NAME test_codegen COMMAND test_codegen)
 add_executable(test_ir unit/test_ir.c)
 target_link_libraries(test_ir PRIVATE fakecc_core test_framework)
 add_test(NAME test_ir COMMAND test_ir)
-
-add_executable(test_sema unit/test_sema.c)
-target_link_libraries(test_sema PRIVATE fakecc_core test_framework)
-add_test(NAME test_sema COMMAND test_sema)
-
-add_executable(test_emit unit/test_emit.c)
-target_link_libraries(test_emit PRIVATE fakecc_core test_framework)
-add_test(NAME test_emit COMMAND test_emit)
 
 add_executable(test_cfg unit/test_cfg.c)
 target_link_libraries(test_cfg PRIVATE fakecc_core test_framework)
@@ -58,17 +46,9 @@ add_executable(test_opt unit/test_opt.c)
 target_link_libraries(test_opt PRIVATE fakecc_core test_framework)
 add_test(NAME test_opt COMMAND test_opt)
 
-add_executable(test_link unit/test_link.c)
-target_link_libraries(test_link PRIVATE fakecc_core test_framework)
-add_test(NAME test_link COMMAND test_link)
-
 add_executable(test_debug unit/test_debug.c)
 target_link_libraries(test_debug PRIVATE fakecc_core test_framework)
 add_test(NAME test_debug COMMAND test_debug)
-
-add_executable(test_pkg unit/test_pkg.c)
-target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
-add_test(NAME test_pkg COMMAND test_pkg)
 
 add_executable(test_compiler unit/test_compiler.c)
 target_link_libraries(test_compiler PRIVATE fakecc_core test_framework)
@@ -86,10 +66,6 @@ add_executable(test_ast unit/test_ast.c)
 target_link_libraries(test_ast PRIVATE fakecc_core test_framework)
 add_test(NAME test_ast COMMAND test_ast)
 
-add_executable(test_die_at unit/test_die_at.c)
-target_link_libraries(test_die_at PRIVATE fakecc_core test_framework)
-add_test(NAME test_die_at COMMAND test_die_at)
-
 add_executable(test_rare unit/test_rare.c)
 target_link_libraries(test_rare PRIVATE fakecc_core test_framework)
 add_test(NAME test_rare COMMAND test_rare)
@@ -97,6 +73,20 @@ add_test(NAME test_rare COMMAND test_rare)
 add_executable(test_target unit/test_target.c)
 target_link_libraries(test_target PRIVATE fakecc_core test_framework)
 add_test(NAME test_target COMMAND test_target)
+
+add_executable(test_win64_abi unit/test_win64_abi.c)
+target_link_libraries(test_win64_abi PRIVATE fakecc_core test_framework)
+add_test(NAME test_win64_abi COMMAND test_win64_abi)
+
+add_executable(test_coff unit/test_coff.c)
+target_link_libraries(test_coff PRIVATE fakecc_core test_framework)
+add_test(NAME test_coff COMMAND test_coff)
+
+if(WIN32)
+    add_executable(test_pe_lib unit/test_pe_lib.c)
+    target_link_libraries(test_pe_lib PRIVATE test_framework)
+    add_test(NAME test_pe_lib COMMAND test_pe_lib)
+endif()
 
 add_executable(test_a64 unit/test_a64.c)
 target_link_libraries(test_a64 PRIVATE fakecc_core test_framework)
@@ -110,7 +100,51 @@ add_executable(test_cg64_native unit/test_cg64_native.c)
 target_link_libraries(test_cg64_native PRIVATE fakecc_core test_framework)
 add_test(NAME test_cg64_native COMMAND test_cg64_native)
 
-# --- app_ports tests ---
+# Same unit tests as Linux.  On Windows the fork in these files is the
+# in-process longjmp in test/win_isolate.h; the assertions are unchanged.
+add_executable(test_parser unit/test_parser.c)
+target_link_libraries(test_parser PRIVATE fakecc_core test_framework)
+add_test(NAME test_parser COMMAND test_parser)
+
+add_executable(test_sema unit/test_sema.c)
+target_link_libraries(test_sema PRIVATE fakecc_core test_framework)
+add_test(NAME test_sema COMMAND test_sema)
+
+add_executable(test_emit unit/test_emit.c)
+target_link_libraries(test_emit PRIVATE fakecc_core test_framework)
+add_test(NAME test_emit COMMAND test_emit)
+
+add_executable(test_link unit/test_link.c)
+target_link_libraries(test_link PRIVATE fakecc_core test_framework)
+add_test(NAME test_link COMMAND test_link)
+
+add_executable(test_pkg unit/test_pkg.c)
+target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
+add_test(NAME test_pkg COMMAND test_pkg)
+
+add_executable(test_die_at unit/test_die_at.c)
+target_link_libraries(test_die_at PRIVATE fakecc_core test_framework)
+add_test(NAME test_die_at COMMAND test_die_at)
+
+if(WIN32)
+    foreach(t test_parser test_sema test_emit test_link test_pkg test_die_at)
+        target_link_options(${t} PRIVATE -Wl,--wrap=exit -Wl,--wrap=abort)
+    endforeach()
+endif()
+
+if(WIN32)
+    add_test(NAME test_win64_abi_exec_build
+             COMMAND $<TARGET_FILE:fakecc> ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_win64_abi_exec.c -o ${CMAKE_CURRENT_BINARY_DIR}/test_win64_abi_exec.exe)
+    add_test(NAME test_win64_abi_exec_run
+             COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_win64_abi_exec.exe)
+    set_tests_properties(test_win64_abi_exec_run PROPERTIES DEPENDS test_win64_abi_exec_build)
+endif()
+
+# --- app_ports & e2e: the same CTest roster on Linux, macOS, and Windows ---
+# Windows runs these through MSYS bash.  ELF-only and Mach-O-only scripts skip
+# themselves by host, the same way Linux skips the dylib suite and macOS skips
+# the .so suite.
+
 # Each application port runs once per optimization level to cover both the
 # -O0 (scalars in memory) and -O1 (SSA) compiler paths.
 foreach(lvl O0 O1)

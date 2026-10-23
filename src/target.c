@@ -28,15 +28,31 @@ static const TargetDesc TARGET_ARM64_MACOS = {
     0,
 };
 
-const TargetDesc *target_x86_64_linux(void) { return &TARGET_X86_64_LINUX; }
-const TargetDesc *target_arm64_macos(void)  { return &TARGET_ARM64_MACOS; }
+/* Microsoft x64 calling convention: 4 argument registers (RCX, RDX, R8, R9),
+ * 32-byte shadow space, callee-saved RSI/RDI. */
+static const TargetDesc TARGET_X86_64_WINDOWS = {
+    TARGET_ARCH_X86_64,
+    TOS_WINDOWS,
+    TARGET_OBJFMT_PE,
+    64,
+    32,
+    "x86_64-windows",
+    4,
+    1,
+};
+
+const TargetDesc *target_x86_64_linux(void)   { return &TARGET_X86_64_LINUX; }
+const TargetDesc *target_arm64_macos(void)    { return &TARGET_ARM64_MACOS; }
+const TargetDesc *target_x86_64_windows(void) { return &TARGET_X86_64_WINDOWS; }
 
 static const TargetDesc *host_default(void) {
-#if defined(__APPLE__) && defined(__aarch64__)
+#if defined(_WIN32)
+    return &TARGET_X86_64_WINDOWS;
+#elif defined(__APPLE__) && defined(__aarch64__)
     return &TARGET_ARM64_MACOS;
 #else
     /* Linux x86_64, Intel macOS, and unknown hosts keep the historical
-     * default (x86-64 ELF) until a second host backend exists. */
+     * default (x86-64 ELF). */
     return &TARGET_X86_64_LINUX;
 #endif
 }
@@ -75,6 +91,16 @@ static TargetOS parse_os_token(const char *tok, size_t len) {
         return TOS_MACOS;
     if (len >= 6 && strncmp(tok, "darwin", 6) == 0)
         return TOS_MACOS;
+    /* "windows", "windows-msvc" is split so the token is "windows".
+     * "mingw32" / "mingw" and a bare "win32" / "msvc" component too. */
+    if (len >= 7 && strncmp(tok, "windows", 7) == 0)
+        return TOS_WINDOWS;
+    if (len >= 5 && strncmp(tok, "mingw", 5) == 0)
+        return TOS_WINDOWS;
+    if (len == 5 && strncmp(tok, "win32", 5) == 0)
+        return TOS_WINDOWS;
+    if (len == 4 && strncmp(tok, "msvc", 4) == 0)
+        return TOS_WINDOWS;
     return TOS_UNKNOWN;
 }
 
@@ -102,12 +128,14 @@ const TargetDesc *target_parse(const char *triple) {
         p = dash + 1;
     }
 
-    /* Only the two delivered/planned combinations are accepted:
-     * x86_64-macos (Rosetta) and aarch64-linux are explicit non-goals. */
+    /* x86_64-macos (Rosetta) and aarch64-linux are explicit non-goals.
+     * arm64 Windows is not delivered. */
     if (arch == TARGET_ARCH_X86_64 && os == TOS_LINUX)
         return &TARGET_X86_64_LINUX;
     if (arch == TARGET_ARCH_ARM64 && os == TOS_MACOS)
         return &TARGET_ARM64_MACOS;
+    if (arch == TARGET_ARCH_X86_64 && os == TOS_WINDOWS)
+        return &TARGET_X86_64_WINDOWS;
     return NULL;
 }
 

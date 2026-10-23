@@ -1,6 +1,6 @@
 // link: -lc
 // expect: 0
-// unsupported_on: darwin-arm64
+// unsupported_on: darwin-arm64 windows-x86_64
 // AArch64 SDIV/UDIV with a zero divisor return 0 instead of trapping, so
 // there is no SIGFPE for this handler to catch.  Verified: `i / j` with both
 // zero exits with 42 from `return k + 42`, not with SIGFPE.

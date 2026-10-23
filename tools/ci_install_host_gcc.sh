@@ -55,14 +55,71 @@ fi
 sudo apt-get update
 sudo apt-get install -y software-properties-common
 retry sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-sudo apt-get update
-sudo apt-get install -y gcc-16 g++-16
-
+# Launchpad often answers 503, and a Translation-en failure makes apt discard
+# a Packages file that already listed gcc-16.  Try briefly, then fall back
+# to the conda-forge GCC 16.2.0 build so a dead PPA cannot burn the job.
+wait_for_gcc16() {
+    local attempts=4 delay=10 n=1
+    while true; do
+        sudo apt-get update \
+            -o Acquire::Retries=2 \
+            -o Acquire::Languages=none \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::http::Timeout=20 \
+            || true
+        if apt-cache show gcc-16 >/dev/null 2>&1; then
+            return 0
+        fi
+        if [ "$n" -ge "$attempts" ]; then
+            echo "gcc-16 still missing from the toolchain PPA after $n updates" >&2
+            return 1
+        fi
+        echo "gcc-16 not listed yet (attempt $n/$attempts); retrying in ${delay}s" >&2
+        sleep "$delay"
+        n=$((n + 1))
+    done
+}
+install_conda_gcc16() {
+    echo "Installing GCC 16.2.0 from conda-forge" >&2
+    mkdir -p "$HOME/.local/bin"
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        -o "$HOME/.local/bin/micromamba" \
+        https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64
+    chmod +x "$HOME/.local/bin/micromamba"
+    "$HOME/.local/bin/micromamba" create -y -p "$HOME/.local/gcc16" \
+        -c conda-forge gcc=16.2.0 gxx=16.2.0
+    ln -sfn "$HOME/.local/gcc16/bin/gcc" "$HOME/.local/bin/gcc"
+    ln -sfn "$HOME/.local/gcc16/bin/g++" "$HOME/.local/bin/g++"
+    if [ -x "$HOME/.local/gcc16/bin/gcov" ]; then
+        ln -sfn "$HOME/.local/gcc16/bin/gcov" "$HOME/.local/bin/gcov"
+    fi
+    local libdir="$HOME/.local/gcc16/lib"
+    if [ -n "${GITHUB_ENV:-}" ]; then
+        echo "LD_LIBRARY_PATH=${libdir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+    fi
+    export LD_LIBRARY_PATH="${libdir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+}
 mkdir -p "$HOME/.local/bin"
-ln -sfn "$(command -v gcc-16)" "$HOME/.local/bin/gcc"
-ln -sfn "$(command -v g++-16)" "$HOME/.local/bin/g++"
-if command -v gcov-16 >/dev/null 2>&1; then
-    ln -sfn "$(command -v gcov-16)" "$HOME/.local/bin/gcov"
+ppa_ok=0
+if wait_for_gcc16; then
+    # One attempt.  apt's own retries already sit on HTTP 503 for several
+    # minutes; repeating that five times blows the job before the fallback.
+    if sudo apt-get install -y \
+        -o Acquire::Retries=2 \
+        -o Acquire::Languages=none \
+        -o Acquire::https::Timeout=30 \
+        gcc-16 g++-16; then
+        ppa_ok=1
+    fi
+fi
+if [ "$ppa_ok" -eq 1 ]; then
+    ln -sfn "$(command -v gcc-16)" "$HOME/.local/bin/gcc"
+    ln -sfn "$(command -v g++-16)" "$HOME/.local/bin/g++"
+    if command -v gcov-16 >/dev/null 2>&1; then
+        ln -sfn "$(command -v gcov-16)" "$HOME/.local/bin/gcov"
+    fi
+else
+    install_conda_gcc16
 fi
 
 if [ -n "${GITHUB_PATH:-}" ]; then

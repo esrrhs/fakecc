@@ -658,6 +658,30 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     cls[0] = SYSV_CLS_INTEGER;
     cls[1] = SYSV_CLS_INTEGER;
+    const TargetDesc *td = target_current();
+    if (td && td->os == TOS_WINDOWS) {
+        if (t.is_vector) {
+            /* A 4-byte vector is a scalar: float in XMM, integer in a GP
+             * register.  Treating it as MEMORY made the 4th argument a
+             * stack blob the caller never filled. */
+            if (t.width == 4) {
+                cls[0] = (t.kind == TY_FLOAT) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
+                return 1;
+            }
+            if (t.width == 16 || t.width == 8) {
+                cls[0] = SYSV_CLS_SSE;
+                return 1;
+            }
+            return 0;
+        }
+        if (t.kind != TY_STRUCT) return 0;
+        int sz = type_size(t);
+        if (sz == 1 || sz == 2 || sz == 4 || sz == 8) {
+            cls[0] = SYSV_CLS_INTEGER;
+            return 1;
+        }
+        return 0;
+    }
     if (t.is_vector) {
         if (t.width == 32) {
             /* SysV: __m256 / vector_size(32) is SSE+SSEUP×3 → one YMM.
@@ -768,6 +792,8 @@ int sysv_agg_ret_x87(Type t) {
     /* SysV: one X87+X87UP object (16 bytes) returns in st0.  A 32-byte
      * `{ long double a, b }` or `_Complex long double` is not this case.
      * A union that also has INTEGER/SSE members is MEMORY and uses sret. */
+    const TargetDesc *td = target_current();
+    if (td && (td->os == TOS_WINDOWS || td->arch == TARGET_ARCH_ARM64)) return 0;
     if (type_is_complex_ldouble(t)) return 0;
     if (t.kind != TY_STRUCT) return 0;
     if (type_size(t) != 16) return 0;
@@ -783,7 +809,8 @@ int sysv_memory_pass_as_pointer(Type t) {
      * `__va_list_tag` (array-of-1) is the exception: it decays to a
      * pointer, matching libc.  Darwin's va_list is an 8-byte cursor and
      * travels in a GP register like any other small aggregate. */
-    if (abi_is_arm64()) return 0;
+    const TargetDesc *td = target_current();
+    if (td && (td->os == TOS_WINDOWS || td->arch == TARGET_ARCH_ARM64)) return 0;
     return t.kind == TY_STRUCT && t.tag
         && strcmp(t.tag, "__va_list_tag") == 0;
 }
@@ -795,8 +822,16 @@ static int abi_is_arm64(void) {
 
 int type_long_double_width(void) {
     const TargetDesc *t = target_current();
-    if (t && t->arch == TARGET_ARCH_ARM64) return 8;
+    if (t && (t->arch == TARGET_ARCH_ARM64 || t->os == TOS_WINDOWS)) return 8;
     return 16;
+}
+
+int type_is_pair16(Type t) {
+    if (t.is_vector) return 0;
+    if (t.width != 16) return 0;
+    if (t.kind == TY_INT) return 1;
+    if (t.kind == TY_FLOAT && t.is_decimal) return 1;
+    return 0;
 }
 
 /* On Darwin arm64 this is plain `double` in every respect that matters to
@@ -890,6 +925,19 @@ int abi_hfa_elem_size(Type t) {
 }
 
 int abi_indirect_agg(Type t) {
+    const TargetDesc *td = target_current();
+    if (td && td->os == TOS_WINDOWS) {
+        if (type_is_pair16(t)) return 1;
+        /* Microsoft x64 passes __m256/__m512 by pointer and returns them
+         * through a hidden sret pointer, with or without AVX.  __m128
+         * stays in an XMM register when it is a named argument. */
+        if (t.is_vector) return type_size(t) > 16;
+        if (t.kind == TY_STRUCT) {
+            int sz = type_size(t);
+            return (sz != 1 && sz != 2 && sz != 4 && sz != 8);
+        }
+        return 0;
+    }
     /* Darwin: a non-HFA aggregate larger than 16 bytes is passed and
      * returned through a pointer.  HFAs use V registers instead. */
     if (!abi_is_arm64()) return 0;
@@ -1813,11 +1861,11 @@ void tu_init(TranslationUnit *tu) {
 
     /* Predeclare the `va_list` type used by the va_start/va_arg/va_end
      * builtins.  SysV AMD64 is the 24-byte four-field struct.  Darwin
-     * arm64 (clang) is an 8-byte cursor: anonymous arguments live on the
-     * stack, and va_list is just the pointer to the next one. */
+     * arm64 and Windows x64 are an 8-byte cursor: arguments live on the
+     * stack/shadow area, and va_list is just the pointer to the next one. */
     SourceLoc vloc = {0};
     StructDef *va = struct_registry_add(&tu->structs, "__va_list_tag", vloc);
-    if (abi_is_arm64()) {
+    if (abi_is_arm64() || (target_current() && target_current()->os == TOS_WINDOWS)) {
         struct_def_push_member(va, "overflow_arg_area",
                                type_make_ptr(type_make_void()), -1);
     } else {

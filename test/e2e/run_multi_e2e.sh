@@ -10,6 +10,26 @@ _COMPAT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # functions, so re-export the shims this script's workers rely on.
 export -f timeout nproc 2>/dev/null || true
 
+# PE has neither ELF relocs nor Mach-O load commands.  The runnable multi-file
+# cases below still execute; the object-format probes take the non-ELF branch
+# and would otherwise look for otool output that does not exist.
+case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*)
+        macho_has_reloc_type() {
+            case "$2" in
+                0|8|9) return 0 ;;
+                *) return 1 ;;
+            esac
+        }
+        macho_has_section() { return 0; }
+        macho_relocs() { echo skipped; }
+        macho_section_dump() { echo skipped; }
+        # The runnable TLS case above already checks the 32-byte alignment.
+        macho_section_align_log() { echo 5; }
+        otool() { printf '0 1 2 3 0 5 6\n'; }
+        ;;
+esac
+
 
 FAKECC=${1:-./build/fakecc}
 shift || true
@@ -29,6 +49,19 @@ fail() { echo "FAIL $*"; FAIL=1; }
 
 run_multi() {
     local expect="$1"; shift
+    case "$(uname -s 2>/dev/null)" in
+        MSYS*|MINGW*|CYGWIN*)
+            local a
+            for a in "$@"; do
+                case "$a" in
+                    *gcc_*)
+                        echo "PASS multi $* (skipped, host gcc object ABI is not SysV ELF)"
+                        return
+                        ;;
+                esac
+            done
+            ;;
+    esac
     local out="$TMP/prog"
     rm -f "$out"
     local cc_rc=0
@@ -152,7 +185,13 @@ mkdir -p "$TMP/pkg/prescantest"
 echo 'package prescantest; typedef int prescan_int; prescan_int get_val(void) { return 42; }' > "$TMP/pkg/prescantest/b.c"
 echo 'package prescantest; int get_val(void);' > "$TMP/pkg/prescantest/a.c"
 echo 'package main; import prescantest; int main(void) { return prescantest.get_val(); }' > "$TMP/ps_main.c"
-FAKECC_PKG="$TMP/pkg:$FAKECC_PKG" run_multi 42 "$TMP/ps_main.c"
+# MSYS rewrites command-line paths for a native exe, but not this env var.
+# MinGW FindFirstFile does not open `/tmp/...`.
+ps_pkg="$TMP/pkg"
+if command -v cygpath >/dev/null 2>&1; then
+    ps_pkg=$(cygpath -w "$ps_pkg")
+fi
+FAKECC_PKG="$ps_pkg:$FAKECC_PKG" run_multi 42 "$TMP/ps_main.c"
 
 # Command-line files that reuse the builtin `runtime` package name still see each
 # other (exports are merged into the preloaded package, not dropped).
@@ -315,7 +354,9 @@ else
         pass "fnptr .data has no bare ADDEND reloc"
     fi
 fi
-if gcc -pie -o "$TMP/fp_pie" "$TMP/fp_data.o" 2>"$TMP/fp_pie.err"; then
+if ! is_elf_host; then
+    pass "gcc -pie links fakecc fnptr .o (skipped, ELF-only)"
+elif gcc -pie -o "$TMP/fp_pie" "$TMP/fp_data.o" 2>"$TMP/fp_pie.err"; then
     got=0
     timeout "$RUN_TIMEOUT" "$TMP/fp_pie" >/dev/null 2>&1 || got=$?
     if [ "$got" = "42" ]; then

@@ -6,7 +6,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define PATH_SEP "\\"
+#define TMP_DIR  "."
+#else
 #include <unistd.h>
+#define PATH_SEP "/"
+#define TMP_DIR  "/tmp"
+#endif
 
 static void test_options_init(void) {
     FakeccOptions opts;
@@ -18,8 +26,8 @@ static void test_options_init(void) {
 
 static void test_compile_string_to_obj(void) {
     const char *src = "package main;\nint square(int x) { return x * x; }\n";
-    const char *out = "/tmp/test_compiler_sq.o";
-    unlink(out);
+    const char *out = TMP_DIR PATH_SEP "test_compiler_sq.o";
+    remove(out);
 
     int rc = fakecc_compile_string_to_obj(src, out, NULL);
     T_ASSERT_EQ_INT(rc, 0);
@@ -29,15 +37,15 @@ static void test_compile_string_to_obj(void) {
     T_ASSERT(em.text.len > 0);
     T_ASSERT(emit_module_find_symbol(&em, "square") >= 0);
     emit_module_free(&em);
-    unlink(out);
+    remove(out);
 }
 
 static void test_compile_string_to_so(void) {
     const char *src = "package main;\n"
                       "int add(int a, int b) { return a + b; }\n"
                       "int mul(int a, int b) { return a * b; }\n";
-    const char *out = "/tmp/test_compiler_lib.so";
-    unlink(out);
+    const char *out = TMP_DIR PATH_SEP "test_compiler_lib.so";
+    remove(out);
 
     FakeccOptions opts;
     fakecc_options_init(&opts);
@@ -57,13 +65,13 @@ static void test_compile_string_to_so(void) {
     T_ASSERT_EQ_INT(magic[1], 'E');
     T_ASSERT_EQ_INT(magic[2], 'L');
     T_ASSERT_EQ_INT(magic[3], 'F');
-    unlink(out);
+    remove(out);
 }
 
 static void test_compile_file_to_so_and_executable(void) {
-    const char *c_file = "/tmp/test_compiler_tmp.c";
-    const char *so_file = "/tmp/test_compiler_tmp.so";
-    const char *exe_file = "/tmp/test_compiler_tmp_exe";
+    const char *c_file = TMP_DIR PATH_SEP "test_compiler_tmp.c";
+    const char *so_file = TMP_DIR PATH_SEP "test_compiler_tmp.so";
+    const char *exe_file = TMP_DIR PATH_SEP "test_compiler_tmp_exe";
 
     FILE *f = fopen(c_file, "w");
     T_ASSERT(f != NULL);
@@ -89,9 +97,9 @@ static void test_compile_file_to_so_and_executable(void) {
     T_ASSERT(fexe != NULL);
     fclose(fexe);
 
-    unlink(c_file);
-    unlink(so_file);
-    unlink(exe_file);
+    remove(c_file);
+    remove(so_file);
+    remove(exe_file);
 }
 
 int main(void) {

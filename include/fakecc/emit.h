@@ -21,6 +21,9 @@
 #define SECT_FINI_ARRAY 8 /* .fini_array destructor pointers */
 #define SECT_TVARS   9  /* Mach-O tlv_descriptor table (reader-internal:
                         *   never carries bytes into an image) */
+#define SECT_PDATA   10 /* Windows .pdata RUNTIME_FUNCTION bytes */
+#define SECT_XDATA   11 /* Windows .xdata UNWIND_INFO bytes */
+#define SECT_TLS_CALLBACKS 12 /* Windows .CRT$XL* TLS callback pointers */
 #define INIT_PRIO_DEFAULT 65535
 
 /* ------------------------------------------------------------------ */
@@ -48,13 +51,45 @@ typedef struct {
 
 typedef struct {
     char *name;        /* symbol name (NULL for section symbols) */
-    uint8_t binding;   /* STB_LOCAL (0) / STB_GLOBAL (1) */
+    uint8_t binding;   /* STB_LOCAL (0) / STB_GLOBAL (1) / STB_WEAK (2) */
     uint8_t type;      /* STT_NOTYPE(0) / STT_OBJECT(1) / STT_FUNC(2) / STT_SECTION(3) / STT_TLS(6) */
     uint16_t shndx;    /* section index, or SHN_UNDEF(0) for undefined */
     size_t value;      /* offset within section (defined symbols) */
     size_t size;       /* byte size (0 for undefined symbols) */
     uint16_t macho_desc; /* Mach-O n_desc bits the ELF writer ignores */
 } EmitSymbol;
+
+/* One COMDAT section from a COFF object (MSVC/MinGW).  Associative
+ * COMDATs name their parent in assoc_name; selection is IMAGE_COMDAT_SELECT_*. */
+typedef struct {
+    char *sect_name;
+    uint8_t selection;
+    char *symbol;      /* defining symbol for the COMDAT group */
+    char *assoc_name;  /* SELECT_ASSOCIATIVE: associated section name */
+    uint8_t keep;      /* 1 until COMDAT selection drops the group */
+} EmitComdat;
+
+/* One input section's byte range inside an EmitModule buffer.  The PE
+ * linker uses this to drop a losing COMDAT (and its associative .pdata
+ * / .xdata) without disturbing the surrounding contribution. */
+typedef struct {
+    uint16_t kind;     /* SECT_* including SECT_PDATA / SECT_XDATA */
+    size_t off;
+    size_t len;
+    int comdat;        /* index into comdats[], or -1 */
+} EmitSpan;
+
+/* Windows x64 unwind record produced by codegen for .pdata/.xdata. */
+typedef struct {
+    size_t begin;            /* .text offset of function start */
+    size_t end;              /* .text offset just past function end */
+    size_t after_push_rbp;   /* just past `push %rbp` */
+    size_t after_set_fp;     /* just past `mov %rsp,%rbp` */
+    size_t after_prolog;     /* just past full prologue (incl. sub rsp) */
+    uint32_t stack_alloc;    /* bytes subtracted from rsp */
+    /* UWOP register numbers pushed after rbp, in push order; -1 ends. */
+    int8_t pushed[8];
+} EmitWinUnwind;
 
 /* ------------------------------------------------------------------ */
 /* Relocation entry                                                    */
@@ -247,6 +282,8 @@ typedef struct EmitModule {
     Buffer   fini_array; /* .fini_array — destructor function pointers */
     size_t   fini_array_align;
     int     *fini_prio;  /* one priority per 8-byte fini_array slot */
+    Buffer   tls_callbacks; /* Windows .CRT$XL* TLS callback pointers */
+    size_t   tls_callbacks_align;
 
     EmitSymbol *syms;  /* unified symbol table (section + defined + undefined) */
     size_t num_syms, cap_syms;
@@ -270,6 +307,23 @@ typedef struct EmitModule {
     size_t num_dbg_funcs, cap_dbg_funcs;
     DebugVar *dbg_globals;
     size_t num_dbg_globals, cap_dbg_globals;
+
+    /* Windows COFF extras (ignored by ELF/Mach-O writers). */
+    Buffer   pdata;              /* .pdata RUNTIME_FUNCTION bytes */
+    Buffer   xdata;              /* .xdata UNWIND_INFO bytes */
+    Buffer   drectve;            /* .drectve linker directives */
+    EmitComdat *comdats;
+    size_t num_comdats, cap_comdats;
+    EmitSpan *spans;
+    size_t num_spans, cap_spans;
+    /* Relocations for the raw .pdata / .xdata bytes above.  In-memory
+     * fakecc modules leave these empty and carry EmitWinUnwind instead. */
+    EmitReloc *pdata_relocs;
+    size_t num_pdata_relocs, cap_pdata_relocs;
+    EmitReloc *xdata_relocs;
+    size_t num_xdata_relocs, cap_xdata_relocs;
+    EmitWinUnwind *win_unwinds;
+    size_t num_win_unwinds, cap_win_unwinds;
 } EmitModule;
 
 /* ------------------------------------------------------------------ */
@@ -309,6 +363,19 @@ void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
 /* Record one arm64 dylib import (see EmitBind).  `name` is the C spelling;
  * the Mach-O "_" prefix is added here, so callers pass "pthread_create". */
 void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+
+/* Record one Windows x64 unwind frame (consumed by the COFF writer). */
+void emit_module_add_win_unwind(EmitModule *m, const EmitWinUnwind *u);
+/* Record COMDAT selection metadata from a COFF object reader. */
+void emit_module_add_comdat(EmitModule *m, const char *sect_name,
+                            uint8_t selection, const char *symbol,
+                            const char *assoc_name);
+void emit_module_add_span(EmitModule *m, uint16_t kind, size_t off,
+                          size_t len, int comdat);
+void emit_module_add_pdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
+void emit_module_add_xdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
 
 /* True when `name` is a function the arm64 backend may import from a dylib
  * instead of requiring a definition in the program.  Two sources feed it:
@@ -425,5 +492,10 @@ void emit_elf(const EmitModule *m, const char *path);
 #define R_X86_64_REX_GOTPCRELX 42 /* REX-prefixed relaxable GOTPCREL */
 #define R_X86_64_IRELATIVE     37 /* STT_GNU_IFUNC: r_addend = resolver, GOT filled at startup */
 #define STT_GNU_IFUNC          10
+/* PE-only reloc kinds carried through EmitModule.  ADDR32NB is an RVA
+ * (S + A - ImageBase).  SECREL is the offset of S within its section. */
+#define R_PE_ADDR32NB          100
+#define R_PE_SECREL            101
+#define R_PE_SECTION           102
 
 #endif /* FAKECC_EMIT_H */

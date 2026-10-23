@@ -12,8 +12,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include "win_isolate.h"
+#endif
 
 static char *write_file(const char *dir, const char *name, const char *body) {
     size_t n = strlen(dir) + 1 + strlen(name) + 1;
@@ -27,7 +31,13 @@ static char *write_file(const char *dir, const char *name, const char *body) {
 }
 
 static void test_load_and_export(void) {
+#ifdef _WIN32
+    char tmpl[260];
+    const char *tmp = getenv("TEMP");
+    snprintf(tmpl, sizeof tmpl, "%s\\fakecc_pkg_XXXXXX", tmp && tmp[0] ? tmp : ".");
+#else
     char tmpl[] = "/tmp/fakecc_pkg_XXXXXX";
+#endif
     char *root = mkdtemp(tmpl);
     T_ASSERT(root != NULL);
 
@@ -64,7 +74,13 @@ static void test_load_and_export(void) {
 }
 
 static void test_cycle_detected(void) {
+#ifdef _WIN32
+    char tmpl[260];
+    const char *tmp = getenv("TEMP");
+    snprintf(tmpl, sizeof tmpl, "%s\\fakecc_pkg_XXXXXX", tmp && tmp[0] ? tmp : ".");
+#else
     char tmpl[] = "/tmp/fakecc_pkg_XXXXXX";
+#endif
     char *root = mkdtemp(tmpl);
     T_ASSERT(root != NULL);
 
@@ -145,7 +161,13 @@ static void do_parse_sema(void) {
 }
 
 static char *make_root(void) {
+#ifdef _WIN32
+    char tmpl[260];
+    const char *tmp = getenv("TEMP");
+    snprintf(tmpl, sizeof tmpl, "%s\\fakecc_pkg_XXXXXX", tmp && tmp[0] ? tmp : ".");
+#else
     char tmpl[] = "/tmp/fakecc_pkg_XXXXXX";
+#endif
     char *root = mkdtemp(tmpl);
     T_ASSERT(root != NULL);
     snprintf(g_root, sizeof g_root, "%s", root);
@@ -205,7 +227,13 @@ static void test_pkg_die_at(void) {
 }
 
 static void test_pkg_typedef_enum(void) {
+#ifdef _WIN32
+    char tmpl[260];
+    const char *tmp = getenv("TEMP");
+    snprintf(tmpl, sizeof tmpl, "%s\\fakecc_pkg_XXXXXX", tmp && tmp[0] ? tmp : ".");
+#else
     char tmpl[] = "/tmp/fakecc_pkg_XXXXXX";
+#endif
     char *root = mkdtemp(tmpl);
     T_ASSERT(root != NULL);
 

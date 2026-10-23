@@ -223,16 +223,63 @@ size_t fread(void *p, size_t sz, size_t nm, FILE *f) {
     return done / vsz;
 }
 
+/* Set by the per-OS stdlib file.  Windows CreateFile does not accept `/tmp`. */
+extern int __fakecc_host_windows;
+
+/* Rewrite an MSYS `/tmp/...` path into TEMP/TMP.  Other paths are unchanged. */
+const char *rt_hostpath(const char *path, char *buf, int cap) {
+    const char *tmp;
+    int i;
+    int j;
+    if (!__fakecc_host_windows) return path;
+    if (path == 0 || cap < 2) return path;
+    if (!(path[0] == '/' && path[1] == 't' && path[2] == 'm' && path[3] == 'p'
+          && (path[4] == '/' || path[4] == 0)))
+        return path;
+    tmp = getenv("TEMP");
+    if (tmp == 0 || tmp[0] == 0) tmp = getenv("TMP");
+    if (tmp == 0 || tmp[0] == 0) return path;
+    i = 0;
+    while (tmp[i] && i + 1 < cap) {
+        buf[i] = tmp[i];
+        i = i + 1;
+    }
+    if (path[4] == '/') {
+        if (i > 0 && buf[i - 1] != '\\' && buf[i - 1] != '/' && i + 1 < cap) {
+            buf[i] = '\\';
+            i = i + 1;
+        }
+        j = 5;
+        while (path[j] && i + 1 < cap) {
+            char c = path[j];
+            if (c == '/') c = '\\';
+            buf[i] = c;
+            i = i + 1;
+            j = j + 1;
+        }
+    }
+    buf[i] = 0;
+    return buf;
+}
+
+int open(const char *path, int flags, int mode) {
+    char buf[512];
+    const char *hp = rt_hostpath(path, buf, 512);
+    long fd = __syscall(2, (long)hp, (long)flags, (long)mode);
+    if (fd < 0) return -1;
+    return (int)fd;
+}
+
 FILE *fopen(const char *path, const char *mode) {
     stdio_init();
     int flags = 0;
     int writable = 0;
     if (!parse_fopen_mode(mode, &flags, &writable)) return 0;
-    long fd = __syscall(2, (long)path, (long)flags, 420); /* 0644 */
+    int fd = open(path, flags, 420); /* 0644 */
     if (fd < 0) return 0;
     FILE *f = (FILE *)malloc(sizeof(FILE));
     if (f == 0) {
-        __syscall(3, fd);
+        __syscall(3, (long)fd);
         return 0;
     }
     memset(f, 0, sizeof(FILE));
@@ -250,7 +297,7 @@ FILE *freopen(const char *path, const char *mode, FILE *stream) {
     int flags = 0;
     int writable = 0;
     if (!parse_fopen_mode(mode, &flags, &writable)) return 0;
-    long fd = __syscall(2, (long)path, (long)flags, 420); /* 0644 */
+    int fd = open(path, flags, 420); /* 0644 */
     if (fd < 0) return 0;
     if (stream->fd >= 0 && stream != stdin && stream != stdout && stream != stderr) {
         __syscall(3, (long)stream->fd);
@@ -331,7 +378,9 @@ char *tmpnam(char *s) {
 }
 
 int remove(const char *path) {
-    long r = __syscall(87, (long)path);
+    char buf[512];
+    const char *hp = rt_hostpath(path, buf, 512);
+    long r = __syscall(87, (long)hp);
     return r == 0 ? 0 : -1;
 }
 
@@ -340,12 +389,18 @@ int remove(const char *path) {
  * Darwin's 136 and 128, verified against the Darwin arm64 syscall table by
  * calling each one and checking the directory existed afterwards. */
 int mkdir(const char *path, int mode) {
-    long r = __syscall(83, (long)path, (long)mode);
+    char buf[512];
+    const char *hp = rt_hostpath(path, buf, 512);
+    long r = __syscall(83, (long)hp, (long)mode);
     return r == 0 ? 0 : -1;
 }
 
 int rename(const char *from, const char *to) {
-    long r = __syscall(82, (long)from, (long)to);
+    char frombuf[512];
+    char tobuf[512];
+    const char *hf = rt_hostpath(from, frombuf, 512);
+    const char *ht = rt_hostpath(to, tobuf, 512);
+    long r = __syscall(82, (long)hf, (long)ht);
     return r == 0 ? 0 : -1;
 }
 

@@ -45,7 +45,8 @@ oracle_ambiguous() {
     command -v clang >/dev/null 2>&1 || return 1
     clang -w -fwrapv "$2" -o "$b.clang" 2>/dev/null || return 1
     timeout 10 "$b.clang" >"$b.clang.out" 2>/dev/null || return 1
-    cmp -s "$b.clang.out" "$3"
+    tr -d '\r' < "$b.clang.out" >"$b.clang.out.n"
+    cmp -s "$b.clang.out.n" "$3"
 }
 export -f oracle_ambiguous
 
@@ -61,6 +62,7 @@ check_pair() {
     fi
     timeout 10 "$b.gcc" >"$b.gcc.out" 2>/dev/null
     local grc=$?
+    tr -d '\r' < "$b.gcc.out" >"$b.gcc.out.n"
     if [ "$grc" = 124 ]; then
         echo "SKIP $name (oracle timed out)"; return 0
     fi
@@ -73,8 +75,9 @@ check_pair() {
             echo "FAIL $name $opt (fakecc failed to compile: $(head -1 "$b.err$opt"))"; rc=1; continue
         fi
         timeout 10 "$b.fcc$opt" >"$b.out$opt" 2>/dev/null || true
-        if ! cmp -s "$b.gcc.out" "$b.out$opt"; then
-            if oracle_ambiguous "$name$opt" "$g" "$b.out$opt"; then
+        tr -d '\r' < "$b.out$opt" >"$b.out$opt.n"
+        if ! cmp -s "$b.gcc.out.n" "$b.out$opt.n"; then
+            if oracle_ambiguous "$name$opt" "$g" "$b.out$opt.n"; then
                 echo "AMBIG $name $opt (gcc differs, clang agrees with fakecc: unspecified behaviour)"
             else
                 echo "FAIL $name $opt (output differs from gcc)"; rc=1

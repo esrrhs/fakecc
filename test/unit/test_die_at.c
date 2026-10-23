@@ -11,8 +11,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include "win_isolate.h"
+#endif
 
 typedef enum { ST_LEX = 1, ST_PARSE, ST_SEMA, ST_IR } Stage;
 

@@ -5,6 +5,9 @@
  * printf's vfprintf jump to a garbage address. */
 package runtime;
 
+/* stdio.c uses this to decide whether `/tmp` must be rewritten. */
+int __fakecc_host_windows = 0;
+
 /* mmap flags for MAP_ANONYMOUS mappings.
  *
  * These are not the Linux values.  Linux gives MAP_ANONYMOUS 0x20 and

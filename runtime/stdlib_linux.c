@@ -3,6 +3,9 @@
  * no conditional compilation, so per-target code is split by filename. */
 package runtime;
 
+/* stdio.c uses this to decide whether `/tmp` must be rewritten. */
+int __fakecc_host_windows = 0;
+
 /* mmap flags for MAP_ANONYMOUS mappings: the Linux values (see the Darwin
  * file for why these differ per target). */
 long __fakecc_map_private_anon = 0x0022;                    /* MAP_PRIVATE|MAP_ANONYMOUS */

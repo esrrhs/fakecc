@@ -3379,8 +3379,12 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
             union_desig_index = last_union_member_idx;
         }
     }
-    for (int i = 0; i < n; i++)
-        free(list->u.init_list.desig_member[i]);
+    /* desig_* arrays are NULL when the init list had no designators
+     * (ee6ff4d9 guarded reads; the free loop still assumed desig_member). */
+    if (list->u.init_list.desig_member) {
+        for (int i = 0; i < n; i++)
+            free(list->u.init_list.desig_member[i]);
+    }
     free(list->u.init_list.desig_kind);
     free(list->u.init_list.desig_index);
     free(list->u.init_list.desig_member);

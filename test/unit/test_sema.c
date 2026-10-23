@@ -8,8 +8,12 @@
 
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include "win_isolate.h"
+#endif
 
 /* ---- helper: lex + parse + sema_check; returns 1 on error ---- */
 static int lex_parse_sema_errors(const char *src) {

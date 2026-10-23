@@ -1,5 +1,5 @@
 // expect: 0
-// unsupported_on: darwin-arm64
+// unsupported_on: darwin-arm64 windows-x86_64
 // testl() compares long double values with memcmp(...,10), an x87 80-bit
 // assumption; on arm64 Darwin long double is an 8-byte double, so the 10th
 // byte reads neighbouring storage.  The host clang aborts identically.

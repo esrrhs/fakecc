@@ -4361,10 +4361,13 @@ static Stmt parse_stmt_impl(Parser *p) {
         snprintf(lbl, sizeof(lbl), "__sw_%d_case_%d", g_cur_switch->switch_id, g_cur_switch->case_count++);
         switch_push_case_range(g_cur_switch->switch_stmt, 0, value, high_value, is_range, lbl);
         Stmt inner;
-        if (peek(p)->kind == TK_RBRACE) {
-            inner.kind = ST_EXPR;
+        /* Empty body before '}' -- use ST_BLOCK like plain labels, not
+         * ST_EXPR with a NULL expr (that SEGV'd in lower_expr / fuzz). */
+        if (peek(p)->kind == TK_RBRACE || peek(p)->kind == TK_EOF) {
+            memset(&inner, 0, sizeof(inner));
+            inner.kind = ST_BLOCK;
             inner.loc = kw->loc;
-            inner.u.expr = NULL;
+            stmt_array_init(&inner.u.block);
         } else {
             inner = parse_stmt(p);
         }
@@ -4389,10 +4392,12 @@ static Stmt parse_stmt_impl(Parser *p) {
         snprintf(lbl, sizeof(lbl), "__sw_%d_default", g_cur_switch->switch_id);
         switch_push_case(g_cur_switch->switch_stmt, 1, 0, lbl);
         Stmt inner;
-        if (peek(p)->kind == TK_RBRACE) {
-            inner.kind = ST_EXPR;
+        /* Empty body before '}' -- ST_BLOCK, not ST_EXPR(NULL). */
+        if (peek(p)->kind == TK_RBRACE || peek(p)->kind == TK_EOF) {
+            memset(&inner, 0, sizeof(inner));
+            inner.kind = ST_BLOCK;
             inner.loc = kw->loc;
-            inner.u.expr = NULL;
+            stmt_array_init(&inner.u.block);
         } else {
             inner = parse_stmt(p);
         }

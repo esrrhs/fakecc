@@ -193,3 +193,15 @@ char *strerror(int n) {
     (void)n;
     return "error";
 }
+
+void *memchr(const void *s, int c, unsigned long n) {
+    const unsigned char *p = (const unsigned char *)s;
+    unsigned char ch = (unsigned char)c;
+    unsigned long i = 0;
+    if (s == 0) return 0;
+    while (i < n) {
+        if (p[i] == ch) return (void *)(p + i);
+        i = i + 1;
+    }
+    return 0;
+}

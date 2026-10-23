@@ -2,6 +2,7 @@
 #include "fakecc/common.h"
 #include "fakecc/debug.h"
 #include "fakecc/macho.h"
+#include "fakecc/pe.h"
 #include "fakecc/target.h"
 
 #include <stdint.h>
@@ -42,6 +43,8 @@ void emit_module_init(EmitModule *m) {
     buffer_init(&m->fini_array);
     m->fini_array_align = 8;
     m->fini_prio = NULL;
+    buffer_init(&m->tls_callbacks);
+    m->tls_callbacks_align = 8;
     m->syms = NULL; m->num_syms = 0; m->cap_syms = 0;
     m->relocs = NULL; m->num_relocs = 0; m->cap_relocs = 0;
     m->data_relocs = NULL; m->num_data_relocs = 0; m->cap_data_relocs = 0;
@@ -51,6 +54,14 @@ void emit_module_init(EmitModule *m) {
     m->dbg_lines = NULL; m->num_dbg_lines = 0; m->cap_dbg_lines = 0;
     m->dbg_funcs = NULL; m->num_dbg_funcs = 0; m->cap_dbg_funcs = 0;
     m->dbg_globals = NULL; m->num_dbg_globals = 0; m->cap_dbg_globals = 0;
+    buffer_init(&m->pdata);
+    buffer_init(&m->xdata);
+    buffer_init(&m->drectve);
+    m->comdats = NULL; m->num_comdats = 0; m->cap_comdats = 0;
+    m->spans = NULL; m->num_spans = 0; m->cap_spans = 0;
+    m->pdata_relocs = NULL; m->num_pdata_relocs = 0; m->cap_pdata_relocs = 0;
+    m->xdata_relocs = NULL; m->num_xdata_relocs = 0; m->cap_xdata_relocs = 0;
+    m->win_unwinds = NULL; m->num_win_unwinds = 0; m->cap_win_unwinds = 0;
 }
 
 static void free_debug_var(DebugVar *v) {
@@ -74,6 +85,7 @@ void emit_module_free(EmitModule *m) {
     free(m->init_prio);
     buffer_free(&m->fini_array);
     free(m->fini_prio);
+    buffer_free(&m->tls_callbacks);
     free(m->dbg_tu_name);
     for (size_t i = 0; i < m->num_dbg_lines; i++) free(m->dbg_lines[i].file);
     free(m->dbg_lines);
@@ -91,6 +103,95 @@ void emit_module_free(EmitModule *m) {
     for (size_t i = 0; i < m->num_dbg_globals; i++)
         free_debug_var(&m->dbg_globals[i]);
     free(m->dbg_globals);
+    buffer_free(&m->pdata);
+    buffer_free(&m->xdata);
+    buffer_free(&m->drectve);
+    for (size_t i = 0; i < m->num_comdats; i++) {
+        free(m->comdats[i].sect_name);
+        free(m->comdats[i].symbol);
+        free(m->comdats[i].assoc_name);
+    }
+    free(m->comdats);
+    free(m->spans);
+    free(m->pdata_relocs);
+    free(m->xdata_relocs);
+    free(m->win_unwinds);
+}
+
+void emit_module_add_win_unwind(EmitModule *m, const EmitWinUnwind *u) {
+    if (!m || !u) return;
+    if (m->num_win_unwinds >= m->cap_win_unwinds) {
+        size_t nc = m->cap_win_unwinds ? m->cap_win_unwinds * 2 : 8;
+        m->win_unwinds = realloc(m->win_unwinds, nc * sizeof(EmitWinUnwind));
+        if (!m->win_unwinds) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_win_unwinds = nc;
+    }
+    m->win_unwinds[m->num_win_unwinds++] = *u;
+}
+
+void emit_module_add_comdat(EmitModule *m, const char *sect_name,
+                            uint8_t selection, const char *symbol,
+                            const char *assoc_name) {
+    if (!m || !sect_name) return;
+    if (m->num_comdats >= m->cap_comdats) {
+        size_t nc = m->cap_comdats ? m->cap_comdats * 2 : 4;
+        m->comdats = realloc(m->comdats, nc * sizeof(EmitComdat));
+        if (!m->comdats) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_comdats = nc;
+    }
+    EmitComdat *c = &m->comdats[m->num_comdats++];
+    c->sect_name = xstrdup(sect_name);
+    c->selection = selection;
+    c->symbol = symbol ? xstrdup(symbol) : NULL;
+    c->assoc_name = assoc_name ? xstrdup(assoc_name) : NULL;
+    c->keep = 1;
+}
+
+void emit_module_add_span(EmitModule *m, uint16_t kind, size_t off,
+                          size_t len, int comdat) {
+    if (!m || !len) return;
+    if (m->num_spans >= m->cap_spans) {
+        size_t nc = m->cap_spans ? m->cap_spans * 2 : 8;
+        m->spans = realloc(m->spans, nc * sizeof(EmitSpan));
+        if (!m->spans) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        m->cap_spans = nc;
+    }
+    EmitSpan *s = &m->spans[m->num_spans++];
+    s->kind = kind;
+    s->off = off;
+    s->len = len;
+    s->comdat = comdat;
+}
+
+static void add_reloc_list(EmitReloc **arr, size_t *n, size_t *cap,
+                           size_t offset, uint32_t type, int sym,
+                           int32_t addend, uint16_t shndx) {
+    if (*n >= *cap) {
+        size_t nc = *cap ? *cap * 2 : 8;
+        *arr = realloc(*arr, nc * sizeof(EmitReloc));
+        if (!*arr) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+        *cap = nc;
+    }
+    EmitReloc *r = &(*arr)[(*n)++];
+    r->offset = offset;
+    r->type = type;
+    r->sym = (uint32_t)sym;
+    r->addend = addend;
+    r->shndx = shndx;
+}
+
+void emit_module_add_pdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend) {
+    if (!m) return;
+    add_reloc_list(&m->pdata_relocs, &m->num_pdata_relocs, &m->cap_pdata_relocs,
+                   offset, type, sym, addend, SECT_PDATA);
+}
+
+void emit_module_add_xdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend) {
+    if (!m) return;
+    add_reloc_list(&m->xdata_relocs, &m->num_xdata_relocs, &m->cap_xdata_relocs,
+                   offset, type, sym, addend, SECT_XDATA);
 }
 
 /* ------------------------------------------------------------------ */
@@ -532,6 +633,10 @@ void emit_obj(const EmitModule *m, const char *path) {
         if (macho_write_object(m, path) != 0) exit(1);
         return;
     }
+    if (target_current()->objfmt == TARGET_OBJFMT_PE) {
+        if (coff_write_object(m, path) != 0) exit(1);
+        return;
+    }
     if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
         fprintf(stderr,
                 "fakecc: object emission for target '%s' is not implemented yet\n",
@@ -928,6 +1033,8 @@ static void prio_fill_slots(int **prio, size_t byte_off, size_t byte_sz, int p) 
 int emit_obj_read(const char *path, EmitModule *m) {
     if (target_current()->objfmt == TARGET_OBJFMT_MACHO)
         return macho_read_object(path, m);
+    if (target_current()->objfmt == TARGET_OBJFMT_PE)
+        return coff_read_object(path, m);
     if (target_current()->objfmt != TARGET_OBJFMT_ELF) {
         fprintf(stderr,
                 "fakecc: object reading for target '%s' is not implemented yet\n",

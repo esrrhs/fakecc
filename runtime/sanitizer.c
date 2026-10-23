@@ -61,11 +61,15 @@ void __asan_init(void) {
     }
     /* MAP_FIXED makes the kernel honour the address or fail; a different
      * address means the shadow lookup would read the wrong page. */
-    if (p != 0x100000000000L) g_asan_inited = 0;
+    /* A failed map must stick.  malloc always unpoisons, and retrying a
+     * multi-terabyte VirtualAlloc on every allocation never succeeds on
+     * Windows.  Callers treat any value other than 1 as "no shadow". */
+    if (p != 0x100000000000L) g_asan_inited = -1;
 }
 
 void __asan_poison_memory_region(void *addr, size_t size) {
     if (!g_asan_inited) __asan_init();
+    if (g_asan_inited != 1) return;
     if (size == 0 || addr == 0) return;
     unsigned long u = (unsigned long)addr;
     unsigned long shadow_start = (u >> 3) + 0x100000000000UL;
@@ -80,6 +84,7 @@ void __asan_poison_memory_region(void *addr, size_t size) {
 
 void __asan_unpoison_memory_region(void *addr, size_t size) {
     if (!g_asan_inited) __asan_init();
+    if (g_asan_inited != 1) return;
     if (size == 0 || addr == 0) return;
     unsigned long u = (unsigned long)addr;
     unsigned long shadow_start = (u >> 3) + 0x100000000000UL;
@@ -117,6 +122,7 @@ void __asan_report_error(void *addr, size_t size, int is_write) {
 
 static void asan_check_range(void *addr, size_t size, int is_write) {
     if (!g_asan_inited) __asan_init();
+    if (g_asan_inited != 1) return;
     unsigned long u = (unsigned long)addr;
     if (u < 0x400000UL) {
         __asan_report_error(addr, size, is_write);

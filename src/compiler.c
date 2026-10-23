@@ -97,6 +97,10 @@ static int ends_with(const char *s, const char *suffix) {
     return strcmp(s + slen - suflen, suffix) == 0;
 }
 
+static int is_obj_input(const char *s) {
+    return ends_with(s, ".o") || ends_with(s, ".obj");
+}
+
 static int lower_one_tu(TranslationUnit *tu, const char *filename,
                         EmitModule *out, int opt_level, int want_debug,
                         PkgContext *pkg) {
@@ -360,7 +364,7 @@ int fakecc_compile_files(const char **input_paths,
     pkg_ctx_init(&pkg);
 
     for (size_t i = 0; i < num_inputs; i++) {
-        if (!ends_with(input_paths[i], ".o")) {
+        if (!is_obj_input(input_paths[i])) {
             char *d = dir_of(input_paths[i]);
             if (d) {
                 pkg_ctx_add_path(&pkg, d);
@@ -390,7 +394,7 @@ int fakecc_compile_files(const char **input_paths,
 
     for (size_t i = 0; i < num_inputs; i++) {
         tu_init(&user_tus[i]);
-        if (!ends_with(input_paths[i], ".o")) {
+        if (!is_obj_input(input_paths[i])) {
             char *src = read_file_text(input_paths[i]);
             if (!src) {
                 for (size_t j = 0; j <= i; j++) tu_free(&user_tus[j]);
@@ -449,7 +453,7 @@ int fakecc_compile_files(const char **input_paths,
     }
 
     for (size_t i = 0; i < num_inputs; i++) {
-        if (ends_with(input_paths[i], ".o")) {
+        if (is_obj_input(input_paths[i])) {
             if (emit_obj_read(input_paths[i], &mods[i]) != 0) {
                 for (size_t j = 0; j < i; j++) emit_module_free(&mods[j]);
                 for (size_t j = 0; j < num_inputs; j++) tu_free(&user_tus[j]);

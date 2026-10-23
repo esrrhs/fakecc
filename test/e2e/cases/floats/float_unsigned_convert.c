@@ -1,5 +1,7 @@
 // The x86 int/float conversions are all signed, so both directions need the
 // 2^63 split to cover the top half of the unsigned 64-bit range.
+// unsupported_on: windows-x86_64
+// Microsoft x64 long double is IEEE double, so 2^64-1 does not round-trip.
 // skip_oracle: clang
 // expect: 42
 // expect_stdout: 1 1 1 1 3000000000 4000000000
