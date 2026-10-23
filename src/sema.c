@@ -1968,6 +1968,21 @@ static Type check_expr_inner(Expr *e) {
                        "atomic builtin takes at least 1 argument");
                 return type_make_void();
             }
+            /* compare_and_swap needs (ptr, old, new); most other __sync_*
+             * ops need (ptr, val).  lock_release is pointer-only. */
+            if (strcmp(sname, "__sync_bool_compare_and_swap") == 0
+                || strcmp(sname, "__sync_val_compare_and_swap") == 0) {
+                if (e->u.call.args.len < 3) {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "%s takes 3 arguments", sname);
+                    return type_make_void();
+                }
+            } else if (strcmp(sname, "__sync_lock_release") != 0
+                       && e->u.call.args.len < 2) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "%s takes at least 2 arguments", sname);
+                return type_make_void();
+            }
             Type ptr_ty = check_expr_inner(e->u.call.args.data[0]);
             if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
