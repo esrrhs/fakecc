@@ -7160,6 +7160,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 emit_fakecc_dmb(fn, 11, e->loc);
                 return -1;
             }
+            /* Match __atomic_* lowering: never walk missing Expr* children
+             * when a fuzzer or incomplete AST under-supplies arguments. */
+            if (e->u.call.args.len < 1) return -1;
             IRValue addr = lower_expr(fn, st, e->u.call.args.data[0]);
             int sz = type_size(e->type);
             int is_u = e->type.is_unsigned;
@@ -7178,6 +7181,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
             if (strcmp(sname, "__sync_bool_compare_and_swap") == 0 ||
                 strcmp(sname, "__sync_val_compare_and_swap") == 0) {
+                if (e->u.call.args.len < 3) return -1;
                 int is_bool = strcmp(sname, "__sync_bool_compare_and_swap") == 0;
                 int val_sz = sz;
                 int val_u = is_u;
@@ -7223,6 +7227,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 }
             }
             if (strcmp(sname, "__sync_lock_test_and_set") == 0) {
+                if (e->u.call.args.len < 2) return -1;
                 IRValue new_val = lower_expr(fn, st, e->u.call.args.data[1]);
                 /* Acquire exchange.  Odd sizes stay a plain pair. */
                 if (sz == 1 || sz == 2 || sz == 4 || sz == 8)
@@ -7233,6 +7238,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 emit_inst_w(fn, IR_STORE_PTR, -1, addr, new_val, 0, sz, is_u, e->loc);
                 return old_val;
             }
+            if (e->u.call.args.len < 2) return -1;
             IRValue delta = lower_expr(fn, st, e->u.call.args.data[1]);
             int op = IR_ADD;
             int is_nand = strstr(sname, "nand") != NULL;
