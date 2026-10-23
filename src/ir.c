@@ -6054,6 +6054,7 @@ static IRValue i128_pair_materialize(IRFunction *fn, I128Pair *p, SourceLoc loc)
 
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     if (fakecc_had_error()) return FAKECC_ERR;
+    if (!e) return FAKECC_ERR; /* empty case/default before '}' used to pass NULL */
     switch (e->kind) {
     case EX_INT_LIT: {
         if (type_is_i128(e->type)) {
@@ -10314,6 +10315,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
 static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                        const FunctionDecl *cur_fd) {
     if (fakecc_had_error()) return;
+    if (!s) return; /* null stmt from empty label/case body */
     switch (s->kind) {
     case ST_DECL: {
         Type dty = s->u.decl.type;
@@ -10553,7 +10555,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         break;
     }
     case ST_EXPR:
-        lower_expr(fn, st, s->u.expr);
+        if (s->u.expr) lower_expr(fn, st, s->u.expr);
         break;
     case ST_RETURN: {
         if (g_vapack_depth > 0) {
@@ -10852,7 +10854,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         emit_label(fn, id, s->loc);
         if (g_ir_entry_sp_slot >= 0 && id >= 0 && id < g_ir_label_vla_id_count)
             emit_restore_vla_sp(fn, g_ir_label_vla_id[id], s->loc);
-        lower_stmt(fn, st, s->u.label_s.stmt, cur_fd);
+        if (s->u.label_s.stmt) lower_stmt(fn, st, s->u.label_s.stmt, cur_fd);
         break;
     }
     case ST_SWITCH: {
