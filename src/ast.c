@@ -1515,6 +1515,19 @@ Expr *expr_new_label_addr(const char *label, SourceLoc loc) {
 }
 
 void expr_free(Expr *e) {
+    /* Free a prefix spine iteratively. Each node only owns its operand,
+     * and a few hundred of them overflow a 1MB ASan stack. */
+    while (e && (e->kind == EX_UNARY || e->kind == EX_ADDR ||
+                 e->kind == EX_DEREF || e->kind == EX_INC_DEC)) {
+        Expr *next;
+        if (e->kind == EX_UNARY) next = e->u.un.operand;
+        else if (e->kind == EX_ADDR) next = e->u.addr.operand;
+        else if (e->kind == EX_DEREF) next = e->u.deref.operand;
+        else next = e->u.incdec.operand;
+        type_free(&e->type);
+        free(e);
+        e = next;
+    }
     if (!e) return;
     switch (e->kind) {
     case EX_INT_LIT:
@@ -2242,15 +2255,44 @@ int fold_const_int(const Expr *e, long long *out) {
         return 1;
     }
     if (e->kind == EX_UNARY) {
+        const Expr *stack_n[8];
+        const Expr **nodes = stack_n;
+        int cap = 8, n = 0, heap = 0;
+        const Expr *cur = e;
         long long v;
-        if (!fold_const_int(e->u.un.operand, &v)) return 0;
-        switch (e->u.un.op) {
-        case UOP_NEG: *out = (long long)(0ull - (unsigned long long)v); return 1;
-        case UOP_POS: *out = v; return 1;
-        case UOP_BITNOT: *out = ~v; return 1;
-        case UOP_NOT: *out = !v ? 1 : 0; return 1;
-        default: return 0;
+        int i;
+        while (cur && cur->kind == EX_UNARY) {
+            if (n >= cap) {
+                int nc = cap * 2;
+                const Expr **np = (const Expr **)malloc((size_t)nc * sizeof(const Expr *));
+                if (!np) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(np, nodes, (size_t)n * sizeof(const Expr *));
+                if (heap) free((void *)nodes);
+                nodes = np;
+                cap = nc;
+                heap = 1;
+            }
+            nodes[n++] = cur;
+            cur = cur->u.un.operand;
         }
+        if (!fold_const_int(cur, &v)) {
+            if (heap) free((void *)nodes);
+            return 0;
+        }
+        for (i = n - 1; i >= 0; i--) {
+            switch (nodes[i]->u.un.op) {
+            case UOP_NEG: v = (long long)(0ull - (unsigned long long)v); break;
+            case UOP_POS: break;
+            case UOP_BITNOT: v = ~v; break;
+            case UOP_NOT: v = !v ? 1 : 0; break;
+            default:
+                if (heap) free((void *)nodes);
+                return 0;
+            }
+        }
+        if (heap) free((void *)nodes);
+        *out = v;
+        return 1;
     }
     if (e->kind == EX_BINOP) {
         long long l, r;
@@ -2395,6 +2437,49 @@ int fold_const_int(const Expr *e, long long *out) {
 
 Expr *expr_clone(const Expr *e) {
     if (!e) return NULL;
+    if (e->kind == EX_UNARY || e->kind == EX_ADDR ||
+        e->kind == EX_DEREF || e->kind == EX_INC_DEC) {
+        const Expr *stack_n[8];
+        const Expr **nodes = stack_n;
+        int cap = 8, n = 0, heap = 0, i;
+        const Expr *cur = e;
+        Expr *leaf;
+        while (cur && (cur->kind == EX_UNARY || cur->kind == EX_ADDR ||
+                       cur->kind == EX_DEREF || cur->kind == EX_INC_DEC)) {
+            if (n >= cap) {
+                int nc = cap * 2;
+                const Expr **np = (const Expr **)malloc((size_t)nc * sizeof(const Expr *));
+                if (!np) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(np, nodes, (size_t)n * sizeof(const Expr *));
+                if (heap) free((void *)nodes);
+                nodes = np;
+                cap = nc;
+                heap = 1;
+            }
+            nodes[n++] = cur;
+            if (cur->kind == EX_UNARY) cur = cur->u.un.operand;
+            else if (cur->kind == EX_ADDR) cur = cur->u.addr.operand;
+            else if (cur->kind == EX_DEREF) cur = cur->u.deref.operand;
+            else cur = cur->u.incdec.operand;
+        }
+        leaf = expr_clone(cur);
+        for (i = n - 1; i >= 0; i--) {
+            const Expr *src = nodes[i];
+            Expr *r = (Expr *)malloc(sizeof(Expr));
+            if (!r) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            memset(r, 0, sizeof(Expr));
+            *r = *src;
+            r->type = type_clone(src->type);
+            r->va_arg_type = type_clone(src->va_arg_type);
+            if (src->kind == EX_UNARY) r->u.un.operand = leaf;
+            else if (src->kind == EX_ADDR) r->u.addr.operand = leaf;
+            else if (src->kind == EX_DEREF) r->u.deref.operand = leaf;
+            else r->u.incdec.operand = leaf;
+            leaf = r;
+        }
+        if (heap) free((void *)nodes);
+        return leaf;
+    }
     Expr *r = malloc(sizeof(Expr));
     if (!r) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     memset(r, 0, sizeof(Expr));

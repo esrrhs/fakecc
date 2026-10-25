@@ -1,11 +1,7 @@
-/* Regression test for stack overflow in deeply nested unary operators.
- * The parser and semantic analyzer must limit expression nesting depth
- * to avoid stack overflow under ASan/UBSan or in resource-constrained
- * environments.
- *
- * This test uses a chain of 200 unary NOT operators, which is well below
- * the MAX_EXPR_DEPTH limit (512) but deep enough to have triggered stack
- * overflow under ASan before the fix.
+/* Regression: a long but legitimate unary chain must be accepted.
+ * Prefix operators are parsed, type-checked, and lowered iteratively, so
+ * this stays inside a 1MB stack (Windows, including ASan) instead of
+ * pushing one frame per operator. 200 is well under the 512-operator cap.
  */
 package main;
 

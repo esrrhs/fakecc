@@ -383,6 +383,14 @@ static void collect_labels(LabelSet *ls, const Stmt *s);
 
 static void collect_labels_expr(LabelSet *ls, const Expr *e) {
     if (!e) return;
+    while (e && (e->kind == EX_UNARY || e->kind == EX_ADDR ||
+                 e->kind == EX_DEREF || e->kind == EX_INC_DEC)) {
+        if (e->kind == EX_UNARY) e = e->u.un.operand;
+        else if (e->kind == EX_ADDR) e = e->u.addr.operand;
+        else if (e->kind == EX_DEREF) e = e->u.deref.operand;
+        else e = e->u.incdec.operand;
+    }
+    if (!e) return;
     switch (e->kind) {
     case EX_STMT_EXPR:
         if (e->u.stmt_expr.stmts) {
@@ -994,11 +1002,152 @@ static Type check_ternary_expr(Expr *e) {
     return type_clone(e->type);
 }
 
+
+static Expr *prefix_spine_operand(Expr *e) {
+    switch (e->kind) {
+    case EX_UNARY: return e->u.un.operand;
+    case EX_ADDR: return e->u.addr.operand;
+    case EX_DEREF: return e->u.deref.operand;
+    case EX_INC_DEC: return e->u.incdec.operand;
+    default: return NULL;
+    }
+}
+
+static int prefix_spine_kind(ExprKind k) {
+    return k == EX_UNARY || k == EX_ADDR || k == EX_DEREF || k == EX_INC_DEC;
+}
+
+/* Type one prefix node whose operand is already typed as `ot` (consumed). */
+static Type apply_check_unary(Expr *e, Type ot) {
+    if (ot.kind == TY_ARRAY) {
+        Type d = type_decay(ot); type_free(&ot); ot = d;
+    }
+    if (ot.is_vector) {
+        set_type(e, ot);
+        return type_clone(e->type);
+    }
+    if ((e->u.un.op == UOP_BITNOT || e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS) &&
+        ot.kind == TY_STRUCT && ot.tag && strncmp(ot.tag, "__complex_", 10) == 0) {
+        set_type(e, ot);
+        return type_clone(e->type);
+    }
+    if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "bitwise NOT requires an integer operand");
+        type_free(&ot);
+        return type_make_void();
+    }
+    {
+        Type res;
+        if (e->u.un.op == UOP_NOT) {
+            if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "logical NOT requires a scalar operand");
+                type_free(&ot);
+                return type_make_void();
+            }
+            res = type_make_int(4, 0);
+        } else {
+            res = integer_promote(ot);
+        }
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+}
+
+static Type apply_check_addr(Expr *e, Type ot, const SymTable *st) {
+    Expr *op = e->u.addr.operand;
+    ExprKind ok = op ? op->kind : EX_INT_LIT;
+    if (!op || (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER
+                && ok != EX_COMPOUND_LITERAL)) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "cannot take address of rvalue");
+        type_free(&ot);
+        return type_make_void();
+    }
+    if (op->kind == EX_MEMBER && ot.bitfield_width > 0) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "cannot take address of bitfield member");
+        type_free(&ot);
+        return type_make_void();
+    }
+    if (op->kind == EX_VAR) {
+        const Sym *sy = symtable_find(st, op->u.var.name);
+        if (sy && sy->is_register) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "address of register variable requested");
+            type_free(&ot);
+            return type_make_void();
+        }
+    }
+    if (ot.kind == TY_PTR && ot.pointee && ot.pointee->kind == TY_FUNC) {
+        set_type(e, ot);
+        return type_clone(e->type);
+    }
+    {
+        Type res = type_make_ptr(ot);
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+}
+
+static Type apply_check_deref(Expr *e, Type ot) {
+    if (ot.kind == TY_ARRAY) {
+        Type d = type_decay(ot); type_free(&ot); ot = d;
+    }
+    if (ot.kind != TY_PTR) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "cannot dereference non-pointer");
+        type_free(&ot);
+        return type_make_void();
+    }
+    {
+        Type res = type_clone(*ot.pointee);
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+}
+
+static Type apply_check_incdec(Expr *e, Type ot) {
+    Expr *op = e->u.incdec.operand;
+    if (!op || (op->kind != EX_VAR && op->kind != EX_DEREF &&
+                op->kind != EX_INDEX && op->kind != EX_MEMBER)) {
+        die_at(op ? op->loc.file : e->loc.file,
+               op ? op->loc.line : e->loc.line,
+               op ? op->loc.col : e->loc.col,
+               "operand of '%s' must be an lvalue",
+               e->u.incdec.is_inc ? "++" : "--");
+        type_free(&ot);
+        return type_make_void();
+    }
+    if (ot.is_const) {
+        die_at(op->loc.file, op->loc.line, op->loc.col,
+               "cannot increment/decrement a read-only variable");
+        type_free(&ot);
+        return type_make_void();
+    }
+    if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR) {
+        die_at(op->loc.file, op->loc.line, op->loc.col,
+               "operand of '%s' must be arithmetic or pointer",
+               e->u.incdec.is_inc ? "++" : "--");
+        type_free(&ot);
+        return type_make_void();
+    }
+    type_free(&ot);
+    set_type(e, type_clone(op->type));
+    return type_clone(e->type);
+}
+
 static Type check_expr_inner(Expr *e) {
     if (fakecc_had_error()) return type_make_void();
     if (!e) return type_default_int();
     
-    /* Guard against unbounded recursion (e.g., deeply nested unary chains). */
+    /* Guard real expression nesting. Prefix spines (unary, &, *, ++/--)
+     * are flattened below and do not consume a frame or a depth slot per
+     * operator — a leaked counter used to trip this on ordinary code. */
     if (++g_check_expr_depth > CHECK_EXPR_MAX_DEPTH) {
         g_check_expr_depth--;
         die_at(e->loc.file, e->loc.line, e->loc.col,
@@ -1007,6 +1156,62 @@ static Type check_expr_inner(Expr *e) {
     }
     
     const SymTable *st = g_check_st;
+    /* One frame for a whole prefix spine. ++/-- whose operand is not an
+     * lvalue stops here, matching the old check that diagnosed before
+     * walking into that operand. */
+    if (prefix_spine_kind(e->kind)) {
+        Expr *node_stack[8];
+        Expr **nodes = node_stack;
+        int ncap = 8, n = 0, node_heap = 0, skip_leaf = 0;
+        Expr *cur = e;
+        while (cur && prefix_spine_kind(cur->kind)) {
+            Expr *opnd;
+            int lval;
+            if (n >= CHECK_EXPR_MAX_DEPTH) {
+                die_at(cur->loc.file, cur->loc.line, cur->loc.col,
+                       "expression nesting too deep (limit %d)", CHECK_EXPR_MAX_DEPTH);
+                if (node_heap) free(nodes);
+                RETURN_TYPE(type_make_void());
+            }
+            if (n >= ncap) {
+                int nn = ncap * 2;
+                Expr **np = (Expr **)malloc((size_t)nn * sizeof(Expr *));
+                if (!np) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(np, nodes, (size_t)n * sizeof(Expr *));
+                if (node_heap) free(nodes);
+                nodes = np;
+                ncap = nn;
+                node_heap = 1;
+            }
+            nodes[n++] = cur;
+            if (cur->kind == EX_INC_DEC) {
+                opnd = cur->u.incdec.operand;
+                lval = opnd && (opnd->kind == EX_VAR || opnd->kind == EX_DEREF ||
+                                opnd->kind == EX_INDEX || opnd->kind == EX_MEMBER);
+                if (!lval) { skip_leaf = 1; break; }
+                cur = opnd;
+            } else {
+                opnd = prefix_spine_operand(cur);
+                if (!opnd) { cur = NULL; break; }
+                cur = opnd;
+            }
+        }
+        {
+            Type ot = skip_leaf ? type_make_void() : check_expr_inner(cur);
+            int i;
+            for (i = n - 1; i >= 0; i--) {
+                Type nt;
+                Expr *node = nodes[i];
+                if (node->kind == EX_UNARY) nt = apply_check_unary(node, ot);
+                else if (node->kind == EX_ADDR) nt = apply_check_addr(node, ot, st);
+                else if (node->kind == EX_DEREF) nt = apply_check_deref(node, ot);
+                else nt = apply_check_incdec(node, ot);
+                ot = nt;
+            }
+            if (node_heap) free(nodes);
+            RETURN_TYPE(ot);
+        }
+    }
     switch (e->kind) {
     case EX_INT_LIT:
         /* Width/signedness were derived from the suffix and magnitude by the
@@ -1225,44 +1430,12 @@ static Type check_expr_inner(Expr *e) {
         set_type(e, res);
         RETURN_TYPE(type_clone(e->type));
     }
-    case EX_UNARY: {
-        Type ot = check_expr_inner(e->u.un.operand);
-        if (ot.kind == TY_ARRAY) {
-            Type d = type_decay(ot); type_free(&ot); ot = d;
-        }
-        if (ot.is_vector) {
-            set_type(e, ot);
-            RETURN_TYPE(type_clone(e->type));
-        }
-        if ((e->u.un.op == UOP_BITNOT || e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS) &&
-            ot.kind == TY_STRUCT && ot.tag && strncmp(ot.tag, "__complex_", 10) == 0) {
-            set_type(e, ot);
-            RETURN_TYPE(type_clone(e->type));
-        }
-        if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT)
-            {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "bitwise NOT requires an integer operand");
-                RETURN_TYPE(type_make_void());
-            }
-        Type res;
-        if (e->u.un.op == UOP_NOT) {
-            /* Logical NOT: operand must be scalar (int, float, or pointer);
-             * result is always int 0 or 1. */
-            if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "logical NOT requires a scalar operand");
-                    RETURN_TYPE(type_make_void());
-                }
-            res = type_make_int(4, 0);
-        } else {
-            res = integer_promote(ot);
-        }
-        type_free(&ot);
-        set_type(e, res);
-        RETURN_TYPE(type_clone(e->type));
-    }
+    case EX_UNARY:
+    case EX_ADDR:
+    case EX_DEREF:
+    case EX_INC_DEC:
+        /* Prefix spines are typed iteratively above this switch. */
+        RETURN_TYPE(type_make_void());
     case EX_VAR: {
         /* Qualified: pkg.sym.  The parser only sets `pkg` after a matching
          * `import`, so a missing-import diagnostic here is unreachable. */
@@ -2515,56 +2688,6 @@ static Type check_expr_inner(Expr *e) {
         type_free(&ct);
         RETURN_TYPE(type_clone(e->type));
     }
-    case EX_ADDR: {
-        Type ot = check_expr_inner(e->u.addr.operand);
-        /* operand must be lvalue */
-        ExprKind ok = e->u.addr.operand->kind;
-        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER
-            && ok != EX_COMPOUND_LITERAL) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "cannot take address of rvalue");
-            RETURN_TYPE(type_make_void());
-        }
-        if (e->u.addr.operand->kind == EX_MEMBER && ot.bitfield_width > 0) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "cannot take address of bitfield member");
-            RETURN_TYPE(type_make_void());
-        }
-        if (e->u.addr.operand->kind == EX_VAR) {
-            const Sym *sy = symtable_find(st, e->u.addr.operand->u.var.name);
-            if (sy && sy->is_register) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "address of register variable requested");
-                RETURN_TYPE(type_make_void());
-            }
-        }
-        /* `&function` is a no-op in C -- the result is the same function
-         * pointer that the function lvalue already decayed to.  If the operand
-         * is already a function pointer (from decay), just return it. */
-        if (ot.kind == TY_PTR && ot.pointee && ot.pointee->kind == TY_FUNC) {
-            set_type(e, ot);  /* takes ownership of ot */
-            RETURN_TYPE(type_clone(e->type));
-        }
-        Type res = type_make_ptr(ot);
-        type_free(&ot);
-        set_type(e, res);
-        RETURN_TYPE(type_clone(e->type));
-    }
-    case EX_DEREF: {
-        Type ot = check_expr_inner(e->u.deref.operand);
-        if (ot.kind == TY_ARRAY) {
-            Type d = type_decay(ot); type_free(&ot); ot = d;
-        }
-        if (ot.kind != TY_PTR) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "cannot dereference non-pointer");
-            RETURN_TYPE(type_make_void());
-        }
-        Type res = type_clone(*ot.pointee);
-        type_free(&ot);
-        set_type(e, res);
-        RETURN_TYPE(type_clone(e->type));
-    }
     case EX_INDEX: {
         /* a[i] — a must be ptr or array; result = pointee/elem. */
         Type at = check_expr_inner(e->u.idx.array);
@@ -2625,7 +2748,10 @@ static Type check_expr_inner(Expr *e) {
             e->kind = EX_VAR;
             e->u.var.name = name;
             e->u.var.pkg = pkg;
-            return check_expr_inner(e);
+            {
+                Type t = check_expr_inner(e);
+                RETURN_TYPE(t);
+            }
         }
         Type ot = check_expr_inner(e->u.member.obj);
         if (ot.kind != TY_STRUCT) {
@@ -2661,37 +2787,6 @@ static Type check_expr_inner(Expr *e) {
         set_type(e, mt);
         RETURN_TYPE(type_clone(e->type));
     }
-    case EX_INC_DEC: {
-        /* ++lvalue / --lvalue (prefix or postfix). */
-        Expr *op = e->u.incdec.operand;
-        if (op->kind != EX_VAR && op->kind != EX_DEREF &&
-            op->kind != EX_INDEX && op->kind != EX_MEMBER)
-            {
-                die_at(op->loc.file, op->loc.line, op->loc.col,
-                   "operand of '%s' must be an lvalue",
-                   e->u.incdec.is_inc ? "++" : "--");
-                RETURN_TYPE(type_make_void());
-            }
-        Type ot = check_expr_inner(op);
-        if (ot.is_const)
-            {
-                die_at(op->loc.file, op->loc.line, op->loc.col,
-                   "cannot increment/decrement a read-only variable");
-                RETURN_TYPE(type_make_void());
-            }
-        if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR)
-            {
-                die_at(op->loc.file, op->loc.line, op->loc.col,
-                   "operand of '%s' must be arithmetic or pointer",
-                   e->u.incdec.is_inc ? "++" : "--");
-                RETURN_TYPE(type_make_void());
-            }
-        type_free(&ot);
-        /* Result type is the operand type (before increment). For both prefix
-         * and postfix, e->type is the same as the operand's declared type. */
-        set_type(e, type_clone(op->type));
-        RETURN_TYPE(type_clone(e->type));
-    }
     case EX_COMMA: {
         /* a, b: evaluate a (discard result), result is b after lvalue
          * conversion (array-to-pointer and function-to-pointer decay). */
@@ -2706,8 +2801,10 @@ static Type check_expr_inner(Expr *e) {
         set_type(e, rt);
         RETURN_TYPE(type_clone(e->type));
     }
-    case EX_TERNARY:
-        return check_ternary_expr(e);
+    case EX_TERNARY: {
+        Type t = check_ternary_expr(e);
+        RETURN_TYPE(t);
+    }
     case EX_CAST: {
         Type ot = check_expr_inner(e->u.cast.operand);
         type_free(&ot);
