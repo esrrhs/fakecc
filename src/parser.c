@@ -49,6 +49,7 @@ typedef struct {
     ParserLocalArray locals;
     int scope_depth;
     int stmt_depth;
+    int expr_depth;
 } Parser;
 
 /* Recursive descent has no depth limit of its own: a few hundred nested
@@ -56,6 +57,7 @@ typedef struct {
  * which under ASan happens around 500 levels.  Nothing real comes close —
  * the deepest file in the test suite nests 15 — so diagnose instead. */
 #define MAX_STMT_DEPTH 256
+#define MAX_EXPR_DEPTH 512
 
 static const Token *synthesized_eof(void) {
     static Token eof_tok;
@@ -2370,70 +2372,134 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
     return 1;
 }
 
+/* Prefix operators collected in one parse_unary frame. A chain of
+ * MAX_EXPR_DEPTH operators is accepted; the next one is diagnosed.
+ * The operand is parsed in the same frame, so the chain cannot blow
+ * the stack the way a recursive descent per operator did. */
+enum {
+    PRE_REAL = 1,
+    PRE_IMAG,
+    PRE_POS,
+    PRE_NEG,
+    PRE_BITNOT,
+    PRE_NOT,
+    PRE_INC,
+    PRE_DEC,
+    PRE_ADDR,
+    PRE_DEREF
+};
+
+typedef struct {
+    int kind;
+    SourceLoc loc;
+} PrefixOp;
+
+static Expr *apply_prefix_ops(Expr *e, PrefixOp *ops, int n) {
+    int i;
+    for (i = n - 1; i >= 0; i--) {
+        switch (ops[i].kind) {
+        case PRE_REAL:   e = expr_new_member(e, "__real", ops[i].loc); break;
+        case PRE_IMAG:   e = expr_new_member(e, "__imag", ops[i].loc); break;
+        case PRE_POS:    e = expr_new_unary(UOP_POS, e, ops[i].loc); break;
+        case PRE_NEG:    e = expr_new_unary(UOP_NEG, e, ops[i].loc); break;
+        case PRE_BITNOT: e = expr_new_unary(UOP_BITNOT, e, ops[i].loc); break;
+        case PRE_NOT:    e = expr_new_unary(UOP_NOT, e, ops[i].loc); break;
+        case PRE_INC:    e = expr_new_inc_dec(e, 1, 1, ops[i].loc); break;
+        case PRE_DEC:    e = expr_new_inc_dec(e, 0, 1, ops[i].loc); break;
+        case PRE_ADDR:   e = expr_new_addr(e, ops[i].loc); break;
+        case PRE_DEREF:  e = expr_new_deref(e, ops[i].loc); break;
+        default: break;
+        }
+    }
+    return e;
+}
+
+static Expr *finish_unary(Parser *p, Expr *e, PrefixOp *ops, int ops_heap, int nops) {
+    e = apply_prefix_ops(e, ops, nops);
+    if (ops_heap) free(ops);
+    p->expr_depth--;
+    return e;
+}
+
 /* unary-expr = ("+"|"-"|"&"|"*"|"~") unary-expr | sizeof unary-or-type | primary { postfix } */
 static Expr *parse_unary(Parser *p) {
     if (fakecc_had_error()) return NULL;
+    
+    /* Guard against unbounded recursion in deeply nested unary chains. */
+    if (p->expr_depth >= MAX_EXPR_DEPTH) {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "expression nesting level exceeded maximum of %d", MAX_EXPR_DEPTH);
+        return NULL;
+    }
+    p->expr_depth++;
+
+    /* Flatten a prefix chain (! ~ + - * & ++ -- __real __imag, plus
+     * ignored __extension__/inline) without recursing per operator. */
+    PrefixOp ops_stack[8];
+    PrefixOp *ops = ops_stack;
+    int ops_cap = 8;
+    int nops = 0;
+    int ops_heap = 0;
+    for (;;) {
+        TokenKind pk = peek(p)->kind;
+        int pre = 0;
+        if (pk == TK_KW_REAL) pre = PRE_REAL;
+        else if (pk == TK_KW_IMAG) pre = PRE_IMAG;
+        else if (pk == TK_PLUS) pre = PRE_POS;
+        else if (pk == TK_MINUS) pre = PRE_NEG;
+        else if (pk == TK_TILDE) pre = PRE_BITNOT;
+        else if (pk == TK_NOT) pre = PRE_NOT;
+        else if (pk == TK_INC) pre = PRE_INC;
+        else if (pk == TK_DEC) pre = PRE_DEC;
+        else if (pk == TK_AMP) pre = PRE_ADDR;
+        else if (pk == TK_STAR) pre = PRE_DEREF;
+        else if (pk == TK_KW_INLINE ||
+                 (pk == TK_IDENT &&
+                  (strcmp(peek(p)->text, "__extension__") == 0 ||
+                   strcmp(peek(p)->text, "__extension") == 0))) {
+            advance(p);
+            continue;
+        } else {
+            break;
+        }
+        if (nops >= MAX_EXPR_DEPTH) {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col,
+                   "expression nesting level exceeded maximum of %d", MAX_EXPR_DEPTH);
+            /* Build the accepted prefix of the chain (NULL leaf) so the
+             * caller still has an expression; the offending token stays. */
+            return finish_unary(p, NULL, ops, ops_heap, nops);
+        }
+        if (nops >= ops_cap) {
+            int ncap = ops_cap * 2;
+            PrefixOp *np = (PrefixOp *)malloc((size_t)ncap * sizeof(PrefixOp));
+            if (!np) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            memcpy(np, ops, (size_t)nops * sizeof(PrefixOp));
+            if (ops_heap) free(ops);
+            ops = np;
+            ops_cap = ncap;
+            ops_heap = 1;
+        }
+        ops[nops].kind = pre;
+        ops[nops].loc = peek(p)->loc;
+        nops++;
+        advance(p);
+    }
+
     TokenKind k = peek(p)->kind;
-    if (k == TK_KW_REAL) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        Expr *op = parse_unary(p);
-        return expr_new_member(op, "__real", loc);
-    }
-    if (k == TK_KW_IMAG) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        Expr *op = parse_unary(p);
-        return expr_new_member(op, "__imag", loc);
-    }
-    if (k == TK_PLUS || k == TK_MINUS) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        Expr *operand = parse_unary(p);
-        UnaryOp op = (k == TK_MINUS) ? UOP_NEG : UOP_POS;
-        return expr_new_unary(op, operand, loc);
-    }
-    if (k == TK_TILDE) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        return expr_new_unary(UOP_BITNOT, parse_unary(p), loc);
-    }
-    if (k == TK_NOT) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        return expr_new_unary(UOP_NOT, parse_unary(p), loc);
-    }
-    if (k == TK_INC || k == TK_DEC) {
-        SourceLoc loc = peek(p)->loc;
-        int is_inc = (k == TK_INC);
-        advance(p);
-        return expr_new_inc_dec(parse_unary(p), is_inc, 1 /* prefix */, loc);
-    }
     if (k == TK_ANDAND) {
+        /* GCC computed goto: &&label. Not a prefix operator — `&&` is one token. */
         SourceLoc loc = peek(p)->loc;
         advance(p);
         const Token *lbl = peek(p);
         if (!is_name_token(lbl->kind)) {
             die_at(lbl->loc.file, lbl->loc.line, lbl->loc.col,
                    "expected label name after '&&' but got '%s'", lbl->text ? lbl->text : "NULL");
-            return NULL;
+            return finish_unary(p, NULL, ops, ops_heap, nops);
         }
         advance(p);
-        return expr_new_label_addr(lbl->text, loc);
-    }
-    if (k == TK_KW_INLINE || (k == TK_IDENT && (strcmp(peek(p)->text, "__extension__") == 0 || strcmp(peek(p)->text, "__extension") == 0))) {
-        advance(p);
-        return parse_unary(p);
-    }
-    if (k == TK_AMP) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        return expr_new_addr(parse_unary(p), loc);
-    }
-    if (k == TK_STAR) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        return expr_new_deref(parse_unary(p), loc);
+        return finish_unary(p, expr_new_label_addr(lbl->text, loc), ops, ops_heap, nops);
     }
     if (k == TK_KW_SIZEOF) {
         SourceLoc loc = peek(p)->loc;
@@ -2449,13 +2515,15 @@ static Expr *parse_unary(Parser *p) {
                 Expr *init = parse_init_list(p);
                 Expr *cl = expr_new_compound_literal(t, init, loc);
                 type_free(&t);
-                return expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+                Expr *result = expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+                return finish_unary(p, result, ops, ops_heap, nops);
             }
             Expr *e = expr_new_sizeof_type(t, loc);
             type_free(&t);
-            return e;
+            return finish_unary(p, e, ops, ops_heap, nops);
         }
-        return expr_new_sizeof_expr(parse_unary(p), loc);
+        Expr *operand = parse_unary(p);
+        return finish_unary(p, expr_new_sizeof_expr(operand, loc), ops, ops_heap, nops);
     }
     if (k == TK_KW_ALIGNOF) {
         SourceLoc loc = peek(p)->loc;
@@ -2466,7 +2534,7 @@ static Expr *parse_unary(Parser *p) {
             {
                 die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                    "expected '(' after '_Alignof'");
-                return NULL;
+                return finish_unary(p, NULL, ops, ops_heap, nops);
             }
         advance(p);
         if (is_type_start(p, p->pos)) {
@@ -2474,11 +2542,11 @@ static Expr *parse_unary(Parser *p) {
             expect_kind(p, TK_RPAREN, "')'");
             Expr *e = expr_new_alignof_type(t, loc);
             type_free(&t);
-            return e;
+            return finish_unary(p, e, ops, ops_heap, nops);
         }
         Expr *sub = parse_expr(p);
         expect_kind(p, TK_RPAREN, "')'");
-        return expr_new_alignof_expr(sub, loc);
+        return finish_unary(p, expr_new_alignof_expr(sub, loc), ops, ops_heap, nops);
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_types_compatible_p") == 0) {
         SourceLoc loc = peek(p)->loc;
@@ -2491,7 +2559,7 @@ static Expr *parse_unary(Parser *p) {
         int compat = types_compatible_unqual(&t1, &t2);
         type_free(&t1);
         type_free(&t2);
-        return expr_new_int(compat ? 1 : 0, loc);
+        return finish_unary(p, expr_new_int(compat ? 1 : 0, loc), ops, ops_heap, nops);
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_constant_p") == 0) {
         SourceLoc loc = peek(p)->loc;
@@ -2503,7 +2571,7 @@ static Expr *parse_unary(Parser *p) {
         int is_const = arg && (fold_const_int(arg, &v) ||
                                arg->kind == EX_STR || arg->kind == EX_FLOAT_LIT);
         expr_free(arg);
-        return expr_new_int(is_const ? 1 : 0, loc);
+        return finish_unary(p, expr_new_int(is_const ? 1 : 0, loc), ops, ops_heap, nops);
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_choose_expr") == 0) {
         /* __builtin_choose_expr(const_expr, expr1, expr2): const_expr must be
@@ -2524,7 +2592,7 @@ static Expr *parse_unary(Parser *p) {
             expr_free(cond);
             expr_free(then);
             expr_free(else_);
-            return NULL;
+            return finish_unary(p, NULL, ops, ops_heap, nops);
         }
         long long v;
         /* fold_const_int also folds float literals (truncated); those are not
@@ -2533,15 +2601,15 @@ static Expr *parse_unary(Parser *p) {
             || !fold_const_int(cond, &v)) {
             die_at(cond->loc.file, cond->loc.line, cond->loc.col,
                    "first argument to '__builtin_choose_expr' not a constant");
-            return NULL;
+            return finish_unary(p, NULL, ops, ops_heap, nops);
         }
         expr_free(cond);
         if (v != 0) {
             expr_free(else_);
-            return then;
+            return finish_unary(p, then, ops, ops_heap, nops);
         } else {
             expr_free(then);
-            return else_;
+            return finish_unary(p, else_, ops, ops_heap, nops);
         }
     }
     if (k == TK_IDENT && strcmp(peek(p)->text, "__builtin_offsetof") == 0) {
@@ -2569,7 +2637,7 @@ static Expr *parse_unary(Parser *p) {
                         } else {
                             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                                    "no member named '%s'", mname);
-                            return NULL;
+                            return finish_unary(p, NULL, ops, ops_heap, nops);
                         }
                     }
                 }
@@ -2602,9 +2670,9 @@ static Expr *parse_unary(Parser *p) {
         expect_kind(p, TK_RPAREN, "')'");
         type_free(&cur_type);
         type_free(&t);
-        return expr_new_int(offset, loc);
+        return finish_unary(p, expr_new_int(offset, loc), ops, ops_heap, nops);
     }
-    return parse_primary(p);
+    return finish_unary(p, parse_primary(p), ops, ops_heap, nops);
 }
 
 /* Attach postfix operators (call `[i]` etc.) after any primary that
@@ -5396,6 +5464,7 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
     p.locals.cap = 0;
     p.scope_depth = 0;
     p.stmt_depth = 0;
+    p.expr_depth = 0;
 
     g_parser_tu = tu;
     /* must start with package declaration */

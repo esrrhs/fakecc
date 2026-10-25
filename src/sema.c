@@ -383,6 +383,14 @@ static void collect_labels(LabelSet *ls, const Stmt *s);
 
 static void collect_labels_expr(LabelSet *ls, const Expr *e) {
     if (!e) return;
+    while (e && (e->kind == EX_UNARY || e->kind == EX_ADDR ||
+                 e->kind == EX_DEREF || e->kind == EX_INC_DEC)) {
+        if (e->kind == EX_UNARY) e = e->u.un.operand;
+        else if (e->kind == EX_ADDR) e = e->u.addr.operand;
+        else if (e->kind == EX_DEREF) e = e->u.deref.operand;
+        else e = e->u.incdec.operand;
+    }
+    if (!e) return;
     switch (e->kind) {
     case EX_STMT_EXPR:
         if (e->u.stmt_expr.stmts) {
@@ -864,6 +872,11 @@ static void overlay_init_list(Type *target, Expr *dst, Expr *src, SourceLoc loc)
 
 static SymTable *g_check_st;
 
+/* Expression type-checking recursion depth (guards against stack overflow). */
+static int g_check_expr_depth = 0;
+#define CHECK_EXPR_MAX_DEPTH 512
+#define RETURN_TYPE(typ) do { g_check_expr_depth--; return (typ); } while(0)
+
 /* Tiny accessors — do not take or return FunTable* from huge functions. */
 static void ftab_cur_init(void) { ftab_init(&g_sema_ft); }
 static void ftab_cur_free(void) { ftab_free(&g_sema_ft); }
@@ -989,10 +1002,216 @@ static Type check_ternary_expr(Expr *e) {
     return type_clone(e->type);
 }
 
+
+static Expr *prefix_spine_operand(Expr *e) {
+    switch (e->kind) {
+    case EX_UNARY: return e->u.un.operand;
+    case EX_ADDR: return e->u.addr.operand;
+    case EX_DEREF: return e->u.deref.operand;
+    case EX_INC_DEC: return e->u.incdec.operand;
+    default: return NULL;
+    }
+}
+
+static int prefix_spine_kind(ExprKind k) {
+    return k == EX_UNARY || k == EX_ADDR || k == EX_DEREF || k == EX_INC_DEC;
+}
+
+/* Type one prefix node whose operand is already typed as `ot` (consumed). */
+static Type apply_check_unary(Expr *e, Type ot) {
+    if (ot.kind == TY_ARRAY) {
+        Type d = type_decay(ot); type_free(&ot); ot = d;
+    }
+    if (ot.is_vector) {
+        set_type(e, ot);
+        return type_clone(e->type);
+    }
+    if ((e->u.un.op == UOP_BITNOT || e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS) &&
+        ot.kind == TY_STRUCT && ot.tag && strncmp(ot.tag, "__complex_", 10) == 0) {
+        set_type(e, ot);
+        return type_clone(e->type);
+    }
+    if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "bitwise NOT requires an integer operand");
+        type_free(&ot);
+        return type_make_void();
+    }
+    {
+        Type res;
+        if (e->u.un.op == UOP_NOT) {
+            if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR) {
+                die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "logical NOT requires a scalar operand");
+                type_free(&ot);
+                return type_make_void();
+            }
+            res = type_make_int(4, 0);
+        } else {
+            res = integer_promote(ot);
+        }
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+}
+
+static Type apply_check_addr(Expr *e, Type ot, const SymTable *st) {
+    Expr *op = e->u.addr.operand;
+    ExprKind ok = op ? op->kind : EX_INT_LIT;
+    if (!op || (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER
+                && ok != EX_COMPOUND_LITERAL)) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "cannot take address of rvalue");
+        type_free(&ot);
+        return type_make_void();
+    }
+    if (op->kind == EX_MEMBER && ot.bitfield_width > 0) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "cannot take address of bitfield member");
+        type_free(&ot);
+        return type_make_void();
+    }
+    if (op->kind == EX_VAR) {
+        const Sym *sy = symtable_find(st, op->u.var.name);
+        if (sy && sy->is_register) {
+            die_at(e->loc.file, e->loc.line, e->loc.col,
+                   "address of register variable requested");
+            type_free(&ot);
+            return type_make_void();
+        }
+    }
+    if (ot.kind == TY_PTR && ot.pointee && ot.pointee->kind == TY_FUNC) {
+        set_type(e, ot);
+        return type_clone(e->type);
+    }
+    {
+        Type res = type_make_ptr(ot);
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+}
+
+static Type apply_check_deref(Expr *e, Type ot) {
+    if (ot.kind == TY_ARRAY) {
+        Type d = type_decay(ot); type_free(&ot); ot = d;
+    }
+    if (ot.kind != TY_PTR) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "cannot dereference non-pointer");
+        type_free(&ot);
+        return type_make_void();
+    }
+    {
+        Type res = type_clone(*ot.pointee);
+        type_free(&ot);
+        set_type(e, res);
+        return type_clone(e->type);
+    }
+}
+
+static Type apply_check_incdec(Expr *e, Type ot) {
+    Expr *op = e->u.incdec.operand;
+    if (!op || (op->kind != EX_VAR && op->kind != EX_DEREF &&
+                op->kind != EX_INDEX && op->kind != EX_MEMBER)) {
+        die_at(op ? op->loc.file : e->loc.file,
+               op ? op->loc.line : e->loc.line,
+               op ? op->loc.col : e->loc.col,
+               "operand of '%s' must be an lvalue",
+               e->u.incdec.is_inc ? "++" : "--");
+        type_free(&ot);
+        return type_make_void();
+    }
+    if (ot.is_const) {
+        die_at(op->loc.file, op->loc.line, op->loc.col,
+               "cannot increment/decrement a read-only variable");
+        type_free(&ot);
+        return type_make_void();
+    }
+    if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR) {
+        die_at(op->loc.file, op->loc.line, op->loc.col,
+               "operand of '%s' must be arithmetic or pointer",
+               e->u.incdec.is_inc ? "++" : "--");
+        type_free(&ot);
+        return type_make_void();
+    }
+    type_free(&ot);
+    set_type(e, type_clone(op->type));
+    return type_clone(e->type);
+}
+
 static Type check_expr_inner(Expr *e) {
     if (fakecc_had_error()) return type_make_void();
     if (!e) return type_default_int();
+    
+    /* Guard real expression nesting. Prefix spines (unary, &, *, ++/--)
+     * are flattened below and do not consume a frame or a depth slot per
+     * operator — a leaked counter used to trip this on ordinary code. */
+    if (++g_check_expr_depth > CHECK_EXPR_MAX_DEPTH) {
+        g_check_expr_depth--;
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "expression nesting too deep (limit %d)", CHECK_EXPR_MAX_DEPTH);
+        return type_make_void();
+    }
+    
     const SymTable *st = g_check_st;
+    /* One frame for a whole prefix spine. ++/-- whose operand is not an
+     * lvalue stops here, matching the old check that diagnosed before
+     * walking into that operand. */
+    if (prefix_spine_kind(e->kind)) {
+        Expr *node_stack[8];
+        Expr **nodes = node_stack;
+        int ncap = 8, n = 0, node_heap = 0, skip_leaf = 0;
+        Expr *cur = e;
+        while (cur && prefix_spine_kind(cur->kind)) {
+            Expr *opnd;
+            int lval;
+            if (n >= CHECK_EXPR_MAX_DEPTH) {
+                die_at(cur->loc.file, cur->loc.line, cur->loc.col,
+                       "expression nesting too deep (limit %d)", CHECK_EXPR_MAX_DEPTH);
+                if (node_heap) free(nodes);
+                RETURN_TYPE(type_make_void());
+            }
+            if (n >= ncap) {
+                int nn = ncap * 2;
+                Expr **np = (Expr **)malloc((size_t)nn * sizeof(Expr *));
+                if (!np) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(np, nodes, (size_t)n * sizeof(Expr *));
+                if (node_heap) free(nodes);
+                nodes = np;
+                ncap = nn;
+                node_heap = 1;
+            }
+            nodes[n++] = cur;
+            if (cur->kind == EX_INC_DEC) {
+                opnd = cur->u.incdec.operand;
+                lval = opnd && (opnd->kind == EX_VAR || opnd->kind == EX_DEREF ||
+                                opnd->kind == EX_INDEX || opnd->kind == EX_MEMBER);
+                if (!lval) { skip_leaf = 1; break; }
+                cur = opnd;
+            } else {
+                opnd = prefix_spine_operand(cur);
+                if (!opnd) { cur = NULL; break; }
+                cur = opnd;
+            }
+        }
+        {
+            Type ot = skip_leaf ? type_make_void() : check_expr_inner(cur);
+            int i;
+            for (i = n - 1; i >= 0; i--) {
+                Type nt;
+                Expr *node = nodes[i];
+                if (node->kind == EX_UNARY) nt = apply_check_unary(node, ot);
+                else if (node->kind == EX_ADDR) nt = apply_check_addr(node, ot, st);
+                else if (node->kind == EX_DEREF) nt = apply_check_deref(node, ot);
+                else nt = apply_check_incdec(node, ot);
+                ot = nt;
+            }
+            if (node_heap) free(nodes);
+            RETURN_TYPE(ot);
+        }
+    }
     switch (e->kind) {
     case EX_INT_LIT:
         /* Width/signedness were derived from the suffix and magnitude by the
@@ -1000,14 +1219,14 @@ static Type check_expr_inner(Expr *e) {
          * wide constant. */
         set_type(e, type_make_int(e->type.width ? e->type.width : 4,
                                   e->type.is_unsigned));
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     case EX_FLOAT_LIT:
         /* Width was stashed in e->type by the parser (4 = float, 8 = double). */
         if (e->type.is_decimal)
             set_type(e, type_make_decimal(e->type.width ? e->type.width : 8));
         else
             set_type(e, type_make_float(e->type.width ? e->type.width : 8));
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     case EX_BINOP: {
         Type lt = check_expr_inner(e->u.bin.l);
         Type rt = check_expr_inner(e->u.bin.r);
@@ -1037,14 +1256,14 @@ static Type check_expr_inner(Expr *e) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be scalar",
                        op == BOP_AND ? "&&" : "||");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             if (rt.kind != TY_INT && rt.kind != TY_FLOAT && rt.kind != TY_PTR)
                 {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be scalar",
                        op == BOP_AND ? "&&" : "||");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             res = type_make_int(4, 0);
         } else if (op >= BOP_EQ && op <= BOP_GE) {
@@ -1052,20 +1271,20 @@ static Type check_expr_inner(Expr *e) {
                 {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid operands to binary comparison");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             if (lt.kind == TY_VOID || rt.kind == TY_VOID)
                 {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid operands to binary comparison");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
                 (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
                 {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "cannot mix operands of decimal floating and other floating types");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             /* Comparison operators: warn on distinct pointer types (GCC -Wcompare-distinct-pointer-types). */
             if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
@@ -1095,19 +1314,19 @@ static Type check_expr_inner(Expr *e) {
                     {
                         die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid operands to binary + (pointer and pointer)");
-                        return type_make_void();
+                        RETURN_TYPE(type_make_void());
                     }
                 if (lt.kind == TY_PTR && rt.kind != TY_INT)
                     {
                         die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid operands to binary +");
-                        return type_make_void();
+                        RETURN_TYPE(type_make_void());
                     }
                 if (rt.kind == TY_PTR && lt.kind != TY_INT)
                     {
                         die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid operands to binary +");
-                        return type_make_void();
+                        RETURN_TYPE(type_make_void());
                     }
                 res = type_clone(lt.kind == TY_PTR ? lt : rt);
             } else { /* op == BOP_SUB */
@@ -1118,14 +1337,14 @@ static Type check_expr_inner(Expr *e) {
                         {
                             die_at(e->loc.file, e->loc.line, e->loc.col,
                                "invalid operands to binary -");
-                            return type_make_void();
+                            RETURN_TYPE(type_make_void());
                         }
                     res = type_clone(lt);
                 } else {
                     /* integer - pointer: constraint violation! */
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "invalid operands to binary - (integer and pointer)");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             }
         } else if (op == BOP_BITAND || op == BOP_BITOR || op == BOP_BITXOR) {
@@ -1135,14 +1354,14 @@ static Type check_expr_inner(Expr *e) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be integer",
                        op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             if (rt.kind != TY_INT)
                 {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be integer",
                        op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             res = usual_arith_conv(lt, rt);
         } else if (op == BOP_SHL || op == BOP_SHR) {
@@ -1153,14 +1372,14 @@ static Type check_expr_inner(Expr *e) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "left operand of '%s' must be integer",
                        op == BOP_SHL ? "<<" : ">>");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             if (rt.kind != TY_INT)
                 {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "right operand of '%s' must be integer",
                        op == BOP_SHL ? "<<" : ">>");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             /* Warn on negative shift count (GCC -Wshift-count-negative). */
             if (rt.kind == TY_INT && rt.width <= 8) {
@@ -1178,7 +1397,7 @@ static Type check_expr_inner(Expr *e) {
                 {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "operands of '%%' must be integer");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             else if (op != BOP_MOD &&
                      (lt.kind != TY_INT && lt.kind != TY_FLOAT))
@@ -1187,7 +1406,7 @@ static Type check_expr_inner(Expr *e) {
                        "left operand of '%s' must be arithmetic",
                        op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
                        : op == BOP_MUL ? "*" : "/");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             else if (op != BOP_MOD &&
                      (rt.kind != TY_INT && rt.kind != TY_FLOAT))
@@ -1196,59 +1415,27 @@ static Type check_expr_inner(Expr *e) {
                        "right operand of '%s' must be arithmetic",
                        op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
                        : op == BOP_MUL ? "*" : "/");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
                 (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
                 {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                        "cannot mix operands of decimal floating and other floating types");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             res = usual_arith_conv(lt, rt);
         }
         type_free(&lt); type_free(&rt);
         set_type(e, res);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
-    case EX_UNARY: {
-        Type ot = check_expr_inner(e->u.un.operand);
-        if (ot.kind == TY_ARRAY) {
-            Type d = type_decay(ot); type_free(&ot); ot = d;
-        }
-        if (ot.is_vector) {
-            set_type(e, ot);
-            return type_clone(e->type);
-        }
-        if ((e->u.un.op == UOP_BITNOT || e->u.un.op == UOP_NEG || e->u.un.op == UOP_POS) &&
-            ot.kind == TY_STRUCT && ot.tag && strncmp(ot.tag, "__complex_", 10) == 0) {
-            set_type(e, ot);
-            return type_clone(e->type);
-        }
-        if ((e->u.un.op == UOP_BITNOT) && ot.kind != TY_INT)
-            {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "bitwise NOT requires an integer operand");
-                return type_make_void();
-            }
-        Type res;
-        if (e->u.un.op == UOP_NOT) {
-            /* Logical NOT: operand must be scalar (int, float, or pointer);
-             * result is always int 0 or 1. */
-            if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "logical NOT requires a scalar operand");
-                    return type_make_void();
-                }
-            res = type_make_int(4, 0);
-        } else {
-            res = integer_promote(ot);
-        }
-        type_free(&ot);
-        set_type(e, res);
-        return type_clone(e->type);
-    }
+    case EX_UNARY:
+    case EX_ADDR:
+    case EX_DEREF:
+    case EX_INC_DEC:
+        /* Prefix spines are typed iteratively above this switch. */
+        RETURN_TYPE(type_make_void());
     case EX_VAR: {
         /* Qualified: pkg.sym.  The parser only sets `pkg` after a matching
          * `import`, so a missing-import diagnostic here is unreachable. */
@@ -1266,12 +1453,12 @@ static Type check_expr_inner(Expr *e) {
                     e->u.int_val = ec->value;
                     e->int_hi = 0;
                     set_type(e, type_default_int());
-                    return type_clone(e->type);
+                    RETURN_TYPE(type_clone(e->type));
                 }
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "package '%s' has no exported symbol '%s'",
                        e->u.var.pkg, e->u.var.name);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             if (pf) {
                 ftab_add_export(pf);
@@ -1288,15 +1475,15 @@ static Type check_expr_inner(Expr *e) {
                 Type fp = type_make_ptr(fn);
                 type_free(&fn);
                 set_type(e, fp);
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
             set_type(e, type_clone(pg->type));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         const Sym *sym = symtable_find(st, e->u.var.name);
         if (sym) {
             set_type(e, type_clone(sym->type));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* Not a variable — is it a function name?  A function lvalue decays
          * to a pointer to its type (so `add` and &add both yield `ptr(func)`). */
@@ -1316,7 +1503,7 @@ static Type check_expr_inner(Expr *e) {
             Type fp = type_make_ptr(fn);
             type_free(&fn);
             set_type(e, fp);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* Same-package fallback: look up in the current package's exports. */
         if (g_sema_pkg && g_sema_tu && g_sema_tu->package.name) {
@@ -1338,32 +1525,32 @@ static Type check_expr_inner(Expr *e) {
                     Type fp = type_make_ptr(fn);
                     type_free(&fn);
                     set_type(e, fp);
-                    return type_clone(e->type);
+                    RETURN_TYPE(type_clone(e->type));
                 }
                 set_type(e, type_clone(pg->type));
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
         }
         if (strcmp(e->u.var.name, "NULL") == 0) {
             Type vp = type_make_ptr(type_make_void());
             set_type(e, vp);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (strcmp(e->u.var.name, "__CHAR_BIT__") == 0) {
             Type it = type_make_int(4, 0);
             set_type(e, it);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (strcmp(e->u.var.name, "__INT_MAX__") == 0) {
             Type it = type_make_int(4, 0);
             set_type(e, it);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (strcmp(e->u.var.name, "__FLT_MAX__") == 0) {
             /* GCC predefined: 3.40282346638528859812e+38F, type float. */
             Type ft = type_make_float(4);
             set_type(e, ft);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (strncmp(e->u.var.name, "__builtin_", 10) == 0 || strcmp(e->u.var.name, "alloca") == 0) {
             const char *bname = e->u.var.name;
@@ -1381,7 +1568,7 @@ static Type check_expr_inner(Expr *e) {
                 while (pt.kind == TY_PTR && pt.pointee) pt = *pt.pointee;
                 if (pt.kind == TY_FUNC) {
                     set_type(e, type_clone(ps->type));
-                    return type_clone(e->type);
+                    RETURN_TYPE(type_clone(e->type));
                 }
                 const FunSig *fsig = ftab_lookup(plain);
                 if (fsig) {
@@ -1399,7 +1586,7 @@ static Type check_expr_inner(Expr *e) {
                     Type fp2 = type_make_ptr(fn2);
                     type_free(&fn2);
                     set_type(e, fp2);
-                    return type_clone(e->type);
+                    RETURN_TYPE(type_clone(e->type));
                 }
             }
             int math_narg = 0, math_w = 0;
@@ -1592,7 +1779,7 @@ static Type check_expr_inner(Expr *e) {
             type_free(&fn);
             for (int i = 0; i < num_params; i++) type_free(params[i]);
             set_type(e, fp);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         {
             const char *hint = g_sema_pkg
@@ -1602,17 +1789,17 @@ static Type check_expr_inner(Expr *e) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "use of undeclared '%s'; did you mean '%s.%s'?",
                            e->u.var.name, hint, e->u.var.name);
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "use of undeclared '%s'; did you mean '%s.%s'? "
                        "(add 'import %s;')",
                        e->u.var.name, hint, e->u.var.name, hint);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "use of undeclared variable '%s'", e->u.var.name);
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
     }
     case EX_ASSIGN: {
@@ -1624,7 +1811,7 @@ static Type check_expr_inner(Expr *e) {
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "expression is not assignable");
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
         Type lt = check_expr_inner(e->u.assign.lvalue);
         if (lt.is_const)
@@ -1633,7 +1820,7 @@ static Type check_expr_inner(Expr *e) {
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "assignment of read-only variable");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         if (lt.kind == TY_ARRAY)
             {
@@ -1641,7 +1828,7 @@ static Type check_expr_inner(Expr *e) {
                    e->u.assign.lvalue->loc.line,
                    e->u.assign.lvalue->loc.col,
                    "assignment to expression with array type");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         Type rt = check_expr_inner(e->u.assign.rvalue);
         if (rt.kind == TY_VOID)
@@ -1650,7 +1837,7 @@ static Type check_expr_inner(Expr *e) {
                    e->u.assign.rvalue->loc.line,
                    e->u.assign.rvalue->loc.col,
                    "void value not ignored as it ought to be");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         int is_lt_cplx = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
         int is_rt_cplx = (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0);
@@ -1659,13 +1846,13 @@ static Type check_expr_inner(Expr *e) {
             if (!type_is_same(&lt, &rt)) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "incompatible struct assignment");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         }
         coerce_arg_to_param(&e->u.assign.rvalue, &lt);
         type_free(&rt);
         set_type(e, lt);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_COMPOUND_ASSIGN: {
         /* lvalue op= rvalue. The lvalue must be assignable. Type rules follow
@@ -1678,14 +1865,14 @@ static Type check_expr_inner(Expr *e) {
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                    "left operand of '%s' must be an lvalue",
                    "compound assign");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         Type lt = check_expr_inner(lv);
         if (lt.is_const)
             {
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                    "compound assignment of read-only variable");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         Type rt = check_expr_inner(e->u.comp.rvalue);
         BinOp op = e->u.comp.op;
@@ -1700,7 +1887,7 @@ static Type check_expr_inner(Expr *e) {
                     die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "pointer %s requires an integer right operand",
                        op == BOP_ADD ? "+=" : "-=");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
         }
         if (lt.kind != TY_PTR && !is_complex && !is_vector
@@ -1710,25 +1897,25 @@ static Type check_expr_inner(Expr *e) {
                     die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "left operand of '%s' must be integer",
                        "compound assign");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             if (rt.kind != TY_INT)
                 {
                     die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                        "right operand of '%s' must be integer",
                        "compound assign");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
         }
         if (lt.kind == TY_FLOAT && !arith_float)
             {
                 die_at(lv->loc.file, lv->loc.line, lv->loc.col,
                    "left operand of '%s' must be integer", "compound assign");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         type_free(&rt);
         set_type(e, lt);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_CALL: {
         /* Recognize the __syscall intrinsic FIRST — before type-checking the
@@ -1740,28 +1927,28 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 1 || e->u.call.args.len > 7) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__syscall takes 1 to 7 arguments (syscall num + up to 6 args)");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&at);
             }
             set_type(e, type_make_int(8, 0));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && strcmp(e->u.call.callee->u.var.name, "__clone") == 0) {
             if (e->u.call.args.len != 6) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__clone takes 6 arguments (fn, child_stack, flags, arg, tcb, ctid)");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&at);
             }
             set_type(e, type_make_int(8, 0));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR) {
             const char *cn = e->u.call.callee->u.var.name;
@@ -1774,25 +1961,25 @@ static Type check_expr_inner(Expr *e) {
                 if (e->u.call.args.len != 1) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "complex builtin takes exactly 1 argument");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
                 Type at = check_expr_inner(e->u.call.args.data[0]);
                 if (is_conj) {
                     set_type(e, at);
-                    return type_clone(e->type);
+                    RETURN_TYPE(type_clone(e->type));
                 }
                 type_free(&at);
                 if (is_crealf) set_type(e, type_make_float(4));
                 else if (is_creall) set_type(e, type_make_long_double());
                 else set_type(e, type_make_float(8));
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
         }
         if (e->u.call.callee->kind == EX_VAR && strcmp(e->u.call.callee->u.var.name, "__builtin_shuffle") == 0) {
             if (e->u.call.args.len < 2 || e->u.call.args.len > 3) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_shuffle takes 2 or 3 arguments");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type t0 = check_expr_inner(e->u.call.args.data[0]);
             for (size_t i = 1; i < e->u.call.args.len; i++) {
@@ -1800,7 +1987,7 @@ static Type check_expr_inner(Expr *e) {
                 type_free(&ti);
             }
             set_type(e, t0);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR &&
             (strcmp(e->u.call.callee->u.var.name, "__builtin_arm_dmb") == 0 ||
@@ -1809,7 +1996,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "%s takes 1 argument", e->u.call.callee->u.var.name);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type at = check_expr_inner(e->u.call.args.data[0]);
             if (at.kind != TY_INT) {
@@ -1817,37 +2004,37 @@ static Type check_expr_inner(Expr *e) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "%s operand must be an integer",
                        e->u.call.callee->u.var.name);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             type_free(&at);
             set_type(e, type_make_void());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR &&
             strcmp(e->u.call.callee->u.var.name, "__builtin_clear_cache") == 0) {
             if (e->u.call.args.len != 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_clear_cache takes 2 arguments");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type cs = check_expr_inner(e->u.call.args.data[0]);
             Type ce = check_expr_inner(e->u.call.args.data[1]);
             type_free(&cs);
             type_free(&ce);
             set_type(e, type_make_void());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR &&
             strcmp(e->u.call.callee->u.var.name, "__builtin_assume") == 0) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_assume takes 1 argument");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type at = check_expr_inner(e->u.call.args.data[0]);
             type_free(&at);
             set_type(e, type_make_void());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR &&
             (strcmp(e->u.call.callee->u.var.name, "__builtin_align_up") == 0 ||
@@ -1858,7 +2045,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "builtin takes at least 1 argument");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type t0 = check_expr_inner(e->u.call.args.data[0]);
             for (size_t i = 1; i < e->u.call.args.len; i++) {
@@ -1866,7 +2053,7 @@ static Type check_expr_inner(Expr *e) {
                 type_free(&ti);
             }
             set_type(e, t0);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR &&
             (strcmp(e->u.call.callee->u.var.name, "__builtin_fshl") == 0 ||
@@ -1874,7 +2061,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 3) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "funnel shift takes 3 arguments");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type t0 = check_expr_inner(e->u.call.args.data[0]);
             for (size_t i = 1; i < e->u.call.args.len; i++) {
@@ -1882,7 +2069,7 @@ static Type check_expr_inner(Expr *e) {
                 type_free(&ti);
             }
             set_type(e, t0);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* The float classification builtins are expanded inline too (ir.c reads
          * their arguments positionally), so check the count here rather than
@@ -1904,13 +2091,13 @@ static Type check_expr_inner(Expr *e) {
                 if (strcmp(bn, one_arg[k]) == 0 && e->u.call.args.len != 1) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "'%s' takes exactly 1 argument", bn);
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             for (int k = 0; two_arg[k]; k++)
                 if (strcmp(bn, two_arg[k]) == 0 && e->u.call.args.len != 2) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "'%s' takes exactly 2 arguments", bn);
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
         }
         /* GCC integer bit builtins — codegen expands these inline (lzcnt /
@@ -1937,7 +2124,7 @@ static Type check_expr_inner(Expr *e) {
                                ? "'%s' takes 1 or %d arguments"
                                : "'%s' takes exactly 1 argument",
                            bn, bg ? bg_max : 0);
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             }
         }
@@ -1949,24 +2136,24 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_ctzll takes exactly 1 argument");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type at = check_expr_inner(e->u.call.args.data[0]);
             type_free(&at);
             set_type(e, type_make_int(4, 0));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && strncmp(e->u.call.callee->u.var.name, "__sync_", 7) == 0) {
             const char *sname = e->u.call.callee->u.var.name;
             if (strcmp(sname, "__sync_synchronize") == 0) {
                 set_type(e, type_make_void());
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "atomic builtin takes at least 1 argument");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             /* compare_and_swap needs (ptr, old, new); most other __sync_*
              * ops need (ptr, val).  lock_release is pointer-only. */
@@ -1975,19 +2162,19 @@ static Type check_expr_inner(Expr *e) {
                 if (e->u.call.args.len < 3) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "%s takes 3 arguments", sname);
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
             } else if (strcmp(sname, "__sync_lock_release") != 0
                        && e->u.call.args.len < 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "%s takes at least 2 arguments", sname);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type ptr_ty = check_expr_inner(e->u.call.args.data[0]);
             if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "atomic builtin first argument must be a pointer");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type val_ty = type_clone(*ptr_ty.pointee);
             type_free(&ptr_ty);
@@ -2004,7 +2191,7 @@ static Type check_expr_inner(Expr *e) {
             } else {
                 set_type(e, val_ty);
             }
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* C11 __atomic_* family.  fakecc does not implement memory
          * ordering; IR lowers these as ordinary loads and stores so a
@@ -2019,18 +2206,18 @@ static Type check_expr_inner(Expr *e) {
                     type_free(&at);
                 }
                 set_type(e, type_make_void());
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
             if (e->u.call.args.len < 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__atomic builtin takes at least 1 argument");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type ptr_ty = check_expr_inner(e->u.call.args.data[0]);
             if (ptr_ty.kind != TY_PTR || !ptr_ty.pointee) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__atomic builtin first argument must be a pointer");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type val_ty = type_clone(*ptr_ty.pointee);
             type_free(&ptr_ty);
@@ -2056,54 +2243,54 @@ static Type check_expr_inner(Expr *e) {
             } else {
                 set_type(e, val_ty);
             }
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && strcmp(e->u.call.callee->u.var.name, "__builtin_apply_args") == 0) {
             if (e->u.call.args.len != 0) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_apply_args takes no arguments");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             set_type(e, type_make_ptr(type_make_void()));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && strcmp(e->u.call.callee->u.var.name, "__builtin_apply") == 0) {
             if (e->u.call.args.len != 3) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_apply takes 3 arguments");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
                 type_free(&at);
             }
             set_type(e, type_make_ptr(type_make_void()));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && strcmp(e->u.call.callee->u.var.name, "__builtin_return") == 0) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_return takes 1 argument");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type at = check_expr_inner(e->u.call.args.data[0]);
             type_free(&at);
             set_type(e, type_make_void());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && strcmp(e->u.call.callee->u.var.name, "__builtin_va_arg_pack") == 0) {
             /* Placeholder expanded during always-inline lowering. */
             set_type(e, type_default_int());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && strcmp(e->u.call.callee->u.var.name, "__builtin_va_arg_pack_len") == 0) {
             set_type(e, type_default_int());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* Recognize the va_start / va_arg / va_end builtins BEFORE the callee
          * lookup, for the same reason as __syscall: they are not real
@@ -2117,14 +2304,14 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len < 1 || e->u.call.args.len > 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_start takes 1 or 2 arguments");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_start first argument must be a va_list");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             type_free(&list_ty);
             if (e->u.call.args.len == 2) {
@@ -2132,7 +2319,7 @@ static Type check_expr_inner(Expr *e) {
                 type_free(&at);
             }
             set_type(e, type_make_void());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && (strcmp(e->u.call.callee->u.var.name, "va_arg") == 0 ||
@@ -2142,14 +2329,14 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_arg takes exactly 2 arguments (va_list, type)");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_arg first argument must be a va_list");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             type_free(&list_ty);
             if (e->va_arg_type.kind == TY_VOID && e->va_arg_type.width == 0
@@ -2159,10 +2346,10 @@ static Type check_expr_inner(Expr *e) {
                  * test pr48767.c matches this diagnostic. */
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "second argument to 'va_arg' is of incomplete type 'void'");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             set_type(e, type_clone(e->va_arg_type));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && (strcmp(e->u.call.callee->u.var.name, "va_end") == 0 ||
@@ -2170,18 +2357,18 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_end takes exactly 1 argument (va_list)");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type list_ty = check_expr_inner(e->u.call.args.data[0]);
             if (!is_va_list_type(&list_ty)) {
                 type_free(&list_ty);
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_end argument must be a va_list");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             type_free(&list_ty);
             set_type(e, type_make_void());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         if (e->u.call.callee->kind == EX_VAR
             && (strcmp(e->u.call.callee->u.var.name, "va_copy") == 0 ||
@@ -2189,7 +2376,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "va_copy takes exactly 2 arguments (dst, src)");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             for (int i = 0; i < 2; i++) {
                 Type list_ty = check_expr_inner(e->u.call.args.data[i]);
@@ -2197,12 +2384,12 @@ static Type check_expr_inner(Expr *e) {
                     type_free(&list_ty);
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "va_copy arguments must be va_list");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
                 type_free(&list_ty);
             }
             set_type(e, type_make_void());
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* __builtin_*g keeps the argument width.  Promoting unsigned
          * long long or unsigned char would count the wrong number of bits. */
@@ -2215,7 +2402,7 @@ static Type check_expr_inner(Expr *e) {
                            "%s takes 1 argument%s",
                            e->u.call.callee->u.var.name,
                            max_args == 2 ? " or 2" : "");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
                 Type at = check_expr_inner(e->u.call.args.data[0]);
                 if (at.kind != TY_INT) {
@@ -2223,7 +2410,7 @@ static Type check_expr_inner(Expr *e) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "%s argument must be an integer",
                            e->u.call.callee->u.var.name);
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
                 type_free(&at);
                 if (n == 2) {
@@ -2233,12 +2420,12 @@ static Type check_expr_inner(Expr *e) {
                         die_at(e->loc.file, e->loc.line, e->loc.col,
                                "%s fallback must be an integer",
                                e->u.call.callee->u.var.name);
-                        return type_make_void();
+                        RETURN_TYPE(type_make_void());
                     }
                     type_free(&ft);
                 }
                 set_type(e, type_make_int(4, 0));
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
         }
         /* __builtin_stdc_* keep the argument width.  Promoting an
@@ -2251,7 +2438,7 @@ static Type check_expr_inner(Expr *e) {
                            "%s takes %d argument%s",
                            e->u.call.callee->u.var.name, nargs,
                            nargs == 1 ? "" : "s");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
                 Type at = check_expr_inner(e->u.call.args.data[0]);
                 if (at.kind != TY_INT) {
@@ -2259,7 +2446,7 @@ static Type check_expr_inner(Expr *e) {
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "%s argument must be an integer",
                            e->u.call.callee->u.var.name);
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
                 if (nargs == 2) {
                     Type cty = check_expr_inner(e->u.call.args.data[1]);
@@ -2269,14 +2456,14 @@ static Type check_expr_inner(Expr *e) {
                         die_at(e->loc.file, e->loc.line, e->loc.col,
                                "%s count must be an integer",
                                e->u.call.callee->u.var.name);
-                        return type_make_void();
+                        RETURN_TYPE(type_make_void());
                     }
                     type_free(&cty);
                 }
                 if (same_ty) set_type(e, type_clone(at));
                 else set_type(e, type_make_int(4, 1));
                 type_free(&at);
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
         }
         /* __builtin_*_sat saturates in the argument type.  Promoting an
@@ -2288,7 +2475,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 2) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "%s takes 2 arguments", e->u.call.callee->u.var.name);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type at = check_expr_inner(e->u.call.args.data[0]);
             Type bt = check_expr_inner(e->u.call.args.data[1]);
@@ -2298,12 +2485,12 @@ static Type check_expr_inner(Expr *e) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "%s arguments must be integers",
                        e->u.call.callee->u.var.name);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             set_type(e, type_clone(at));
             type_free(&at);
             type_free(&bt);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* __builtin_isnormal is type-generic.  Promoting float to double
          * would turn a float subnormal into a normal double. */
@@ -2315,7 +2502,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 1) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "%s takes 1 argument", e->u.call.callee->u.var.name);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             Type at = check_expr_inner(e->u.call.args.data[0]);
             if (at.kind != TY_FLOAT) {
@@ -2323,11 +2510,11 @@ static Type check_expr_inner(Expr *e) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "%s argument must be a floating type",
                        e->u.call.callee->u.var.name);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             type_free(&at);
             set_type(e, type_make_int(4, 0));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* __builtin_fpclassify is type-generic in its last argument. A
          * variadic prototype would promote float to double and hide a
@@ -2337,7 +2524,7 @@ static Type check_expr_inner(Expr *e) {
             if (e->u.call.args.len != 6) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "__builtin_fpclassify takes 6 arguments");
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
             for (size_t i = 0; i < e->u.call.args.len; i++) {
                 Type at = check_expr_inner(e->u.call.args.data[i]);
@@ -2345,12 +2532,12 @@ static Type check_expr_inner(Expr *e) {
                     type_free(&at);
                     die_at(e->loc.file, e->loc.line, e->loc.col,
                            "__builtin_fpclassify value must be a floating type");
-                    return type_make_void();
+                    RETURN_TYPE(type_make_void());
                 }
                 type_free(&at);
             }
             set_type(e, type_make_int(4, 0));
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         /* Type-check the callee expression. */
         Type callee_ty = check_expr_inner(e->u.call.callee);
@@ -2391,7 +2578,7 @@ static Type check_expr_inner(Expr *e) {
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 set_type(e, type_clone(*fty->func_ret));
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
             if (sig) {
                 /* Snapshot the signature before checking arguments: a nested
@@ -2422,7 +2609,7 @@ static Type check_expr_inner(Expr *e) {
                         apply_default_arg_promotions(&e->u.call.args.data[i]);
                 }
                 set_type(e, type_clone(sig_ret));
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
             /* Not in function table — check the symbol table for an extern
              * function declaration (block-scope `extern void foo();`).  Such
@@ -2454,7 +2641,7 @@ static Type check_expr_inner(Expr *e) {
                 }
                 Type ret = fty->func_ret ? *fty->func_ret : type_make_void();
                 set_type(e, ret);
-                return type_clone(e->type);
+                RETURN_TYPE(type_clone(e->type));
             }
         }
         /* Indirect call: callee type must be pointer-to-function or bare
@@ -2470,7 +2657,7 @@ static Type check_expr_inner(Expr *e) {
         } else {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "call to non-function (callee type must be a function or function pointer)");
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
         /* Empty-parens `T (*)()` is unprototyped in the grammar but FakeCC
          * treats it as taking zero arguments, same as a named `T foo()`. */
@@ -2489,7 +2676,7 @@ static Type check_expr_inner(Expr *e) {
         }
         set_type(e, type_clone(*fn_ty.func_ret));
         type_free(&fn_ty);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_STR: {
         /* Type: char[len+1] — array of char with length = len+1.
@@ -2499,57 +2686,7 @@ static Type check_expr_inner(Expr *e) {
         Type ct = type_make_int(1, 0);   /* char */
         set_type(e, type_make_array(ct, e->u.str.len + 1));
         type_free(&ct);
-        return type_clone(e->type);
-    }
-    case EX_ADDR: {
-        Type ot = check_expr_inner(e->u.addr.operand);
-        /* operand must be lvalue */
-        ExprKind ok = e->u.addr.operand->kind;
-        if (ok != EX_VAR && ok != EX_DEREF && ok != EX_INDEX && ok != EX_MEMBER
-            && ok != EX_COMPOUND_LITERAL) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "cannot take address of rvalue");
-            return type_make_void();
-        }
-        if (e->u.addr.operand->kind == EX_MEMBER && ot.bitfield_width > 0) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "cannot take address of bitfield member");
-            return type_make_void();
-        }
-        if (e->u.addr.operand->kind == EX_VAR) {
-            const Sym *sy = symtable_find(st, e->u.addr.operand->u.var.name);
-            if (sy && sy->is_register) {
-                die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "address of register variable requested");
-                return type_make_void();
-            }
-        }
-        /* `&function` is a no-op in C -- the result is the same function
-         * pointer that the function lvalue already decayed to.  If the operand
-         * is already a function pointer (from decay), just return it. */
-        if (ot.kind == TY_PTR && ot.pointee && ot.pointee->kind == TY_FUNC) {
-            set_type(e, ot);  /* takes ownership of ot */
-            return type_clone(e->type);
-        }
-        Type res = type_make_ptr(ot);
-        type_free(&ot);
-        set_type(e, res);
-        return type_clone(e->type);
-    }
-    case EX_DEREF: {
-        Type ot = check_expr_inner(e->u.deref.operand);
-        if (ot.kind == TY_ARRAY) {
-            Type d = type_decay(ot); type_free(&ot); ot = d;
-        }
-        if (ot.kind != TY_PTR) {
-            die_at(e->loc.file, e->loc.line, e->loc.col,
-                   "cannot dereference non-pointer");
-            return type_make_void();
-        }
-        Type res = type_clone(*ot.pointee);
-        type_free(&ot);
-        set_type(e, res);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_INDEX: {
         /* a[i] — a must be ptr or array; result = pointee/elem. */
@@ -2568,14 +2705,14 @@ static Type check_expr_inner(Expr *e) {
         if (it.kind != TY_INT) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "array subscript is not an integer");
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
         type_free(&it);
         if (at.is_vector && at.elem_type) {
             Type res = type_clone(*at.elem_type);
             type_free(&at);
             set_type(e, res);
-            return type_clone(e->type);
+            RETURN_TYPE(type_clone(e->type));
         }
         Type base = at;
         if (base.kind == TY_ARRAY) {
@@ -2588,12 +2725,12 @@ static Type check_expr_inner(Expr *e) {
         if (base.kind != TY_PTR) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "subscript on non-pointer/non-array");
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
         Type res = type_clone(*base.pointee);
         type_free(&base);
         set_type(e, res);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_MEMBER: {
         /* Package-qualified name: `runtime.printf` parsed as member access.
@@ -2611,26 +2748,29 @@ static Type check_expr_inner(Expr *e) {
             e->kind = EX_VAR;
             e->u.var.name = name;
             e->u.var.pkg = pkg;
-            return check_expr_inner(e);
+            {
+                Type t = check_expr_inner(e);
+                RETURN_TYPE(t);
+            }
         }
         Type ot = check_expr_inner(e->u.member.obj);
         if (ot.kind != TY_STRUCT) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "member access '.%s' on non-struct", e->u.member.name);
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
         const StructDef *sd = struct_registry_find_c(g_sema_structs, ot.tag);
         if (!sd) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "unknown struct 'struct %s'", ot.tag);
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
         const StructMember *m = struct_lookup_member(g_sema_structs, sd,
                                                      e->u.member.name, NULL);
         if (!m) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "struct '%s' has no member '%s'", ot.tag, e->u.member.name);
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
         type_free(&ot);
         Type mt = type_clone(m->type);
@@ -2645,38 +2785,7 @@ static Type check_expr_inner(Expr *e) {
             }
         }
         set_type(e, mt);
-        return type_clone(e->type);
-    }
-    case EX_INC_DEC: {
-        /* ++lvalue / --lvalue (prefix or postfix). */
-        Expr *op = e->u.incdec.operand;
-        if (op->kind != EX_VAR && op->kind != EX_DEREF &&
-            op->kind != EX_INDEX && op->kind != EX_MEMBER)
-            {
-                die_at(op->loc.file, op->loc.line, op->loc.col,
-                   "operand of '%s' must be an lvalue",
-                   e->u.incdec.is_inc ? "++" : "--");
-                return type_make_void();
-            }
-        Type ot = check_expr_inner(op);
-        if (ot.is_const)
-            {
-                die_at(op->loc.file, op->loc.line, op->loc.col,
-                   "cannot increment/decrement a read-only variable");
-                return type_make_void();
-            }
-        if (ot.kind != TY_INT && ot.kind != TY_FLOAT && ot.kind != TY_PTR)
-            {
-                die_at(op->loc.file, op->loc.line, op->loc.col,
-                   "operand of '%s' must be arithmetic or pointer",
-                   e->u.incdec.is_inc ? "++" : "--");
-                return type_make_void();
-            }
-        type_free(&ot);
-        /* Result type is the operand type (before increment). For both prefix
-         * and postfix, e->type is the same as the operand's declared type. */
-        set_type(e, type_clone(op->type));
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_COMMA: {
         /* a, b: evaluate a (discard result), result is b after lvalue
@@ -2690,17 +2799,19 @@ static Type check_expr_inner(Expr *e) {
             Type d = type_make_ptr(rt); type_free(&rt); rt = d;
         }
         set_type(e, rt);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
-    case EX_TERNARY:
-        return check_ternary_expr(e);
+    case EX_TERNARY: {
+        Type t = check_ternary_expr(e);
+        RETURN_TYPE(t);
+    }
     case EX_CAST: {
         Type ot = check_expr_inner(e->u.cast.operand);
         type_free(&ot);
         /* Result type is the cast target already stored on the expr;
          * we also mirror it on e->type. */
         set_type(e, type_clone(e->u.cast.target));
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_SIZEOF_TYPE: {
         Type *t = &e->u.sizeof_t.target;
@@ -2709,7 +2820,7 @@ static Type check_expr_inner(Expr *e) {
             if (!is_cplx && !struct_registry_find_c(g_sema_structs, t->tag)) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid application of 'sizeof' to incomplete type 'struct %s'", t->tag);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         }
         while (t && t->kind == TY_ARRAY) {
@@ -2720,26 +2831,26 @@ static Type check_expr_inner(Expr *e) {
             t = t->elem_type;
         }
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_SIZEOF_EXPR: {
         Type ot = check_expr_inner(e->u.sizeof_e.operand);
         if (ot.bitfield_width > 0) {
             die_at(e->loc.file, e->loc.line, e->loc.col,
                    "invalid application of 'sizeof' to bit-field");
-            return type_make_void();
+            RETURN_TYPE(type_make_void());
         }
         if (ot.kind == TY_STRUCT && ot.tag) {
             int is_cplx = (strncmp(ot.tag, "__complex_", 10) == 0);
             if (!is_cplx && !struct_registry_find_c(g_sema_structs, ot.tag)) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid application of 'sizeof' to incomplete type 'struct %s'", ot.tag);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         }
         type_free(&ot);
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_ALIGNOF_TYPE: {
         Type *t = &e->u.alignof_t.target;
@@ -2748,11 +2859,11 @@ static Type check_expr_inner(Expr *e) {
             if (!is_cplx && !struct_registry_find_c(g_sema_structs, t->tag)) {
                 die_at(e->loc.file, e->loc.line, e->loc.col,
                        "invalid application of 'alignof' to incomplete type 'struct %s'", t->tag);
-                return type_make_void();
+                RETURN_TYPE(type_make_void());
             }
         }
         set_type(e, type_make_int(8, 1));   /* size_t == unsigned long */
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_ALIGNOF_EXPR: {
         Type ot = check_expr_inner(e->u.alignof_e.operand);
@@ -2775,7 +2886,7 @@ static Type check_expr_inner(Expr *e) {
         e->u.int_val = al;
         e->int_hi = 0;
         set_type(e, type_make_int(8, 1));
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_INIT_LIST: {
         /* An initializer list is valid only as a declarator initializer.  We
@@ -2789,7 +2900,7 @@ static Type check_expr_inner(Expr *e) {
             type_free(&et);
         }
         set_type(e, type_default_int());
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_COMPOUND_LITERAL: {
         /* (Type){ ... }: validate the init list against the target type and
@@ -2802,7 +2913,7 @@ static Type check_expr_inner(Expr *e) {
             type_free(&et);
         }
         set_type(e, type_clone(e->u.compound.target_type));
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_STMT_EXPR: {
         int has_ret = 0;
@@ -2820,7 +2931,7 @@ static Type check_expr_inner(Expr *e) {
             }
         }
         set_type(e, res_type);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     case EX_LABEL_ADDR: {
         /* &&label yields a void* */
@@ -2830,10 +2941,10 @@ static Type check_expr_inner(Expr *e) {
         t.pointee = malloc(sizeof(Type));
         *t.pointee = type_make_void();
         set_type(e, t);
-        return type_clone(e->type);
+        RETURN_TYPE(type_clone(e->type));
     }
     }
-    return type_default_int();
+    RETURN_TYPE(type_default_int());
 }
 
 static void check_stmt(Stmt *s, size_t scope_mark, int *has_return);

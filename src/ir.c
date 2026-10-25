@@ -6195,6 +6195,259 @@ static IRValue i128_pair_materialize(IRFunction *fn, I128Pair *p, SourceLoc loc)
     return dst;
 }
 
+/* Apply one unary operator to an already-lowered operand. The operand
+ * expression is not lowered again, so a chain of operators reuses this
+ * frame instead of recursing in lower_expr. */
+static IRValue lower_one_unary(IRFunction *fn, const Expr *e, IRValue operand_v) {
+        switch (e->u.un.op) {
+        case UOP_NEG: {
+            if (e->u.un.operand->type.is_vector) {
+                Type vt = e->u.un.operand->type;
+                int total_sz = type_size(vt);
+                int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
+                if (esz <= 0) esz = 4;
+                int count = vt.length > 0 ? vt.length : (total_sz / esz);
+                int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
+                int is_float = vt.elem_type ? (vt.elem_type->kind == TY_FLOAT) : 0;
+                IRValue op_addr = operand_v;
+                IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+                IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                for (int i = 0; i < count; i++) {
+                    IRValue src_off = emit_add_const(fn, op_addr, i * esz, e->loc);
+                    IRValue dst_off = emit_add_const(fn, dst_addr, i * esz, e->loc);
+                    IRValue val = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, val, src_off, -1, 0, esz, is_unsigned, e->loc);
+                    if (is_float) set_value_float(fn, val, 1);
+                    IRValue neg_val;
+                    if (is_float) {
+                        int64_t negzero = (esz == 4) ? (int64_t)0x80000000
+                                                    : (int64_t)0x8000000000000000LL;
+                        IRValue zero = emit_float_const(fn, esz, negzero, e->loc);
+                        neg_val = emit_bin_w(fn, IR_FSUB, zero, val, esz, 0, e->loc);
+                        set_value_float(fn, neg_val, 1);
+                    } else {
+                        neg_val = emit_bin_w(fn, IR_NEG, val, -1, esz, is_unsigned, e->loc);
+                    }
+                    emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, neg_val, 0, esz, is_unsigned, e->loc);
+                    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                }
+                return dst_addr;
+            }
+            if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
+                strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
+                Type cty = e->u.un.operand->type;
+                int total_sz = type_size(cty);
+                int elem_sz = total_sz / 2;
+                int is_float = (strstr(cty.tag, "float") != NULL || strstr(cty.tag, "double") != NULL || strstr(cty.tag, "ldouble") != NULL);
+                int is_unsigned = (strstr(cty.tag, "unsigned") != NULL);
+                IRValue op_addr = operand_v;
+                IRValue vr = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vr, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vr, 1);
+
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                IRValue iaddr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
+                IRValue vi = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vi, 1);
+
+                IRValue neg_vr, neg_vi;
+                if (is_float) {
+                    int64_t negzero = (elem_sz == 4) ? (int64_t)0x80000000 : (int64_t)0x8000000000000000LL;
+                    IRValue zero = emit_float_const(fn, elem_sz, negzero, e->loc);
+                    neg_vr = emit_bin_w(fn, IR_FSUB, zero, vr, elem_sz, 0, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_FSUB, zero, vi, elem_sz, 0, e->loc);
+                    set_value_float(fn, neg_vr, 1);
+                    set_value_float(fn, neg_vi, 1);
+                } else {
+                    neg_vr = emit_bin_w(fn, IR_NEG, vr, -1, elem_sz, 0, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_NEG, vi, -1, elem_sz, 0, e->loc);
+                }
+
+                IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, neg_vr, 0, elem_sz, 1, e->loc);
+                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                IRValue out_iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, out_iaddr, neg_vi, 0, elem_sz, 1, e->loc);
+                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
+                return addr;
+            }
+            if (type_is_i128(e->type) || type_is_i128(e->u.un.operand->type)) {
+                IRValue x = operand_v;
+                IRValue a = i128_as_addr(fn, x, e->u.un.operand->type,
+                                         e->type.is_unsigned, e->loc);
+                IRValue dst = i128_alloc(fn, e->loc);
+                i128_neg(fn, dst, a, e->loc);
+                return dst;
+            }
+            IRValue x = operand_v;
+            int sw = get_value_width(fn, x);
+            int su = get_value_is_unsigned(fn, x);
+            int sf = get_value_is_float(fn, x);
+            int rw = e->type.width ? e->type.width : 4;
+            int ru = e->type.is_unsigned;
+            if (e->type.is_decimal || e->u.un.operand->type.is_decimal) {
+                int w = e->type.width ? e->type.width : 8;
+                if (w == 16) {
+                    IRValue lo, hi;
+                    i128_load2(fn, x, &lo, &hi, e->loc);
+                    IRValue mask = i64imm(fn, (int64_t)0x8000000000000000ULL, e->loc);
+                    IRValue nhi = emit_bin_w(fn, IR_BXOR, hi, mask, 8, 1, e->loc);
+                    IRValue dst = i128_alloc(fn, e->loc);
+                    i128_store2(fn, dst, lo, nhi, e->loc);
+                    return dst;
+                }
+                unsigned long long sign = (w == 4) ? 0x80000000ULL : 0x8000000000000000ULL;
+                IRValue bits = emit_bits_from_dfp(fn, x, w, e->loc);
+                IRValue m = new_value(fn);
+                emit_inst_w(fn, IR_CONST, m, -1, -1, (int64_t)sign, w == 4 ? 4 : 8, 1, e->loc);
+                IRValue xb = emit_bin_w(fn, IR_BXOR, bits, m, w == 4 ? 4 : 8, 1, e->loc);
+                return emit_dfp_from_bits(fn, xb, w, e->loc);
+            }
+            if (sf) {
+                /* Float negation: -x = (-0.0) - x.  Subtracting from +0.0
+                 * would turn -0.0 into +0.0, losing the sign IEEE keeps. */
+                int64_t negzero = (rw == 4) ? (int64_t)0x80000000
+                                            : (int64_t)0x8000000000000000LL;
+                IRValue zero = emit_float_const(fn, rw, negzero, e->loc);
+                IRValue neg = emit_bin_w(fn, IR_FSUB, zero, x, rw, 0, e->loc);
+                set_value_float(fn, neg, 1);
+                return neg;
+            }
+            IRValue px = coerce(fn, x, sw, su, rw, ru, e->loc);
+            return emit_bin_w(fn, IR_NEG, px, -1, rw, ru, e->loc);
+        }
+        case UOP_POS:
+            return operand_v;
+        case UOP_NOT: {
+            /* Logical NOT: !x → (x == 0). Result is int 0/1. */
+            if (type_is_i128(e->u.un.operand->type)) {
+                IRValue x = operand_v;
+                IRValue nz = i128_nz(fn, x, e->loc);
+                IRValue one = new_value(fn);
+                emit_inst_w(fn, IR_CONST, one, -1, -1, 1, 4, 0, e->loc);
+                return emit_bin_w(fn, IR_BXOR, nz, one, 4, 0, e->loc);
+            }
+            if (e->u.un.operand->type.is_decimal) {
+                IRValue x = operand_v;
+                int w = e->u.un.operand->type.width ? e->u.un.operand->type.width : 8;
+                IRValue z = emit_dfp_zero(fn, w, e->loc);
+                return emit_dfp_cmp(fn, w, BOP_EQ, x, z, e->loc);
+            }
+            if (e->u.un.operand->type.kind == TY_FLOAT
+                && !e->u.un.operand->type.is_vector) {
+                /* !f is (f == +0.0); IEEE -0.0 is also zero. */
+                IRValue x = operand_v;
+                int w = get_value_width(fn, x);
+                IRValue zero = emit_float_const(fn, w, 0, e->loc);
+                return emit_fcmp(fn, x, zero, w, 4 /* EQ */, e->loc);
+            }
+            IRValue x = operand_v;
+            int xw = get_value_width(fn, x), xu = get_value_is_unsigned(fn, x);
+            IRValue zero = new_value(fn);
+            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, xw, xu, e->loc);
+            IRValue cmp = emit_bin_w(fn, IR_EQ, x, zero, xw, xu, e->loc);
+            /* Retag result to int(4,signed). */
+            set_value_type(fn, cmp, 4, 0);
+            return cmp;
+        }
+        case UOP_BITNOT: {
+            if (e->u.un.operand->type.is_vector) {
+                Type vt = e->u.un.operand->type;
+                int total_sz = type_size(vt);
+                int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
+                if (esz <= 0) esz = 4;
+                int count = vt.length > 0 ? vt.length : (total_sz / esz);
+                int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
+                IRValue op_addr = operand_v;
+                IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
+                IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                for (int i = 0; i < count; i++) {
+                    IRValue src_off = emit_add_const(fn, op_addr, i * esz, e->loc);
+                    IRValue dst_off = emit_add_const(fn, dst_addr, i * esz, e->loc);
+                    IRValue val = new_value(fn);
+                    emit_inst_w(fn, IR_LOAD_PTR, val, src_off, -1, 0, esz, is_unsigned, e->loc);
+                    IRValue not_val = emit_bin_w(fn, IR_BNOT, val, -1, esz, is_unsigned, e->loc);
+                    emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, not_val, 0, esz, is_unsigned, e->loc);
+                }
+                return dst_addr;
+            }
+            if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
+                strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
+                Type cty = e->u.un.operand->type;
+                int total_sz = type_size(cty);
+                int elem_sz = total_sz / 2;
+                int is_float = (strstr(cty.tag, "float") != NULL || strstr(cty.tag, "double") != NULL || strstr(cty.tag, "ldouble") != NULL);
+                int is_unsigned = (strstr(cty.tag, "unsigned") != NULL);
+                IRValue op_addr = operand_v;
+                IRValue vr = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vr, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vr, 1);
+                
+                IRValue off = new_value(fn);
+                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
+                IRValue iaddr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
+                IRValue vi = new_value(fn);
+                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, is_unsigned, e->loc);
+                if (is_float) set_value_float(fn, vi, 1);
+                
+                IRValue neg_vi;
+                if (is_float) {
+                    int64_t negzero = (elem_sz == 4) ? (int64_t)0x80000000 : (int64_t)0x8000000000000000LL;
+                    IRValue zero = emit_float_const(fn, elem_sz, negzero, e->loc);
+                    neg_vi = emit_bin_w(fn, IR_FSUB, zero, vi, elem_sz, 0, e->loc);
+                    set_value_float(fn, neg_vi, 1);
+                } else {
+                    neg_vi = emit_bin_w(fn, IR_NEG, vi, -1, elem_sz, 0, e->loc);
+                }
+                
+                IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, addr, vr, 0, elem_sz, 1, e->loc);
+                IRValue out_iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
+                emit_inst_w(fn, IR_STORE_PTR, -1, out_iaddr, neg_vi, 0, elem_sz, 1, e->loc);
+                return addr;
+            }
+            if (type_is_i128(e->type) || type_is_i128(e->u.un.operand->type)) {
+                IRValue x = operand_v;
+                IRValue a = i128_as_addr(fn, x, e->u.un.operand->type,
+                                         e->type.is_unsigned, e->loc);
+                IRValue dst = i128_alloc(fn, e->loc);
+                i128_bnot(fn, dst, a, e->loc);
+                return dst;
+            }
+            IRValue x = operand_v;
+            int sw = get_value_width(fn, x);
+            int su = get_value_is_unsigned(fn, x);
+            int rw = e->type.width ? e->type.width : 4;
+            int ru = e->type.is_unsigned;
+            IRValue px = coerce(fn, x, sw, su, rw, ru, e->loc);
+            IRValue v = new_value(fn);
+            emit_inst_w(fn, IR_BNOT, v, px, -1, 0, rw, ru, e->loc);
+            return v;
+        }
+        }
+    return operand_v;
+}
+
+static IRValue lower_one_deref(IRFunction *fn, IRValue ptr, const Expr *e) {
+    if (e->type.kind == TY_STRUCT || e->type.kind == TY_ARRAY || e->type.is_vector || type_is_pair16(e->type))
+        return ptr;
+    /* Function lvalue (`*fp`): no load — the pointer value is the callee. */
+    if (e->type.kind == TY_FUNC) return ptr;
+    {
+        int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
+        int u = e->type.is_unsigned;
+        IRValue v = new_value(fn);
+        emit_inst_w(fn, IR_LOAD_PTR, v, ptr, -1, 0, w, u, e->loc);
+        mark_last_volatile(fn, e->type.is_volatile);
+        if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
+        return v;
+    }
+}
+
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     if (fakecc_had_error()) return FAKECC_ERR;
     if (!e) return FAKECC_ERR; /* empty case/default before '}' used to pass NULL */
@@ -6240,238 +6493,32 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         ir_module_push_global(g_ir_module, name, bytes, init, 1, 1, 0, e->loc);
         return emit_gaddr(fn, name, e->loc, 0);
     }
-    case EX_UNARY:
-        switch (e->u.un.op) {
-        case UOP_NEG: {
-            if (e->u.un.operand->type.is_vector) {
-                Type vt = e->u.un.operand->type;
-                int total_sz = type_size(vt);
-                int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
-                if (esz <= 0) esz = 4;
-                int count = vt.length > 0 ? vt.length : (total_sz / esz);
-                int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
-                int is_float = vt.elem_type ? (vt.elem_type->kind == TY_FLOAT) : 0;
-                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
-                IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
-                IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-                for (int i = 0; i < count; i++) {
-                    IRValue src_off = emit_add_const(fn, op_addr, i * esz, e->loc);
-                    IRValue dst_off = emit_add_const(fn, dst_addr, i * esz, e->loc);
-                    IRValue val = new_value(fn);
-                    emit_inst_w(fn, IR_LOAD_PTR, val, src_off, -1, 0, esz, is_unsigned, e->loc);
-                    if (is_float) set_value_float(fn, val, 1);
-                    IRValue neg_val;
-                    if (is_float) {
-                        int64_t negzero = (esz == 4) ? (int64_t)0x80000000
-                                                    : (int64_t)0x8000000000000000LL;
-                        IRValue zero = emit_float_const(fn, esz, negzero, e->loc);
-                        neg_val = emit_bin_w(fn, IR_FSUB, zero, val, esz, 0, e->loc);
-                        set_value_float(fn, neg_val, 1);
-                    } else {
-                        neg_val = emit_bin_w(fn, IR_NEG, val, -1, esz, is_unsigned, e->loc);
-                    }
-                    emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, neg_val, 0, esz, is_unsigned, e->loc);
-                    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
-                }
-                return dst_addr;
+    case EX_UNARY: {
+        const Expr *node_stack[8];
+        const Expr **nodes = node_stack;
+        int ncap = 8, n = 0, node_heap = 0, i;
+        const Expr *cur = e;
+        IRValue v;
+        while (cur && cur->kind == EX_UNARY) {
+            if (n >= ncap) {
+                int nn = ncap * 2;
+                const Expr **np = (const Expr **)malloc((size_t)nn * sizeof(const Expr *));
+                if (!np) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(np, nodes, (size_t)n * sizeof(const Expr *));
+                if (node_heap) free((void *)nodes);
+                nodes = np;
+                ncap = nn;
+                node_heap = 1;
             }
-            if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
-                strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
-                Type cty = e->u.un.operand->type;
-                int total_sz = type_size(cty);
-                int elem_sz = total_sz / 2;
-                int is_float = (strstr(cty.tag, "float") != NULL || strstr(cty.tag, "double") != NULL || strstr(cty.tag, "ldouble") != NULL);
-                int is_unsigned = (strstr(cty.tag, "unsigned") != NULL);
-                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
-                IRValue vr = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, vr, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
-                if (is_float) set_value_float(fn, vr, 1);
-
-                IRValue off = new_value(fn);
-                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
-                IRValue iaddr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
-                IRValue vi = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, is_unsigned, e->loc);
-                if (is_float) set_value_float(fn, vi, 1);
-
-                IRValue neg_vr, neg_vi;
-                if (is_float) {
-                    int64_t negzero = (elem_sz == 4) ? (int64_t)0x80000000 : (int64_t)0x8000000000000000LL;
-                    IRValue zero = emit_float_const(fn, elem_sz, negzero, e->loc);
-                    neg_vr = emit_bin_w(fn, IR_FSUB, zero, vr, elem_sz, 0, e->loc);
-                    neg_vi = emit_bin_w(fn, IR_FSUB, zero, vi, elem_sz, 0, e->loc);
-                    set_value_float(fn, neg_vr, 1);
-                    set_value_float(fn, neg_vi, 1);
-                } else {
-                    neg_vr = emit_bin_w(fn, IR_NEG, vr, -1, elem_sz, 0, e->loc);
-                    neg_vi = emit_bin_w(fn, IR_NEG, vi, -1, elem_sz, 0, e->loc);
-                }
-
-                IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
-                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, neg_vr, 0, elem_sz, 1, e->loc);
-                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
-                IRValue out_iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, out_iaddr, neg_vi, 0, elem_sz, 1, e->loc);
-                if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
-                return addr;
-            }
-            if (type_is_i128(e->type) || type_is_i128(e->u.un.operand->type)) {
-                IRValue x = lower_expr(fn, st, e->u.un.operand);
-                IRValue a = i128_as_addr(fn, x, e->u.un.operand->type,
-                                         e->type.is_unsigned, e->loc);
-                IRValue dst = i128_alloc(fn, e->loc);
-                i128_neg(fn, dst, a, e->loc);
-                return dst;
-            }
-            IRValue x = lower_expr(fn, st, e->u.un.operand);
-            int sw = get_value_width(fn, x);
-            int su = get_value_is_unsigned(fn, x);
-            int sf = get_value_is_float(fn, x);
-            int rw = e->type.width ? e->type.width : 4;
-            int ru = e->type.is_unsigned;
-            if (e->type.is_decimal || e->u.un.operand->type.is_decimal) {
-                int w = e->type.width ? e->type.width : 8;
-                if (w == 16) {
-                    IRValue lo, hi;
-                    i128_load2(fn, x, &lo, &hi, e->loc);
-                    IRValue mask = i64imm(fn, (int64_t)0x8000000000000000ULL, e->loc);
-                    IRValue nhi = emit_bin_w(fn, IR_BXOR, hi, mask, 8, 1, e->loc);
-                    IRValue dst = i128_alloc(fn, e->loc);
-                    i128_store2(fn, dst, lo, nhi, e->loc);
-                    return dst;
-                }
-                unsigned long long sign = (w == 4) ? 0x80000000ULL : 0x8000000000000000ULL;
-                IRValue bits = emit_bits_from_dfp(fn, x, w, e->loc);
-                IRValue m = new_value(fn);
-                emit_inst_w(fn, IR_CONST, m, -1, -1, (int64_t)sign, w == 4 ? 4 : 8, 1, e->loc);
-                IRValue xb = emit_bin_w(fn, IR_BXOR, bits, m, w == 4 ? 4 : 8, 1, e->loc);
-                return emit_dfp_from_bits(fn, xb, w, e->loc);
-            }
-            if (sf) {
-                /* Float negation: -x = (-0.0) - x.  Subtracting from +0.0
-                 * would turn -0.0 into +0.0, losing the sign IEEE keeps. */
-                int64_t negzero = (rw == 4) ? (int64_t)0x80000000
-                                            : (int64_t)0x8000000000000000LL;
-                IRValue zero = emit_float_const(fn, rw, negzero, e->loc);
-                IRValue neg = emit_bin_w(fn, IR_FSUB, zero, x, rw, 0, e->loc);
-                set_value_float(fn, neg, 1);
-                return neg;
-            }
-            IRValue px = coerce(fn, x, sw, su, rw, ru, e->loc);
-            return emit_bin_w(fn, IR_NEG, px, -1, rw, ru, e->loc);
+            nodes[n++] = cur;
+            cur = cur->u.un.operand;
         }
-        case UOP_POS:
-            return lower_expr(fn, st, e->u.un.operand);
-        case UOP_NOT: {
-            /* Logical NOT: !x → (x == 0). Result is int 0/1. */
-            if (type_is_i128(e->u.un.operand->type)) {
-                IRValue x = lower_expr(fn, st, e->u.un.operand);
-                IRValue nz = i128_nz(fn, x, e->loc);
-                IRValue one = new_value(fn);
-                emit_inst_w(fn, IR_CONST, one, -1, -1, 1, 4, 0, e->loc);
-                return emit_bin_w(fn, IR_BXOR, nz, one, 4, 0, e->loc);
-            }
-            if (e->u.un.operand->type.is_decimal) {
-                IRValue x = lower_expr(fn, st, e->u.un.operand);
-                int w = e->u.un.operand->type.width ? e->u.un.operand->type.width : 8;
-                IRValue z = emit_dfp_zero(fn, w, e->loc);
-                return emit_dfp_cmp(fn, w, BOP_EQ, x, z, e->loc);
-            }
-            if (e->u.un.operand->type.kind == TY_FLOAT
-                && !e->u.un.operand->type.is_vector) {
-                /* !f is (f == +0.0); IEEE -0.0 is also zero. */
-                IRValue x = lower_expr(fn, st, e->u.un.operand);
-                int w = get_value_width(fn, x);
-                IRValue zero = emit_float_const(fn, w, 0, e->loc);
-                return emit_fcmp(fn, x, zero, w, 4 /* EQ */, e->loc);
-            }
-            IRValue x = lower_expr(fn, st, e->u.un.operand);
-            int xw = get_value_width(fn, x), xu = get_value_is_unsigned(fn, x);
-            IRValue zero = new_value(fn);
-            emit_inst_w(fn, IR_CONST, zero, -1, -1, 0, xw, xu, e->loc);
-            IRValue cmp = emit_bin_w(fn, IR_EQ, x, zero, xw, xu, e->loc);
-            /* Retag result to int(4,signed). */
-            set_value_type(fn, cmp, 4, 0);
-            return cmp;
-        }
-        case UOP_BITNOT: {
-            if (e->u.un.operand->type.is_vector) {
-                Type vt = e->u.un.operand->type;
-                int total_sz = type_size(vt);
-                int esz = vt.elem_type ? type_size(*vt.elem_type) : 4;
-                if (esz <= 0) esz = 4;
-                int count = vt.length > 0 ? vt.length : (total_sz / esz);
-                int is_unsigned = vt.elem_type ? vt.elem_type->is_unsigned : 0;
-                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
-                IRValue slot = emit_alloca(fn, total_sz, 16, 1, e->loc);
-                IRValue dst_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-                for (int i = 0; i < count; i++) {
-                    IRValue src_off = emit_add_const(fn, op_addr, i * esz, e->loc);
-                    IRValue dst_off = emit_add_const(fn, dst_addr, i * esz, e->loc);
-                    IRValue val = new_value(fn);
-                    emit_inst_w(fn, IR_LOAD_PTR, val, src_off, -1, 0, esz, is_unsigned, e->loc);
-                    IRValue not_val = emit_bin_w(fn, IR_BNOT, val, -1, esz, is_unsigned, e->loc);
-                    emit_inst_w(fn, IR_STORE_PTR, -1, dst_off, not_val, 0, esz, is_unsigned, e->loc);
-                }
-                return dst_addr;
-            }
-            if (e->u.un.operand->type.kind == TY_STRUCT && e->u.un.operand->type.tag &&
-                strncmp(e->u.un.operand->type.tag, "__complex_", 10) == 0) {
-                Type cty = e->u.un.operand->type;
-                int total_sz = type_size(cty);
-                int elem_sz = total_sz / 2;
-                int is_float = (strstr(cty.tag, "float") != NULL || strstr(cty.tag, "double") != NULL || strstr(cty.tag, "ldouble") != NULL);
-                int is_unsigned = (strstr(cty.tag, "unsigned") != NULL);
-                IRValue op_addr = lower_expr(fn, st, e->u.un.operand);
-                IRValue vr = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, vr, op_addr, -1, 0, elem_sz, is_unsigned, e->loc);
-                if (is_float) set_value_float(fn, vr, 1);
-                
-                IRValue off = new_value(fn);
-                emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
-                IRValue iaddr = emit_bin_w(fn, IR_ADD, op_addr, off, 8, 1, e->loc);
-                IRValue vi = new_value(fn);
-                emit_inst_w(fn, IR_LOAD_PTR, vi, iaddr, -1, 0, elem_sz, is_unsigned, e->loc);
-                if (is_float) set_value_float(fn, vi, 1);
-                
-                IRValue neg_vi;
-                if (is_float) {
-                    int64_t negzero = (elem_sz == 4) ? (int64_t)0x80000000 : (int64_t)0x8000000000000000LL;
-                    IRValue zero = emit_float_const(fn, elem_sz, negzero, e->loc);
-                    neg_vi = emit_bin_w(fn, IR_FSUB, zero, vi, elem_sz, 0, e->loc);
-                    set_value_float(fn, neg_vi, 1);
-                } else {
-                    neg_vi = emit_bin_w(fn, IR_NEG, vi, -1, elem_sz, 0, e->loc);
-                }
-                
-                IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
-                IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, addr, vr, 0, elem_sz, 1, e->loc);
-                IRValue out_iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
-                emit_inst_w(fn, IR_STORE_PTR, -1, out_iaddr, neg_vi, 0, elem_sz, 1, e->loc);
-                return addr;
-            }
-            if (type_is_i128(e->type) || type_is_i128(e->u.un.operand->type)) {
-                IRValue x = lower_expr(fn, st, e->u.un.operand);
-                IRValue a = i128_as_addr(fn, x, e->u.un.operand->type,
-                                         e->type.is_unsigned, e->loc);
-                IRValue dst = i128_alloc(fn, e->loc);
-                i128_bnot(fn, dst, a, e->loc);
-                return dst;
-            }
-            IRValue x = lower_expr(fn, st, e->u.un.operand);
-            int sw = get_value_width(fn, x);
-            int su = get_value_is_unsigned(fn, x);
-            int rw = e->type.width ? e->type.width : 4;
-            int ru = e->type.is_unsigned;
-            IRValue px = coerce(fn, x, sw, su, rw, ru, e->loc);
-            IRValue v = new_value(fn);
-            emit_inst_w(fn, IR_BNOT, v, px, -1, 0, rw, ru, e->loc);
-            return v;
-        }
-        }
-        break; /* unreachable */
+        v = lower_expr(fn, st, cur);
+        for (i = n - 1; i >= 0; i--)
+            v = lower_one_unary(fn, nodes[i], v);
+        if (node_heap) free((void *)nodes);
+        return v;
+    }
     case EX_BINOP: {
         /* Pointer arithmetic: p+i, i+p, p-i, p-q.
          * Sema has already decayed array operands to pointer types on both
@@ -9282,18 +9329,30 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         return -1;
     }
     case EX_DEREF: {
-        IRValue ptr = lower_expr(fn, st, e->u.deref.operand);
-        if (e->type.kind == TY_STRUCT || e->type.kind == TY_ARRAY || e->type.is_vector || type_is_pair16(e->type)) return ptr;
-        /* Function lvalue (`*fp` where fp : ptr(func)): no load — the function
-         * pointer value IS the caldehyde; it decays at the call site. */
-        if (e->type.kind == TY_FUNC) return ptr;
-        int w = e->type.kind == TY_PTR ? 8 : (e->type.width ? e->type.width : 4);
-        int u = e->type.is_unsigned;
-        IRValue v = new_value(fn);
-        emit_inst_w(fn, IR_LOAD_PTR, v, ptr, -1, 0, w, u, e->loc);
-        mark_last_volatile(fn, e->type.is_volatile);
-        if (e->type.kind == TY_FLOAT) set_value_float(fn, v, 1);
-        return v;
+        const Expr *node_stack[8];
+        const Expr **nodes = node_stack;
+        int ncap = 8, n = 0, node_heap = 0, i;
+        const Expr *cur = e;
+        IRValue ptr;
+        while (cur && cur->kind == EX_DEREF) {
+            if (n >= ncap) {
+                int nn = ncap * 2;
+                const Expr **np = (const Expr **)malloc((size_t)nn * sizeof(const Expr *));
+                if (!np) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(np, nodes, (size_t)n * sizeof(const Expr *));
+                if (node_heap) free((void *)nodes);
+                nodes = np;
+                ncap = nn;
+                node_heap = 1;
+            }
+            nodes[n++] = cur;
+            cur = cur->u.deref.operand;
+        }
+        ptr = lower_expr(fn, st, cur);
+        for (i = n - 1; i >= 0; i--)
+            ptr = lower_one_deref(fn, ptr, nodes[i]);
+        if (node_heap) free((void *)nodes);
+        return ptr;
     }
     case EX_INDEX: {
         /* Same as *(a + i*sizeof(elem)) for rvalue use. */
@@ -10118,7 +10177,15 @@ static void lower_cond_br(IRFunction *fn, IRSymTable *st, const Expr *e,
         return;
     }
     if (e->kind == EX_UNARY && e->u.un.op == UOP_NOT) {
-        lower_cond_br(fn, st, e->u.un.operand, L_false, L_true);
+        int flips = 0;
+        while (e && e->kind == EX_UNARY && e->u.un.op == UOP_NOT) {
+            flips ^= 1;
+            e = e->u.un.operand;
+        }
+        if (flips)
+            lower_cond_br(fn, st, e, L_false, L_true);
+        else
+            lower_cond_br(fn, st, e, L_true, L_false);
         return;
     }
     IRValue cond = lower_condition(fn, st, e);
@@ -10159,7 +10226,20 @@ static void labelmap_add(LabelMap *lm, const char *name, int id) {
 
 static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s);
 
+static const Expr *skip_prefix_spine(const Expr *e) {
+    while (e && (e->kind == EX_UNARY || e->kind == EX_ADDR ||
+                 e->kind == EX_DEREF || e->kind == EX_INC_DEC)) {
+        if (e->kind == EX_UNARY) e = e->u.un.operand;
+        else if (e->kind == EX_ADDR) e = e->u.addr.operand;
+        else if (e->kind == EX_DEREF) e = e->u.deref.operand;
+        else e = e->u.incdec.operand;
+    }
+    return e;
+}
+
 static void assign_label_ids_expr(IRFunction *fn, LabelMap *lm, const Expr *e) {
+    if (!e) return;
+    e = skip_prefix_spine(e);
     if (!e) return;
     switch (e->kind) {
     case EX_STMT_EXPR:
@@ -10300,6 +10380,8 @@ static int vla_walk_top(void) {
 
 static void snapshot_vla_stmt(const LabelMap *lm, const Stmt *s);
 static void snapshot_vla_expr(const LabelMap *lm, const Expr *e) {
+    if (!e) return;
+    e = skip_prefix_spine(e);
     if (!e) return;
     if (e->kind == EX_STMT_EXPR && e->u.stmt_expr.stmts) {
         int saved = g_vla_walk_sp;
