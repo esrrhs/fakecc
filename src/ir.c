@@ -6448,6 +6448,226 @@ static IRValue lower_one_deref(IRFunction *fn, IRValue ptr, const Expr *e) {
     }
 }
 
+static int scalar_binop_generic(const Expr *e) {
+    Type lt, rt;
+    BinOp bop;
+    if (!e || e->kind != EX_BINOP) return 0;
+    lt = e->u.bin.l->type;
+    rt = e->u.bin.r->type;
+    bop = e->u.bin.op;
+    if (lt.is_vector || rt.is_vector) return 0;
+    if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
+        (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0))
+        return 0;
+    if (type_is_i128(lt) || type_is_i128(rt) || type_is_i128(e->type)) return 0;
+    if (lt.is_decimal || rt.is_decimal || e->type.is_decimal) return 0;
+    if (bop == BOP_AND || bop == BOP_OR) return 0;
+    if ((bop == BOP_ADD || bop == BOP_SUB) &&
+        (lt.kind == TY_PTR || lt.kind == TY_ARRAY ||
+         rt.kind == TY_PTR || rt.kind == TY_ARRAY))
+        return 0;
+    return 1;
+}
+
+static IRValue lower_scalar_binop_vals(IRFunction *fn, const Expr *e,
+                                       IRValue l, IRValue r) {
+        int lw = get_value_width(fn, l), lu = get_value_is_unsigned(fn, l);
+        int rw = get_value_width(fn, r), ru = get_value_is_unsigned(fn, r);
+        int lf = get_value_is_float(fn, l), rf = get_value_is_float(fn, r);
+
+        int is_cmp = (e->u.bin.op >= BOP_EQ && e->u.bin.op <= BOP_GE);
+        /* For arithmetic the result type follows e->type; for comparisons the
+         * result is always int, but a float comparison (either operand float)
+         * must lower to IR_FCMP, not integer IR_GT/etc. */
+        int res_float = (e->type.kind == TY_FLOAT) || (is_cmp && (lf || rf));
+        /* Operand width for the op = e->type for arith; UAC result for cmp. */
+        int op_w, op_u;
+        if (is_cmp) {
+            /* Reapply UAC to operand types to know cmp width/signedness. */
+            int aw = lf ? lw : (lw < 4 ? 4 : lw), au = lf ? 0 : (lw < 4 ? 0 : lu);
+            int bw = rf ? rw : (rw < 4 ? 4 : rw), bu = rf ? 0 : (rw < 4 ? 0 : ru);
+            if (lf || rf) {
+                /* Float comparison: width = max float width, neither signed. */
+                if (lf && rf) op_w = lw > rw ? lw : rw;
+                else if (lf) op_w = lw;
+                else op_w = rw;
+                op_u = 0;
+            } else if (aw == bw && au == bu) { op_w = aw; op_u = au; }
+            else if (au == bu) { op_w = aw > bw ? aw : bw; op_u = au; }
+            else {
+                int uw = au ? aw : bw; int uu = 1;
+                int sw = au ? bw : aw;
+                if (uw >= sw) { op_w = uw; op_u = uu; }
+                else { op_w = sw; op_u = 0; }
+            }
+        } else {
+            op_w = e->type.width ? e->type.width : 4;
+            op_u = e->type.is_unsigned;
+        }
+        IRValue pl, pr;
+        if (res_float) {
+            /* Coerce both operands to the result float width. */
+            pl = lf ? (lw == op_w ? l : convert_numeric(fn, l, lw, op_w, 0, 1, e->loc))
+                    : convert_numeric(fn, l, lw, op_w, 0, 1, e->loc);
+            pr = rf ? (rw == op_w ? r : convert_numeric(fn, r, rw, op_w, 0, 1, e->loc))
+                    : convert_numeric(fn, r, rw, op_w, 0, 1, e->loc);
+        } else {
+            pl = coerce(fn, l, lw, lu, op_w, op_u, e->loc);
+            pr = coerce(fn, r, rw, ru, op_w, op_u, e->loc);
+        }
+        IROpcode op;
+        if (res_float && !is_cmp) {
+            switch (e->u.bin.op) {
+            case BOP_ADD: op = IR_FADD; break;
+            case BOP_SUB: op = IR_FSUB; break;
+            case BOP_MUL: op = IR_FMUL; break;
+            case BOP_DIV: op = IR_FDIV; break;
+            default:      op = IR_FADD; break;
+            }
+        } else {
+            switch (e->u.bin.op) {
+            case BOP_ADD:     op = IR_ADD;  break;
+            case BOP_SUB:     op = IR_SUB;  break;
+            case BOP_MUL:     op = IR_MUL;  break;
+            case BOP_DIV:     op = IR_DIV;  break;
+            case BOP_MOD:     op = IR_MOD;  break;
+            case BOP_EQ:      op = IR_EQ;   break;
+            case BOP_NE:      op = IR_NE;   break;
+            case BOP_LT:      op = IR_LT;   break;
+            case BOP_LE:      op = IR_LE;   break;
+            case BOP_GT:      op = IR_GT;   break;
+            case BOP_GE:      op = IR_GE;   break;
+            case BOP_BITAND:  op = IR_BAND; break;
+            case BOP_BITOR:   op = IR_BOR;  break;
+            case BOP_BITXOR:  op = IR_BXOR; break;
+            case BOP_SHL:     op = IR_SHL;  break;
+            case BOP_SHR:     op = IR_SHR;  break;
+            default: op = IR_ADD; break;
+            }
+        }
+        int rw_res = is_cmp ? 4 : op_w;
+        int ru_res = is_cmp ? 0 : op_u;
+        IRValue result;
+        if (is_cmp && res_float) {
+            /* Float comparison — emit IR_FCMP with the comparison encoded in
+             * is_unsigned (0=LT 1=LE 2=GT 3=GE 4=EQ 5=NE).  The BOP ordering
+             * (EQ,NE,LT,LE,GT,GE) differs from the encoding order, so remap. */
+            static const unsigned char cmp_enc[] = {4,5,0,1,2,3};
+            unsigned char enc = cmp_enc[e->u.bin.op - BOP_EQ];
+            result = new_value(fn);
+            emit_inst_f(fn, IR_FCMP, result, pl, pr, op_w, e->loc);
+            fn->insts.data[fn->insts.len - 1].is_unsigned = enc;
+            set_value_float(fn, result, 0);  /* result is int 0/1 */
+            set_value_type(fn, result, 4, 0);
+            return result;
+        }
+        /* Comparison ops carry operand width/signedness for codegen — we
+         * encode it as the instruction's own width for cmps too (used only
+         * by cmp encoding). Result value's width/signedness recorded via
+         * emit_bin_w's set_value_type. */
+        result = emit_bin_w(fn, op, pl, pr, op_w, op_u, e->loc);
+        if (res_float) set_value_float(fn, result, 1);
+        if (is_cmp) {
+            /* Retag the result's own SSA width to int(4,signed). */
+            set_value_type(fn, result, rw_res, ru_res);
+        } else if (e->type.bitfield_width > 0 && e->type.bitfield_width < op_w * 8) {
+            int64_t msk = bitfield_mask64(e->type.bitfield_width);
+            IRValue mv = new_value(fn);
+            emit_inst_w(fn, IR_CONST, mv, -1, -1, msk, op_w, 1, e->loc);
+            IRValue masked = new_value(fn);
+            emit_inst_w(fn, IR_BAND, masked, result, mv, 0, op_w, op_u, e->loc);
+            result = masked;
+        }
+        return result;
+}
+
+/* `1+1+1+...` is a left spine.  lower_expr's frame overflows under ASan
+ * long before the sema depth limit.  This walk stays in one frame. */
+static IRValue lower_scalar_binop_tree(IRFunction *fn, IRSymTable *st, const Expr *root) {
+    typedef struct { const Expr *e; int phase; IRValue lv; } Frame;
+    Frame local[8];
+    Frame *stack = local;
+    int cap = 8, sp = 0, heap = 0;
+    IRValue pending = -1;
+
+    stack[sp].e = root;
+    stack[sp].phase = 0;
+    stack[sp].lv = -1;
+    sp++;
+    while (sp > 0) {
+        Frame *fr = &stack[sp - 1];
+        const Expr *e = fr->e;
+        if (fr->phase == 0 && e && e->kind == EX_BINOP && e->u.bin.op == BOP_BITOR) {
+            IRValue rot = try_lower_rotate(fn, st, e);
+            if (rot >= 0) {
+                sp--;
+                pending = rot;
+                continue;
+            }
+        }
+        if (fr->phase == 0 && scalar_binop_generic(e)) {
+            const Expr *left = e->u.bin.l;
+            fr->phase = 1;
+            if (sp >= cap) {
+                int ncap = cap * 2;
+                Frame *ns = (Frame *)malloc((size_t)ncap * sizeof(Frame));
+                if (!ns) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(ns, stack, (size_t)sp * sizeof(Frame));
+                if (heap) free(stack);
+                stack = ns;
+                cap = ncap;
+                heap = 1;
+                fr = &stack[sp - 1];
+            }
+            stack[sp].e = left;
+            stack[sp].phase = 0;
+            stack[sp].lv = -1;
+            sp++;
+            continue;
+        }
+        if (fr->phase == 0) {
+            pending = lower_expr(fn, st, e);
+            sp--;
+            continue;
+        }
+        if (fr->phase == 1) {
+            const Expr *right = e->u.bin.r;
+            fr->lv = pending;
+            fr->phase = 2;
+            if (sp >= cap) {
+                int ncap = cap * 2;
+                Frame *ns = (Frame *)malloc((size_t)ncap * sizeof(Frame));
+                if (!ns) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(ns, stack, (size_t)sp * sizeof(Frame));
+                if (heap) free(stack);
+                stack = ns;
+                cap = ncap;
+                heap = 1;
+                fr = &stack[sp - 1];
+            }
+            stack[sp].e = right;
+            stack[sp].phase = 0;
+            stack[sp].lv = -1;
+            sp++;
+            continue;
+        }
+        pending = lower_scalar_binop_vals(fn, e, fr->lv, pending);
+        sp--;
+    }
+    if (heap) free(stack);
+    return pending;
+}
+
+static IRValue lower_binop_operand(IRFunction *fn, IRSymTable *st, const Expr *e) {
+    if (e && e->kind == EX_BINOP && e->u.bin.op == BOP_BITOR) {
+        IRValue rot = try_lower_rotate(fn, st, e);
+        if (rot >= 0) return rot;
+    }
+    if (scalar_binop_generic(e))
+        return lower_scalar_binop_tree(fn, st, e);
+    return lower_expr(fn, st, e);
+}
+
 static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     if (fakecc_had_error()) return FAKECC_ERR;
     if (!e) return FAKECC_ERR; /* empty case/default before '}' used to pass NULL */
@@ -6627,116 +6847,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             IRValue rotated = try_lower_rotate(fn, st, e);
             if (rotated >= 0) return rotated;
         }
-        IRValue l = lower_expr(fn, st, e->u.bin.l);
-        IRValue r = lower_expr(fn, st, e->u.bin.r);
-        int lw = get_value_width(fn, l), lu = get_value_is_unsigned(fn, l);
-        int rw = get_value_width(fn, r), ru = get_value_is_unsigned(fn, r);
-        int lf = get_value_is_float(fn, l), rf = get_value_is_float(fn, r);
-
-        int is_cmp = (e->u.bin.op >= BOP_EQ && e->u.bin.op <= BOP_GE);
-        /* For arithmetic the result type follows e->type; for comparisons the
-         * result is always int, but a float comparison (either operand float)
-         * must lower to IR_FCMP, not integer IR_GT/etc. */
-        int res_float = (e->type.kind == TY_FLOAT) || (is_cmp && (lf || rf));
-        /* Operand width for the op = e->type for arith; UAC result for cmp. */
-        int op_w, op_u;
-        if (is_cmp) {
-            /* Reapply UAC to operand types to know cmp width/signedness. */
-            int aw = lf ? lw : (lw < 4 ? 4 : lw), au = lf ? 0 : (lw < 4 ? 0 : lu);
-            int bw = rf ? rw : (rw < 4 ? 4 : rw), bu = rf ? 0 : (rw < 4 ? 0 : ru);
-            if (lf || rf) {
-                /* Float comparison: width = max float width, neither signed. */
-                if (lf && rf) op_w = lw > rw ? lw : rw;
-                else if (lf) op_w = lw;
-                else op_w = rw;
-                op_u = 0;
-            } else if (aw == bw && au == bu) { op_w = aw; op_u = au; }
-            else if (au == bu) { op_w = aw > bw ? aw : bw; op_u = au; }
-            else {
-                int uw = au ? aw : bw; int uu = 1;
-                int sw = au ? bw : aw;
-                if (uw >= sw) { op_w = uw; op_u = uu; }
-                else { op_w = sw; op_u = 0; }
-            }
-        } else {
-            op_w = e->type.width ? e->type.width : 4;
-            op_u = e->type.is_unsigned;
-        }
-        IRValue pl, pr;
-        if (res_float) {
-            /* Coerce both operands to the result float width. */
-            pl = lf ? (lw == op_w ? l : convert_numeric(fn, l, lw, op_w, 0, 1, e->loc))
-                    : convert_numeric(fn, l, lw, op_w, 0, 1, e->loc);
-            pr = rf ? (rw == op_w ? r : convert_numeric(fn, r, rw, op_w, 0, 1, e->loc))
-                    : convert_numeric(fn, r, rw, op_w, 0, 1, e->loc);
-        } else {
-            pl = coerce(fn, l, lw, lu, op_w, op_u, e->loc);
-            pr = coerce(fn, r, rw, ru, op_w, op_u, e->loc);
-        }
-        IROpcode op;
-        if (res_float && !is_cmp) {
-            switch (e->u.bin.op) {
-            case BOP_ADD: op = IR_FADD; break;
-            case BOP_SUB: op = IR_FSUB; break;
-            case BOP_MUL: op = IR_FMUL; break;
-            case BOP_DIV: op = IR_FDIV; break;
-            default:      op = IR_FADD; break;
-            }
-        } else {
-            switch (e->u.bin.op) {
-            case BOP_ADD:     op = IR_ADD;  break;
-            case BOP_SUB:     op = IR_SUB;  break;
-            case BOP_MUL:     op = IR_MUL;  break;
-            case BOP_DIV:     op = IR_DIV;  break;
-            case BOP_MOD:     op = IR_MOD;  break;
-            case BOP_EQ:      op = IR_EQ;   break;
-            case BOP_NE:      op = IR_NE;   break;
-            case BOP_LT:      op = IR_LT;   break;
-            case BOP_LE:      op = IR_LE;   break;
-            case BOP_GT:      op = IR_GT;   break;
-            case BOP_GE:      op = IR_GE;   break;
-            case BOP_BITAND:  op = IR_BAND; break;
-            case BOP_BITOR:   op = IR_BOR;  break;
-            case BOP_BITXOR:  op = IR_BXOR; break;
-            case BOP_SHL:     op = IR_SHL;  break;
-            case BOP_SHR:     op = IR_SHR;  break;
-            default: op = IR_ADD; break;
-            }
-        }
-        int rw_res = is_cmp ? 4 : op_w;
-        int ru_res = is_cmp ? 0 : op_u;
-        IRValue result;
-        if (is_cmp && res_float) {
-            /* Float comparison — emit IR_FCMP with the comparison encoded in
-             * is_unsigned (0=LT 1=LE 2=GT 3=GE 4=EQ 5=NE).  The BOP ordering
-             * (EQ,NE,LT,LE,GT,GE) differs from the encoding order, so remap. */
-            static const unsigned char cmp_enc[] = {4,5,0,1,2,3};
-            unsigned char enc = cmp_enc[e->u.bin.op - BOP_EQ];
-            result = new_value(fn);
-            emit_inst_f(fn, IR_FCMP, result, pl, pr, op_w, e->loc);
-            fn->insts.data[fn->insts.len - 1].is_unsigned = enc;
-            set_value_float(fn, result, 0);  /* result is int 0/1 */
-            set_value_type(fn, result, 4, 0);
-            return result;
-        }
-        /* Comparison ops carry operand width/signedness for codegen — we
-         * encode it as the instruction's own width for cmps too (used only
-         * by cmp encoding). Result value's width/signedness recorded via
-         * emit_bin_w's set_value_type. */
-        result = emit_bin_w(fn, op, pl, pr, op_w, op_u, e->loc);
-        if (res_float) set_value_float(fn, result, 1);
-        if (is_cmp) {
-            /* Retag the result's own SSA width to int(4,signed). */
-            set_value_type(fn, result, rw_res, ru_res);
-        } else if (e->type.bitfield_width > 0 && e->type.bitfield_width < op_w * 8) {
-            int64_t msk = bitfield_mask64(e->type.bitfield_width);
-            IRValue mv = new_value(fn);
-            emit_inst_w(fn, IR_CONST, mv, -1, -1, msk, op_w, 1, e->loc);
-            IRValue masked = new_value(fn);
-            emit_inst_w(fn, IR_BAND, masked, result, mv, 0, op_w, op_u, e->loc);
-            result = masked;
-        }
-        return result;
+        IRValue l = lower_binop_operand(fn, st, e->u.bin.l);
+        IRValue r = lower_binop_operand(fn, st, e->u.bin.r);
+        return lower_scalar_binop_vals(fn, e, l, r);
     }
     case EX_TERNARY: {
         if (e->type.kind == TY_VOID) {

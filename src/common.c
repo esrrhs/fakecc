@@ -111,6 +111,10 @@ char *xstrdup(const char *s) {
 static int g_err_code = FAKECC_OK;
 static SourceLoc g_err_loc;
 static char g_err_msg[2048];
+static int g_quiet = 0;
+
+void fakecc_set_quiet(int quiet) { g_quiet = quiet ? 1 : 0; }
+int fakecc_is_quiet(void) { return g_quiet; }
 
 void fakecc_clear_error(void) {
     g_err_code = FAKECC_OK;
@@ -159,7 +163,9 @@ int die_at(const char *file, int line, int col, const char *fmt, ...) {
     vsnprintf(g_err_msg, sizeof(g_err_msg), fmt, ap_msg);
     va_end(ap_msg);
 
-    fprintf(stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
-    fprintf(stderr, "%s\n", g_err_msg);
+    if (!g_quiet) {
+        fprintf(stderr, "%s:%d:%d: error: ", file ? file : "(unknown)", line, col);
+        fprintf(stderr, "%s\n", g_err_msg);
+    }
     return FAKECC_ERR;
 }

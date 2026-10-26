@@ -1,3 +1,4 @@
+#include "fakecc/common.h"
 #include "fakecc/compiler.h"
 #include "fakecc/emit.h"
 #include "fakecc/target.h"
@@ -102,6 +103,62 @@ static void test_compile_file_to_so_and_executable(void) {
     remove(exe_file);
 }
 
+/* Rejected inputs must release the TU (builtin typedefs included) and leave
+ * the library usable.  A leak here is what OOM-killed fuzz_differential. */
+static void test_reject_then_compile(void) {
+    const char *out = TMP_DIR PATH_SEP "test_compiler_rej.o";
+    int i;
+    fakecc_set_quiet(1);
+    for (i = 0; i < 40; i++) {
+        int rc = fakecc_compile_string_to_obj("this is not c\n", out, NULL);
+        T_ASSERT(rc != 0);
+    }
+    fakecc_set_quiet(0);
+    T_ASSERT_EQ_INT(
+        fakecc_compile_string_to_obj(
+            "package main;\nint main(void) { return 1; }\n", out, NULL),
+        0);
+    remove(out);
+}
+
+/* A few hundred `+`s are a left spine.  The parser builds that iteratively,
+ * so the cap is the input, not MAX_EXPR_DEPTH.  Freeing and type-checking it
+ * must not crash. */
+static void test_deep_add_chain(void) {
+    const char *out = TMP_DIR PATH_SEP "test_compiler_deep.o";
+    char *buf;
+    size_t n = 0, cap = 8192;
+    int i;
+    buf = malloc(cap);
+    T_ASSERT(buf != NULL);
+    n += (size_t)sprintf(buf, "package main;\nint main(void) { return 1");
+    for (i = 0; i < 400; i++) {
+        if (n + 8 >= cap) {
+            cap *= 2;
+            buf = realloc(buf, cap);
+            T_ASSERT(buf != NULL);
+        }
+        n += (size_t)sprintf(buf + n, "+1");
+    }
+    sprintf(buf + n, "; }\n");
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(buf, out, NULL), 0);
+    free(buf);
+
+    /* Past the sema limit the compile must fail cleanly, not overflow. */
+    cap = 64 + (size_t)600 * 2;
+    buf = malloc(cap);
+    T_ASSERT(buf != NULL);
+    n = (size_t)sprintf(buf, "package main;\nint main(void) { return 1");
+    for (i = 0; i < 600; i++)
+        n += (size_t)sprintf(buf + n, "+1");
+    sprintf(buf + n, "; }\n");
+    fakecc_set_quiet(1);
+    T_ASSERT(fakecc_compile_string_to_obj(buf, out, NULL) != 0);
+    fakecc_set_quiet(0);
+    free(buf);
+    remove(out);
+}
+
 int main(void) {
     /* The high-level API cases below assert ELF output; pin the x86-64
      * backend until the arm64-macos backend lands. */
@@ -110,5 +167,7 @@ int main(void) {
     test_compile_string_to_obj();
     test_compile_string_to_so();
     test_compile_file_to_so_and_executable();
+    test_reject_then_compile();
+    test_deep_add_chain();
     return t_finalize();
 }

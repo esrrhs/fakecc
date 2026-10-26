@@ -57,6 +57,10 @@ if [ "$WINDOWS_GNU" = 1 ]; then
     fi
     # libFuzzer's archive is C++ and needs the C++ runtime on MinGW.
     FUZZ_EXTRA_LIBS=("$FUZZER_RT" -lstdc++)
+    # This link does not go through CMakeLists.txt, which raises the PE stack
+    # to 16MB for ASan host binaries.  The default 1MB reserve is what makes
+    # fuzz_differential die with AddressSanitizer: stack-overflow (exit 139).
+    FUZZ_LINK_CFLAGS="$FUZZ_LINK_CFLAGS -Wl,--stack,16777216"
 else
     CORE_CFLAGS="-fsanitize=address,undefined,fuzzer-no-link -fno-omit-frame-pointer -g -O1"
     FUZZ_LINK_CFLAGS="-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer"
