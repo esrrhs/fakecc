@@ -537,12 +537,22 @@ def hoist_local_structs(text):
                 continue
         kept.append(ln)
     if hoisted:
-        # Insert hoisted defs after all initial declarations but
-        # before the first function body.
+        # Insert hoisted defs after the type preamble but before the first
+        # function body that belongs to the .c file.
+        #
+        # `static inline` helpers in the headers (type_make_int and the
+        # rest of ast.h) sit in the middle of that preamble, before
+        # `struct Expr`.  Parking a local struct in front of them makes
+        # the struct name `Expr` before this file defines it.  A sibling
+        # file in the same package has already exported that typedef, so
+        # the parser clones the sibling's complete `struct Expr` and the
+        # real definition is then "redefinition of struct 'Expr'".
         insert_at = len(kept)
         for idx, ln in enumerate(kept):
             s = ln.strip()
             if s.startswith("package "):
+                continue
+            if s.startswith("static inline ") or s.startswith("inline static "):
                 continue
             # A function definition: `type name(...)` with `{` on this
             # or a following line (not a declaration ending with `;`).

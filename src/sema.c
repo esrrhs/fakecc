@@ -1353,12 +1353,16 @@ static Type apply_check_binop(Expr *e, Type lt, Type rt) {
 /* `a+b+c` is built by a loop, so the parser never spends a frame per
  * operator.  check_expr_inner is too large to recurse once per operator:
  * under ASan the stack dies around 170 nodes, before CHECK_EXPR_MAX_DEPTH.
- * Walk the tree on the heap. */
+ * Walk the tree on the heap.
+ *
+ * The frame holds a Type by value.  Eight of those on the stack is a large
+ * frame, and stage 0 miscompiles those (it passes a Type* instead — see
+ * g_sema_ft).  Allocate the first slot on the heap too. */
 static Type check_binop_tree(Expr *root) {
     typedef struct { Expr *e; int phase; Type lt; } Frame;
-    Frame local[8];
-    Frame *st = local;
-    int cap = 8, sp = 0, heap = 0, i;
+    int cap = 8, sp = 0, i;
+    Frame *st = (Frame *)malloc((size_t)cap * sizeof(Frame));
+    if (!st) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     Type pending = type_make_void();
     int have = 0;
 
@@ -1384,10 +1388,9 @@ static Type check_binop_tree(Expr *root) {
                 Frame *ns = (Frame *)malloc((size_t)ncap * sizeof(Frame));
                 if (!ns) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                 memcpy(ns, st, (size_t)sp * sizeof(Frame));
-                if (heap) free(st);
+                free(st);
                 st = ns;
                 cap = ncap;
-                heap = 1;
                 fr = &st[sp - 1];
             }
             st[sp].e = left;
@@ -1417,10 +1420,9 @@ static Type check_binop_tree(Expr *root) {
                 Frame *ns = (Frame *)malloc((size_t)ncap * sizeof(Frame));
                 if (!ns) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
                 memcpy(ns, st, (size_t)sp * sizeof(Frame));
-                if (heap) free(st);
+                free(st);
                 st = ns;
                 cap = ncap;
-                heap = 1;
                 fr = &st[sp - 1];
             }
             st[sp].e = right;
@@ -1448,14 +1450,14 @@ static Type check_binop_tree(Expr *root) {
             have = 1;
         }
     }
-    if (heap) free(st);
+    free(st);
     return pending;
 
 fail:
     if (have) type_free(&pending);
     for (i = 0; i < sp; i++)
         if (st[i].phase == 2) type_free(&st[i].lt);
-    if (heap) free(st);
+    free(st);
     return type_make_void();
 }
 
