@@ -45,7 +45,12 @@ void *xrealloc(void *p, size_t n);
 
 /* Error reporting — records the error, prints to stderr, and returns
  * FAKECC_ERR.  Does not abort the process: callers must propagate the
- * error upward.  The fakecc CLI checks at the top level and exits. */
+ * error upward.  The fakecc CLI checks at the top level and exits.
+ * fakecc_set_quiet(1) keeps the recorded error but skips the stderr line.
+ * A fuzzer feeds mostly rejected inputs; printing each one fills the CI
+ * log and is not the signal the run is looking for. */
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 
 /* Last-error state for library callers and pipeline layers. */

@@ -9,6 +9,7 @@
 // Build: see fuzz/README.md
 // Run:   ./build_fuzz/bin/fuzz_differential -max_len=2048 -runs=100000
 
+#include "fakecc/common.h"
 #include "fakecc/compiler.h"
 
 #include <stdint.h>
@@ -88,6 +89,8 @@ static int gcc_verdict(const char *src) {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (size == 0 || size > (1u << 16)) return 0;
+    /* One diagnostic per rejected input is millions of CI log lines. */
+    fakecc_set_quiet(1);
     if (!looks_like_text(data, size)) return 0;
 
     char *src = (char *)malloc(size + 1);

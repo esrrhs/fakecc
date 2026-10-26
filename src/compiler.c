@@ -127,9 +127,12 @@ static int lower_one_tu(TranslationUnit *tu, const char *filename,
 
     ir_module_free(&ir);
     /* Codegen reports unsupported IR via die_at(); the CLI must not
-     * still emit and sign that image. */
-    if (fakecc_had_error())
+     * still emit and sign that image.  Callers do not free `out` on
+     * this path, so release it here. */
+    if (fakecc_had_error()) {
+        emit_module_free(out);
         return FAKECC_ERR;
+    }
     return FAKECC_OK;
 }
 
@@ -145,6 +148,12 @@ static int compile_parse_string(const char *source, const char *filename,
     tu_init(tu);
     int rc = pkg ? parse_in_pkg(&tokens, tu, pkg) : parse(&tokens, tu);
     token_array_free(&tokens);
+    /* tu_init installs the builtin typedefs.  A rejected input used to
+     * return here without tu_free, so every fuzz iteration leaked that
+     * table.  Differential fuzz only feeds text, so it hit this on
+     * essentially every input and the runner was OOM-killed (exit 143). */
+    if (rc != FAKECC_OK)
+        tu_free(tu);
     return rc;
 }
 

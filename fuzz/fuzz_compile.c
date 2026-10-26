@@ -8,6 +8,7 @@
 // Build: see fuzz/README.md
 // Run:   ./build_fuzz/bin/fuzz_compile -max_len=4096 -runs=1000000
 
+#include "fakecc/common.h"
 #include "fakecc/compiler.h"
 
 #include <stdint.h>
@@ -48,6 +49,8 @@ static const char *obj_path(void) {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (size == 0 || size > (1u << 20)) return 0;
+    /* One diagnostic per rejected input is millions of CI log lines. */
+    fakecc_set_quiet(1);
 
     char *src = (char *)malloc(size + 1);
     if (!src) return 0;

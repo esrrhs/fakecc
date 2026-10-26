@@ -139,12 +139,14 @@ static int math_builtin_width(const char *n, int *nargs) {
 
 static void sema_report_error(const SourceLoc *loc, const char *fmt, ...) {
     if (fakecc_had_error()) return;
-    va_list ap;
-    va_start(ap, fmt);
-    fprintf(stderr, "%s:%d:%d: error: ", loc->file, loc->line, loc->col);
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    va_end(ap);
+    if (!fakecc_is_quiet()) {
+        va_list ap;
+        va_start(ap, fmt);
+        fprintf(stderr, "%s:%d:%d: error: ", loc->file, loc->line, loc->col);
+        vfprintf(stderr, fmt, ap);
+        fprintf(stderr, "\n");
+        va_end(ap);
+    }
     g_sema_error_count++;
 }
 
@@ -932,6 +934,8 @@ static void check_set_st(SymTable *st) {
 }
 
 static Type check_expr_inner(Expr *e);
+static Type apply_check_binop(Expr *e, Type lt, Type rt);
+static Type check_binop_tree(Expr *e);
 
 /* Recurses with only `e`.  FunTable lives in g_sema_ft so huge callers never
  * pass a FunTable* (Stage 0 miscompiles those from large frames). */
@@ -1141,9 +1145,328 @@ static Type apply_check_incdec(Expr *e, Type ot) {
     return type_clone(e->type);
 }
 
+/* Type one binop whose operands are already typed.  `lt` and `rt` are
+ * consumed on success.  Error returns leave them allocated, matching the
+ * old check_expr_inner paths; check_binop_tree frees them. */
+static Type apply_check_binop(Expr *e, Type lt, Type rt) {
+        /* Array-to-pointer decay for operands (except & / sizeof handled elsewhere). */
+        if (lt.kind == TY_ARRAY) {
+            Type d = type_decay(lt); type_free(&lt); lt = d;
+        }
+        if (rt.kind == TY_ARRAY) {
+            Type d = type_decay(rt); type_free(&rt); rt = d;
+        }
+        BinOp op = e->u.bin.op;
+        Type res;
+        if (lt.is_vector || rt.is_vector) {
+            res = type_clone(lt.is_vector ? lt : rt);
+        } else if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
+            (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
+            if (op == BOP_EQ || op == BOP_NE) {
+                res = type_make_int(4, 0);
+            } else {
+                res = type_clone(lt.kind == TY_STRUCT ? lt : rt);
+            }
+        } else if (op == BOP_AND || op == BOP_OR) {
+            /* Logical && / ||: both operands must be scalar (int, float, or
+             * pointer).  Result is always int 0 or 1. */
+            if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR)
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "left operand of '%s' must be scalar",
+                       op == BOP_AND ? "&&" : "||");
+                    return type_make_void();
+                }
+            if (rt.kind != TY_INT && rt.kind != TY_FLOAT && rt.kind != TY_PTR)
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "right operand of '%s' must be scalar",
+                       op == BOP_AND ? "&&" : "||");
+                    return type_make_void();
+                }
+            res = type_make_int(4, 0);
+        } else if (op >= BOP_EQ && op <= BOP_GE) {
+            if (lt.kind == TY_STRUCT || rt.kind == TY_STRUCT)
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "invalid operands to binary comparison");
+                    return type_make_void();
+                }
+            if (lt.kind == TY_VOID || rt.kind == TY_VOID)
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "invalid operands to binary comparison");
+                    return type_make_void();
+                }
+            if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
+                (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "cannot mix operands of decimal floating and other floating types");
+                    return type_make_void();
+                }
+            /* Comparison operators: warn on distinct pointer types (GCC -Wcompare-distinct-pointer-types). */
+            if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
+                int func_cmp = (lt.pointee && lt.pointee->kind == TY_FUNC) ||
+                               (rt.pointee && rt.pointee->kind == TY_FUNC);
+                int null_cmp = (lt.kind == TY_PTR && rt.kind == TY_INT && rt.width == 0) ||
+                               (rt.kind == TY_PTR && lt.kind == TY_INT && lt.width == 0);
+                if (!func_cmp && !null_cmp) {
+                    int is_relational = (op == BOP_LT || op == BOP_LE || op == BOP_GT || op == BOP_GE);
+                    int is_equality = (op == BOP_EQ || op == BOP_NE);
+                    int lt_void = lt.pointee && lt.pointee->kind == TY_VOID;
+                    int rt_void = rt.pointee && rt.pointee->kind == TY_VOID;
+                    if (is_relational && !type_is_same(&lt, &rt)) {
+                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                                e->loc.file, e->loc.line, e->loc.col);
+                    } else if (is_equality && !lt_void && !rt_void && !type_is_same(&lt, &rt)) {
+                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                                e->loc.file, e->loc.line, e->loc.col);
+                    }
+                }
+            }
+            res = type_make_int(4, 0);
+        } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) {
+            /* Pointer arithmetic: p+int, int+p, p-int → pointer; p-q → int. */
+            if (op == BOP_ADD) {
+                if (lt.kind == TY_PTR && rt.kind == TY_PTR)
+                    {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "invalid operands to binary + (pointer and pointer)");
+                        return type_make_void();
+                    }
+                if (lt.kind == TY_PTR && rt.kind != TY_INT)
+                    {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "invalid operands to binary +");
+                        return type_make_void();
+                    }
+                if (rt.kind == TY_PTR && lt.kind != TY_INT)
+                    {
+                        die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "invalid operands to binary +");
+                        return type_make_void();
+                    }
+                res = type_clone(lt.kind == TY_PTR ? lt : rt);
+            } else { /* op == BOP_SUB */
+                if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
+                    res = type_make_int(8, 0);   /* ptrdiff — use long */
+                } else if (lt.kind == TY_PTR) {
+                    if (rt.kind != TY_INT)
+                        {
+                            die_at(e->loc.file, e->loc.line, e->loc.col,
+                               "invalid operands to binary -");
+                            return type_make_void();
+                        }
+                    res = type_clone(lt);
+                } else {
+                    /* integer - pointer: constraint violation! */
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                           "invalid operands to binary - (integer and pointer)");
+                    return type_make_void();
+                }
+            }
+        } else if (op == BOP_BITAND || op == BOP_BITOR || op == BOP_BITXOR) {
+            /* Bitwise & | ^: both operands must be integer; result = UAC. */
+            if (lt.kind != TY_INT)
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "left operand of '%s' must be integer",
+                       op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
+                    return type_make_void();
+                }
+            if (rt.kind != TY_INT)
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "right operand of '%s' must be integer",
+                       op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
+                    return type_make_void();
+                }
+            res = usual_arith_conv(lt, rt);
+        } else if (op == BOP_SHL || op == BOP_SHR) {
+            /* Shift << >>: both operands must be integer; result type is the
+             * promoted type of the LEFT operand (C §6.5.7). */
+            if (lt.kind != TY_INT)
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "left operand of '%s' must be integer",
+                       op == BOP_SHL ? "<<" : ">>");
+                    return type_make_void();
+                }
+            if (rt.kind != TY_INT)
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "right operand of '%s' must be integer",
+                       op == BOP_SHL ? "<<" : ">>");
+                    return type_make_void();
+                }
+            /* Warn on negative shift count (GCC -Wshift-count-negative). */
+            if (rt.kind == TY_INT && rt.width <= 8) {
+                long long shift_val;
+                if (fold_const_int(e->u.bin.r, &shift_val) && shift_val < 0) {
+                    fprintf(stderr, "%s:%d:%d: warning: shift count is negative\n",
+                            e->loc.file, e->loc.line, e->loc.col);
+                }
+            }
+            res = integer_promote(lt);
+        } else {
+            /* ADD / SUB / MUL / DIV / MOD.  MOD requires integer operands. */
+            if (op == BOP_MOD &&
+                (lt.kind != TY_INT || rt.kind != TY_INT))
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "operands of '%%' must be integer");
+                    return type_make_void();
+                }
+            else if (op != BOP_MOD &&
+                     (lt.kind != TY_INT && lt.kind != TY_FLOAT))
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "left operand of '%s' must be arithmetic",
+                       op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
+                       : op == BOP_MUL ? "*" : "/");
+                    return type_make_void();
+                }
+            else if (op != BOP_MOD &&
+                     (rt.kind != TY_INT && rt.kind != TY_FLOAT))
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "right operand of '%s' must be arithmetic",
+                       op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
+                       : op == BOP_MUL ? "*" : "/");
+                    return type_make_void();
+                }
+            if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
+                (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
+                {
+                    die_at(e->loc.file, e->loc.line, e->loc.col,
+                       "cannot mix operands of decimal floating and other floating types");
+                    return type_make_void();
+                }
+            res = usual_arith_conv(lt, rt);
+        }
+        type_free(&lt); type_free(&rt);
+        set_type(e, res);
+        return type_clone(e->type);
+}
+
+/* `a+b+c` is built by a loop, so the parser never spends a frame per
+ * operator.  check_expr_inner is too large to recurse once per operator:
+ * under ASan the stack dies around 170 nodes, before CHECK_EXPR_MAX_DEPTH.
+ * Walk the tree on the heap. */
+static Type check_binop_tree(Expr *root) {
+    typedef struct { Expr *e; int phase; Type lt; } Frame;
+    Frame local[8];
+    Frame *st = local;
+    int cap = 8, sp = 0, heap = 0, i;
+    Type pending = type_make_void();
+    int have = 0;
+
+    st[sp].e = root;
+    st[sp].phase = 0;
+    memset(&st[sp].lt, 0, sizeof(Type));
+    sp++;
+
+    while (sp > 0) {
+        Frame *fr = &st[sp - 1];
+        if (fr->phase == 0 && fr->e && fr->e->kind == EX_BINOP) {
+            Expr *left;
+            if (sp >= CHECK_EXPR_MAX_DEPTH) {
+                die_at(fr->e->loc.file, fr->e->loc.line, fr->e->loc.col,
+                       "expression nesting too deep (limit %d)",
+                       CHECK_EXPR_MAX_DEPTH);
+                goto fail;
+            }
+            fr->phase = 1;
+            left = fr->e->u.bin.l;
+            if (sp >= cap) {
+                int ncap = cap * 2;
+                Frame *ns = (Frame *)malloc((size_t)ncap * sizeof(Frame));
+                if (!ns) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(ns, st, (size_t)sp * sizeof(Frame));
+                if (heap) free(st);
+                st = ns;
+                cap = ncap;
+                heap = 1;
+                fr = &st[sp - 1];
+            }
+            st[sp].e = left;
+            st[sp].phase = 0;
+            memset(&st[sp].lt, 0, sizeof(Type));
+            sp++;
+            continue;
+        }
+        if (fr->phase == 0) {
+            Type t = check_expr_inner(fr->e);
+            sp--;
+            if (have) type_free(&pending);
+            pending = t;
+            have = 1;
+            if (fakecc_had_error()) goto fail;
+            continue;
+        }
+        if (fr->phase == 1) {
+            Expr *right;
+            fr->lt = pending;
+            have = 0;
+            memset(&pending, 0, sizeof pending);
+            fr->phase = 2;
+            right = fr->e->u.bin.r;
+            if (sp >= cap) {
+                int ncap = cap * 2;
+                Frame *ns = (Frame *)malloc((size_t)ncap * sizeof(Frame));
+                if (!ns) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                memcpy(ns, st, (size_t)sp * sizeof(Frame));
+                if (heap) free(st);
+                st = ns;
+                cap = ncap;
+                heap = 1;
+                fr = &st[sp - 1];
+            }
+            st[sp].e = right;
+            st[sp].phase = 0;
+            memset(&st[sp].lt, 0, sizeof(Type));
+            sp++;
+            continue;
+        }
+        {
+            Type rt = pending;
+            Type lt = fr->lt;
+            Expr *node = fr->e;
+            Type res;
+            have = 0;
+            sp--;
+            res = apply_check_binop(node, lt, rt);
+            if (fakecc_had_error()) {
+                /* apply_check_binop may already have freed the operand
+                 * types (array decay).  Drop them: the error path leaks
+                 * rather than freeing a possibly-replaced Type. */
+                type_free(&res);
+                goto fail;
+            }
+            pending = res;
+            have = 1;
+        }
+    }
+    if (heap) free(st);
+    return pending;
+
+fail:
+    if (have) type_free(&pending);
+    for (i = 0; i < sp; i++)
+        if (st[i].phase == 2) type_free(&st[i].lt);
+    if (heap) free(st);
+    return type_make_void();
+}
+
 static Type check_expr_inner(Expr *e) {
     if (fakecc_had_error()) return type_make_void();
     if (!e) return type_default_int();
+    /* See check_binop_tree.  Doing this before the depth counter keeps a
+     * chain of operators off this function's frame. */
+    if (e->kind == EX_BINOP)
+        return check_binop_tree(e);
+
     
     /* Guard real expression nesting. Prefix spines (unary, &, *, ++/--)
      * are flattened below and do not consume a frame or a depth slot per
@@ -1227,209 +1550,9 @@ static Type check_expr_inner(Expr *e) {
         else
             set_type(e, type_make_float(e->type.width ? e->type.width : 8));
         RETURN_TYPE(type_clone(e->type));
-    case EX_BINOP: {
-        Type lt = check_expr_inner(e->u.bin.l);
-        Type rt = check_expr_inner(e->u.bin.r);
-        /* Array-to-pointer decay for operands (except & / sizeof handled elsewhere). */
-        if (lt.kind == TY_ARRAY) {
-            Type d = type_decay(lt); type_free(&lt); lt = d;
-        }
-        if (rt.kind == TY_ARRAY) {
-            Type d = type_decay(rt); type_free(&rt); rt = d;
-        }
-        BinOp op = e->u.bin.op;
-        Type res;
-        if (lt.is_vector || rt.is_vector) {
-            res = type_clone(lt.is_vector ? lt : rt);
-        } else if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
-            (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
-            if (op == BOP_EQ || op == BOP_NE) {
-                res = type_make_int(4, 0);
-            } else {
-                res = type_clone(lt.kind == TY_STRUCT ? lt : rt);
-            }
-        } else if (op == BOP_AND || op == BOP_OR) {
-            /* Logical && / ||: both operands must be scalar (int, float, or
-             * pointer).  Result is always int 0 or 1. */
-            if (lt.kind != TY_INT && lt.kind != TY_FLOAT && lt.kind != TY_PTR)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "left operand of '%s' must be scalar",
-                       op == BOP_AND ? "&&" : "||");
-                    RETURN_TYPE(type_make_void());
-                }
-            if (rt.kind != TY_INT && rt.kind != TY_FLOAT && rt.kind != TY_PTR)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "right operand of '%s' must be scalar",
-                       op == BOP_AND ? "&&" : "||");
-                    RETURN_TYPE(type_make_void());
-                }
-            res = type_make_int(4, 0);
-        } else if (op >= BOP_EQ && op <= BOP_GE) {
-            if (lt.kind == TY_STRUCT || rt.kind == TY_STRUCT)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "invalid operands to binary comparison");
-                    RETURN_TYPE(type_make_void());
-                }
-            if (lt.kind == TY_VOID || rt.kind == TY_VOID)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "invalid operands to binary comparison");
-                    RETURN_TYPE(type_make_void());
-                }
-            if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
-                (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "cannot mix operands of decimal floating and other floating types");
-                    RETURN_TYPE(type_make_void());
-                }
-            /* Comparison operators: warn on distinct pointer types (GCC -Wcompare-distinct-pointer-types). */
-            if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
-                int func_cmp = (lt.pointee && lt.pointee->kind == TY_FUNC) ||
-                               (rt.pointee && rt.pointee->kind == TY_FUNC);
-                int null_cmp = (lt.kind == TY_PTR && rt.kind == TY_INT && rt.width == 0) ||
-                               (rt.kind == TY_PTR && lt.kind == TY_INT && lt.width == 0);
-                if (!func_cmp && !null_cmp) {
-                    int is_relational = (op == BOP_LT || op == BOP_LE || op == BOP_GT || op == BOP_GE);
-                    int is_equality = (op == BOP_EQ || op == BOP_NE);
-                    int lt_void = lt.pointee && lt.pointee->kind == TY_VOID;
-                    int rt_void = rt.pointee && rt.pointee->kind == TY_VOID;
-                    if (is_relational && !type_is_same(&lt, &rt)) {
-                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
-                                e->loc.file, e->loc.line, e->loc.col);
-                    } else if (is_equality && !lt_void && !rt_void && !type_is_same(&lt, &rt)) {
-                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
-                                e->loc.file, e->loc.line, e->loc.col);
-                    }
-                }
-            }
-            res = type_make_int(4, 0);
-        } else if ((op == BOP_ADD || op == BOP_SUB) && (lt.kind == TY_PTR || rt.kind == TY_PTR)) {
-            /* Pointer arithmetic: p+int, int+p, p-int → pointer; p-q → int. */
-            if (op == BOP_ADD) {
-                if (lt.kind == TY_PTR && rt.kind == TY_PTR)
-                    {
-                        die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "invalid operands to binary + (pointer and pointer)");
-                        RETURN_TYPE(type_make_void());
-                    }
-                if (lt.kind == TY_PTR && rt.kind != TY_INT)
-                    {
-                        die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "invalid operands to binary +");
-                        RETURN_TYPE(type_make_void());
-                    }
-                if (rt.kind == TY_PTR && lt.kind != TY_INT)
-                    {
-                        die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "invalid operands to binary +");
-                        RETURN_TYPE(type_make_void());
-                    }
-                res = type_clone(lt.kind == TY_PTR ? lt : rt);
-            } else { /* op == BOP_SUB */
-                if (lt.kind == TY_PTR && rt.kind == TY_PTR) {
-                    res = type_make_int(8, 0);   /* ptrdiff — use long */
-                } else if (lt.kind == TY_PTR) {
-                    if (rt.kind != TY_INT)
-                        {
-                            die_at(e->loc.file, e->loc.line, e->loc.col,
-                               "invalid operands to binary -");
-                            RETURN_TYPE(type_make_void());
-                        }
-                    res = type_clone(lt);
-                } else {
-                    /* integer - pointer: constraint violation! */
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                           "invalid operands to binary - (integer and pointer)");
-                    RETURN_TYPE(type_make_void());
-                }
-            }
-        } else if (op == BOP_BITAND || op == BOP_BITOR || op == BOP_BITXOR) {
-            /* Bitwise & | ^: both operands must be integer; result = UAC. */
-            if (lt.kind != TY_INT)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "left operand of '%s' must be integer",
-                       op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
-                    RETURN_TYPE(type_make_void());
-                }
-            if (rt.kind != TY_INT)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "right operand of '%s' must be integer",
-                       op == BOP_BITAND ? "&" : op == BOP_BITOR ? "|" : "^");
-                    RETURN_TYPE(type_make_void());
-                }
-            res = usual_arith_conv(lt, rt);
-        } else if (op == BOP_SHL || op == BOP_SHR) {
-            /* Shift << >>: both operands must be integer; result type is the
-             * promoted type of the LEFT operand (C §6.5.7). */
-            if (lt.kind != TY_INT)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "left operand of '%s' must be integer",
-                       op == BOP_SHL ? "<<" : ">>");
-                    RETURN_TYPE(type_make_void());
-                }
-            if (rt.kind != TY_INT)
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "right operand of '%s' must be integer",
-                       op == BOP_SHL ? "<<" : ">>");
-                    RETURN_TYPE(type_make_void());
-                }
-            /* Warn on negative shift count (GCC -Wshift-count-negative). */
-            if (rt.kind == TY_INT && rt.width <= 8) {
-                long long shift_val;
-                if (fold_const_int(e->u.bin.r, &shift_val) && shift_val < 0) {
-                    fprintf(stderr, "%s:%d:%d: warning: shift count is negative\n",
-                            e->loc.file, e->loc.line, e->loc.col);
-                }
-            }
-            res = integer_promote(lt);
-        } else {
-            /* ADD / SUB / MUL / DIV / MOD.  MOD requires integer operands. */
-            if (op == BOP_MOD &&
-                (lt.kind != TY_INT || rt.kind != TY_INT))
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "operands of '%%' must be integer");
-                    RETURN_TYPE(type_make_void());
-                }
-            else if (op != BOP_MOD &&
-                     (lt.kind != TY_INT && lt.kind != TY_FLOAT))
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "left operand of '%s' must be arithmetic",
-                       op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
-                       : op == BOP_MUL ? "*" : "/");
-                    RETURN_TYPE(type_make_void());
-                }
-            else if (op != BOP_MOD &&
-                     (rt.kind != TY_INT && rt.kind != TY_FLOAT))
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "right operand of '%s' must be arithmetic",
-                       op == BOP_ADD ? "+" : op == BOP_SUB ? "-"
-                       : op == BOP_MUL ? "*" : "/");
-                    RETURN_TYPE(type_make_void());
-                }
-            if ((lt.is_decimal && rt.kind == TY_FLOAT && !rt.is_decimal) ||
-                (rt.is_decimal && lt.kind == TY_FLOAT && !lt.is_decimal))
-                {
-                    die_at(e->loc.file, e->loc.line, e->loc.col,
-                       "cannot mix operands of decimal floating and other floating types");
-                    RETURN_TYPE(type_make_void());
-                }
-            res = usual_arith_conv(lt, rt);
-        }
-        type_free(&lt); type_free(&rt);
-        set_type(e, res);
-        RETURN_TYPE(type_clone(e->type));
-    }
+    case EX_BINOP:
+        /* Handled before this switch; a binop never reaches here. */
+        RETURN_TYPE(type_make_void());
     case EX_UNARY:
     case EX_ADDR:
     case EX_DEREF:

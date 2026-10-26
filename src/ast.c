@@ -1528,6 +1528,35 @@ void expr_free(Expr *e) {
         free(e);
         e = next;
     }
+    /* `a+b+c+...` is a left spine with no parser depth cap (the + loop
+     * is iterative).  Recursing down it overflows a 1MB ASan stack the
+     * same way a unary chain did.  The other operand is freed from this
+     * frame; only the spine is walked with the loop. */
+    while (e && (e->kind == EX_BINOP || e->kind == EX_COMMA ||
+                 e->kind == EX_ASSIGN || e->kind == EX_COMPOUND_ASSIGN ||
+                 e->kind == EX_MEMBER || e->kind == EX_CAST)) {
+        Expr *spine;
+        Expr *other = NULL;
+        if (e->kind == EX_BINOP) {
+            spine = e->u.bin.l; other = e->u.bin.r;
+        } else if (e->kind == EX_COMMA) {
+            spine = e->u.comma.lhs; other = e->u.comma.rhs;
+        } else if (e->kind == EX_ASSIGN) {
+            spine = e->u.assign.lvalue; other = e->u.assign.rvalue;
+        } else if (e->kind == EX_COMPOUND_ASSIGN) {
+            spine = e->u.comp.lvalue; other = e->u.comp.rvalue;
+        } else if (e->kind == EX_MEMBER) {
+            spine = e->u.member.obj;
+            free(e->u.member.name);
+        } else {
+            spine = e->u.cast.operand;
+            type_free(&e->u.cast.target);
+        }
+        type_free(&e->type);
+        free(e);
+        if (other) expr_free(other);
+        e = spine;
+    }
     if (!e) return;
     switch (e->kind) {
     case EX_INT_LIT:
