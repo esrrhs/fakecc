@@ -1371,18 +1371,19 @@ static Type parse_type(Parser *p, char **name_out);  /* forward */
  * *pointers* into the ParamArray — its elements must NOT be type_free'd. */
 
 static void parse_struct_body(Parser *p, StructDef *sd) {
-    if (fakecc_had_error()) return;
+    if (fakecc_had_error() || !sd) return;
     /* Assumes peek == '{'.  Parse members until '}'.  Each member is a
      * comma-separated list of declarators sharing one base type, e.g.
      * `int a, b;` or `Expr *l, r;` (multi-declarators in struct bodies).
      *
      * NOTE: `sd` is a pointer into the TU's StructRegistry, which reallocs
-     * when a nested anonymous struct/union member is defined inline.  We
-     * therefore keep the tag and re-fetch `sd` after any operation that may
-     * add to the registry (parse_specifiers / parse_declarator). */
-    const char *tag = sd->tag;
+     * when a nested anonymous struct/union member or an inline complex/sizeof
+     * type is defined.  We track sd's slot index and refresh `sd` whenever
+     * an expression, specifier, or declarator may have grown the registry. */
+    size_t sd_idx = (size_t)(sd - p->tu->structs.data);
     advance(p);  /* consume '{' */
     while (!fakecc_had_error() && peek(p)->kind != TK_RBRACE) {
+        sd = &p->tu->structs.data[sd_idx];
         int base_align = 0, base_packed = 0, base_sso = 0, base_vec = 0;
         while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, NULL)) {}
         g_parsed_align = 0;
@@ -1391,7 +1392,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         g_parsed_align = 0;
         while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, NULL)) {}
         /* Re-fetch sd: parsing `base` may have defined a nested struct. */
-        sd = struct_registry_find(&p->tu->structs, tag);
+        sd = &p->tu->structs.data[sd_idx];
         /* parse_specifiers may have consumed an inline struct/union definition
          * body (`struct Tag { ... }` / `union Tag { ... }`).  If the next token
          * is ';', this is a standalone type definition, not a member declaration
@@ -1402,9 +1403,8 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
              * (`struct S { ... };`) are type-only and are skipped. */
             if (base.kind == TY_STRUCT && base.tag
                 && strncmp(base.tag, "__anon_", 7) == 0) {
-                sd = struct_registry_find(&p->tu->structs, tag);
-                if (sd)
-                    struct_def_push_member_aligned(sd, "", type_clone(base), -1, base_align);
+                sd = &p->tu->structs.data[sd_idx];
+                struct_def_push_member_aligned(sd, "", type_clone(base), -1, base_align);
             }
             advance(p);
             type_free(&base);
@@ -1419,7 +1419,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
             if (g_parsed_align > align) align = g_parsed_align;
             g_parsed_align = 0;
             while (parse_attribute(p, &align, &packed, &sso, &vec, NULL)) {}
-            sd = struct_registry_find(&p->tu->structs, tag);
+            sd = &p->tu->structs.data[sd_idx];
             if (!mname) {
                 if (peek(p)->kind == TK_COLON) {
                     mname = xstrdup("");
@@ -1428,6 +1428,8 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                     if (!is_name_token(mn->kind)) {
                         die_at(mn->loc.file, mn->loc.line, mn->loc.col,
                                "expected member name but got '%s'", mn->text);
+                        type_free(&mty);
+                        type_free(&base);
                         return;
                     }
                     mname = xstrdup(mn->text);
@@ -1441,9 +1443,14 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                 advance(p);
                 const Token *wtok = peek(p);
                 Expr *we = parse_ternary(p);
+                sd = &p->tu->structs.data[sd_idx];
                 long long wval = 0;
-                if (!we)
+                if (!we) {
+                    type_free(&mty);
+                    free(mname);
+                    type_free(&base);
                     return;
+                }
                 if (fold_const_int(we, &wval)) {
                     bit_width = (int)wval;
                 } else if (we->kind == EX_VAR) {
@@ -1456,19 +1463,29 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                     die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
                            "expected constant bitfield width but got '%s'",
                            wtok->text);
+                    type_free(&mty);
+                    free(mname);
+                    type_free(&base);
                     return;
                 }
                 if (mty.kind != TY_INT && !mty.is_bool) {
                     die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
                            "bit-field has non-integral type");
+                    type_free(&mty);
+                    free(mname);
+                    type_free(&base);
                     return;
                 }
                 if (bit_width > (int)type_size(mty) * 8) {
                     die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
                            "width of bit-field exceeds its type");
+                    type_free(&mty);
+                    free(mname);
+                    type_free(&base);
                     return;
                 }
             }
+            sd = &p->tu->structs.data[sd_idx];
             struct_def_push_member_aligned(sd, mname, mty, bit_width, align);
             type_free(&mty);
             free(mname);
@@ -1483,6 +1500,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         type_free(&base);
     }
     expect_kind(p, TK_RBRACE, "'}'");
+    sd = &p->tu->structs.data[sd_idx];
     int align = 0, packed = 0, sso = 0, vec = 0;
     while (parse_attribute(p, &align, &packed, &sso, &vec, NULL)) {}
     if (align > sd->align) sd->align = align;
@@ -1518,7 +1536,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     /* Fix up self-referential struct types: during parsing, member types like
      * `struct Type *` were cloned when the struct was still incomplete, so
      * their pointee->width is stale.  Re-fetch sd and correct all widths. */
-    sd = struct_registry_find(&p->tu->structs, tag);
+    sd = &p->tu->structs.data[sd_idx];
     if (sd) struct_def_fixup_self_types(sd);
 }
 
@@ -1576,10 +1594,12 @@ static void parse_enum_underlying_opt(Parser *p, EnumDef *ed) {
 }
 
 static void parse_enum_body(Parser *p, EnumDef *ed) {
-    if (fakecc_had_error()) return;
+    if (fakecc_had_error() || !ed) return;
     /* Assumes peek == '{'.  Parse constants until '}'. */
+    size_t ed_idx = (size_t)(ed - p->tu->enums.data);
     advance(p);  /* consume '{' */
     while (!fakecc_had_error() && peek(p)->kind != TK_RBRACE) {
+        ed = &p->tu->enums.data[ed_idx];
         const Token *cn = peek(p);
         if (cn->kind != TK_IDENT) {
             die_at(cn->loc.file, cn->loc.line, cn->loc.col,
@@ -1598,6 +1618,7 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
         if (peek(p)->kind == TK_ASSIGN) {
             advance(p);
             Expr *e = parse_ternary(p);
+            ed = &p->tu->enums.data[ed_idx];
             long long val = 0;
             if (!e)
                 return;
@@ -1609,16 +1630,19 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
                 if (!ec) {
                     die_at(cn->loc.file, cn->loc.line, cn->loc.col,
                            "enum value '%s' is not a constant", e->u.var.name);
+                    expr_free(e);
                     return;
                 }
                 has_value = 1; value = ec->value;
             } else {
                 die_at(cn->loc.file, cn->loc.line, cn->loc.col,
                        "expected integer value for enum constant '%s'", cn->text);
+                expr_free(e);
                 return;
             }
             expr_free(e);
         }
+        ed = &p->tu->enums.data[ed_idx];
         enum_def_push_constant(ed, cn->text, has_value, value, cn->loc);
         if (peek(p)->kind == TK_COMMA) advance(p);
     }
@@ -2964,8 +2988,10 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         }
         if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
             /* 128-bit overflow: warn and truncate to low 64 bits (GCC-like). */
-            fprintf(stderr, "%s:%d:%d: warning: integer constant is too large "
-                    "for its type\n", loc.file, loc.line, loc.col);
+            if (!fakecc_is_quiet()) {
+                fprintf(stderr, "%s:%d:%d: warning: integer constant is too large "
+                        "for its type\n", loc.file, loc.line, loc.col);
+            }
             lo = 0; hi = 0;
             /* Re-accumulate low 64 bits only. */
             {
@@ -2988,8 +3014,10 @@ static void int_literal_typed(const char *text, SourceLoc loc,
     }
     /* Hex / octal wider than 64 bits: wrap to low 64 bits (GCC behaviour). */
     if (!decimal && hi != 0) {
-        fprintf(stderr, "%s:%d:%d: warning: integer constant is too large "
-                "for its type\n", loc.file, loc.line, loc.col);
+        if (!fakecc_is_quiet()) {
+            fprintf(stderr, "%s:%d:%d: warning: integer constant is too large "
+                    "for its type\n", loc.file, loc.line, loc.col);
+        }
         hi = 0;
     }
     int width, is_unsigned;
@@ -5470,8 +5498,9 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
     /* must start with package declaration */
     if (peek(&p)->kind != TK_KW_PACKAGE) {
         const Token *t = peek(&p);
-        return die_at(t->loc.file, t->loc.line, t->loc.col,
+        die_at(t->loc.file, t->loc.line, t->loc.col,
                "expected 'package' declaration at start of file");
+        goto cleanup;
     }
 
     tu->package = parse_package_decl(&p);
@@ -5482,19 +5511,22 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
         advance(&p);
         const Token *ident = peek(&p);
         if (ident->kind != TK_IDENT) {
-            return die_at(ident->loc.file, ident->loc.line, ident->loc.col,
+            die_at(ident->loc.file, ident->loc.line, ident->loc.col,
                    "expected package name after 'import'");
+            goto cleanup;
         }
         advance(&p);
         expect_kind(&p, TK_SEMICOLON, "';'");
         if (!ctx) {
-            return die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+            die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                    "'import' requires a package search path (driver bug)");
+            goto cleanup;
         }
         for (size_t i = 0; i < tu->imports.len; i++) {
             if (strcmp(tu->imports.data[i].name, ident->text) == 0) {
-                return die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "duplicate import of package '%s'", ident->text);
+                goto cleanup;
             }
         }
         import_array_push(&tu->imports, ident->text, kw->loc);
@@ -5527,8 +5559,9 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
             if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
                 /* Struct definition. */
                 if (struct_registry_find(&tu->structs, tag->text)) {
-                    return die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of struct '%s'", tag->text);
+                    goto cleanup;
                 }
                 StructDef *sd = struct_registry_add(&tu->structs, tag->text, tag->loc);
                 parse_struct_body(&p, sd);
@@ -5551,8 +5584,9 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
             if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
                 /* Union definition. */
                 if (struct_registry_find(&tu->structs, tag->text)) {
-                    return die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of '%s'", tag->text);
+                    goto cleanup;
                 }
                 StructDef *sd = struct_registry_add(&tu->structs, tag->text, tag->loc);
                 sd->is_union = 1;
@@ -5579,8 +5613,9 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
             if (peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) is_def = 1;
             if (has_tag && is_def) {
                 if (enum_registry_find(&tu->enums, tag->text)) {
-                    return die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of enum '%s'", tag->text);
+                    goto cleanup;
                 }
                 EnumDef *ed = enum_registry_add(&tu->enums, tag->text, tag->loc);
                 parse_enum_underlying_opt(&p, ed);
@@ -5624,9 +5659,11 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
                 }
                 free(s.u.block.data);
             } else if (s.kind != ST_DECL) {
-                return die_at(s.loc.file, s.loc.line, s.loc.col,
+                die_at(s.loc.file, s.loc.line, s.loc.col,
                        "only variable declarations allowed at file scope (got stmt kind %d, next token '%s')",
                        s.kind, peek(&p)->text ? peek(&p)->text : "NULL");
+                stmt_free(&s);
+                goto cleanup;
             } else {
                 stmt_array_push(&tu->globals, s);
             }
@@ -5636,7 +5673,13 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
     for (size_t i = 0; i < p.prepend.len; i++)
         stmt_array_push(&tu->globals, p.prepend.data[i]);
     p.prepend.len = 0;
+
+cleanup:
     stmt_array_free(&p.prepend);
+    if (p.has_last_fn_params) {
+        param_array_free(&p.last_fn_params);
+        p.has_last_fn_params = 0;
+    }
     parser_pop_scope(&p, -1);
     free(p.locals.data);
     if (fakecc_had_error()) return FAKECC_ERR;

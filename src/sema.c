@@ -880,7 +880,10 @@ static int g_check_expr_depth = 0;
 #define RETURN_TYPE(typ) do { g_check_expr_depth--; return (typ); } while(0)
 
 /* Tiny accessors — do not take or return FunTable* from huge functions. */
-static void ftab_cur_init(void) { ftab_init(&g_sema_ft); }
+static void ftab_cur_init(void) {
+    ftab_free(&g_sema_ft);
+    ftab_init(&g_sema_ft);
+}
 static void ftab_cur_free(void) { ftab_free(&g_sema_ft); }
 static const FunSig *ftab_lookup(const char *name) {
     return ftab_find(&g_sema_ft, name);
@@ -1216,12 +1219,14 @@ static Type apply_check_binop(Expr *e, Type lt, Type rt) {
                     int is_equality = (op == BOP_EQ || op == BOP_NE);
                     int lt_void = lt.pointee && lt.pointee->kind == TY_VOID;
                     int rt_void = rt.pointee && rt.pointee->kind == TY_VOID;
-                    if (is_relational && !type_is_same(&lt, &rt)) {
-                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
-                                e->loc.file, e->loc.line, e->loc.col);
-                    } else if (is_equality && !lt_void && !rt_void && !type_is_same(&lt, &rt)) {
-                        fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
-                                e->loc.file, e->loc.line, e->loc.col);
+                    if (!fakecc_is_quiet()) {
+                        if (is_relational && !type_is_same(&lt, &rt)) {
+                            fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                                    e->loc.file, e->loc.line, e->loc.col);
+                        } else if (is_equality && !lt_void && !rt_void && !type_is_same(&lt, &rt)) {
+                            fprintf(stderr, "%s:%d:%d: warning: comparison of distinct pointer types\n",
+                                    e->loc.file, e->loc.line, e->loc.col);
+                        }
                     }
                 }
             }
@@ -1301,7 +1306,7 @@ static Type apply_check_binop(Expr *e, Type lt, Type rt) {
                     return type_make_void();
                 }
             /* Warn on negative shift count (GCC -Wshift-count-negative). */
-            if (rt.kind == TY_INT && rt.width <= 8) {
+            if (!fakecc_is_quiet() && rt.kind == TY_INT && rt.width <= 8) {
                 long long shift_val;
                 if (fold_const_int(e->u.bin.r, &shift_val) && shift_val < 0) {
                     fprintf(stderr, "%s:%d:%d: warning: shift count is negative\n",
@@ -4020,6 +4025,9 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
      * symbol for executables. */
 
     ftab_cur_init();
+    SymTable globals;
+    symtable_init(&globals);
+
     int has_main = 0;
     for (size_t i = 0; i < tu->functions.len; i++) {
         FunctionDecl *fn = &tu->functions.data[i];
@@ -4038,15 +4046,17 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
                 if (strcmp(fn->name, "main") == 0) has_main = 1;
                 continue;
             }
-            return die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "redefinition of function '%s'", fn->name);
+            goto cleanup;
         }
         ftab_add(fn);
         if (strcmp(fn->name, "main") == 0 && !fn->is_extern) has_main = 1;
     }
     if (!has_main && require_main) {
-        return die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
+        die_at(tu->package.loc.file, tu->package.loc.line, tu->package.loc.col,
                "no 'main' function defined");
+        goto cleanup;
     }
 
     /* Import every function from imported packages and from the current
@@ -4074,8 +4084,6 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
     /* Type-check global variable declarations.  Store their names in a
      * long-lived symbol table so functions can see them.  Enforce no
      * duplicates against each other or against function names. */
-    SymTable globals;
-    symtable_init(&globals);
     check_set_st(&globals);
     for (size_t i = 0; i < tu->globals.len; i++) {
         Stmt *s = &tu->globals.data[i];
@@ -4092,12 +4100,14 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
             }
             if (prev) {
                 if (prev->u.decl.init && s->u.decl.init) {
-                    return die_at(s->loc.file, s->loc.line, s->loc.col,
+                    die_at(s->loc.file, s->loc.line, s->loc.col,
                            "redefinition of global '%s'", s->u.decl.name);
+                    goto cleanup;
                 }
                 if (!types_compatible_globals(&prev->u.decl.type, &s->u.decl.type)) {
-                    return die_at(s->loc.file, s->loc.line, s->loc.col,
+                    die_at(s->loc.file, s->loc.line, s->loc.col,
                            "conflicting types for '%s'", s->u.decl.name);
+                    goto cleanup;
                 }
                 /* C99 6.2.2: a file-scope `static` after a non-static
                  * declaration (or the reverse, except `extern` restating
@@ -4106,14 +4116,16 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
                     int prev_sc = prev->u.decl.storage_class;
                     int new_sc = s->u.decl.storage_class;
                     if (new_sc == 1 && prev_sc != 1) {
-                        return die_at(s->loc.file, s->loc.line, s->loc.col,
+                        die_at(s->loc.file, s->loc.line, s->loc.col,
                                "static declaration of '%s' follows non-static declaration",
                                s->u.decl.name);
+                        goto cleanup;
                     }
                     if (prev_sc == 1 && new_sc == 0) {
-                        return die_at(s->loc.file, s->loc.line, s->loc.col,
+                        die_at(s->loc.file, s->loc.line, s->loc.col,
                                "non-static declaration of '%s' follows static declaration",
                                s->u.decl.name);
+                        goto cleanup;
                     }
                 }
                 /* `extern int x; int x;` — the tentative definition gives the
@@ -4149,9 +4161,10 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
                         normalize_init_list(&prev->u.decl.type, prev->u.decl.init, prev->loc, 0);
                     if (!is_const_init(prev->u.decl.init, &globals))
                         {
-                            return die_at(prev->loc.file, prev->loc.line, prev->loc.col,
+                            die_at(prev->loc.file, prev->loc.line, prev->loc.col,
                                "global '%s' initializer must be a compile-time constant",
                                prev->u.decl.name);
+                            goto cleanup;
                         }
                 }
                 s->kind = ST_EXPR;
@@ -4178,9 +4191,10 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
                 s->u.expr = NULL;
                 continue;
             }
-            return die_at(s->loc.file, s->loc.line, s->loc.col,
+            die_at(s->loc.file, s->loc.line, s->loc.col,
                    "global '%s' conflicts with a function of the same name",
                    s->u.decl.name);
+            goto cleanup;
         }
         if (s->u.decl.init && s->u.decl.init->kind == EX_COMPOUND_LITERAL
             && s->u.decl.type.kind == TY_ARRAY) {
@@ -4200,8 +4214,9 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
             if (s->u.decl.type.length < 0) {
                 s->u.decl.type.length = s->u.decl.init->u.str.len + 1;
             } else if (s->u.decl.init->u.str.len > s->u.decl.type.length) {
-                return die_at(s->u.decl.init->loc.file, s->u.decl.init->loc.line, s->u.decl.init->loc.col,
+                die_at(s->u.decl.init->loc.file, s->u.decl.init->loc.line, s->u.decl.init->loc.col,
                        "initializer-string for array of chars is too long");
+                goto cleanup;
             }
         }
         try_fold_vla_type(&s->u.decl.type);
@@ -4214,8 +4229,9 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
             /* A global's initializer must be a compile-time constant. */
             if (!is_const_init(s->u.decl.init, &globals))
                 {
-                    return die_at(s->loc.file, s->loc.line, s->loc.col,
+                    die_at(s->loc.file, s->loc.line, s->loc.col,
                        "global initializer must be a constant");
+                    goto cleanup;
                 }
             Type dt = check_expr_inner(s->u.decl.init);
             type_free(&dt);
@@ -4242,14 +4258,17 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
 
         size_t mark = symtable_enter_scope(&st);
         check_set_st(&st);
+        int param_err = 0;
         for (size_t j = 0; j < fn->params.len; j++) {
             if (fn->params.data[j].name && fn->params.data[j].name[0] != '\0') {
                 if (symtable_has_since(&st, fn->params.data[j].name, mark)) {
-                    return die_at(fn->params.data[j].loc.file,
+                    die_at(fn->params.data[j].loc.file,
                            fn->params.data[j].loc.line,
                            fn->params.data[j].loc.col,
                            "duplicate parameter name '%s'",
                            fn->params.data[j].name);
+                    param_err = 1;
+                    break;
                 }
             }
             /* Normalize unsized array parameters (`int a[]`) to pointers,
@@ -4262,10 +4281,12 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
             if (pty.kind == TY_STRUCT && pty.tag) {
                 int is_cplx = (strncmp(pty.tag, "__complex_", 10) == 0);
                 if (!is_cplx && !struct_registry_find_c(g_sema_structs, pty.tag)) {
-                    return die_at(fn->params.data[j].loc.file,
+                    die_at(fn->params.data[j].loc.file,
                            fn->params.data[j].loc.line,
                            fn->params.data[j].loc.col,
                            "parameter has incomplete type 'struct %s'", pty.tag);
+                    param_err = 1;
+                    break;
                 }
             }
             if (pty.vla_dim) {
@@ -4282,6 +4303,10 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
                               pty, fn->params.data[j].loc, 0, 0);
             }
             if (own_ptr) type_free(&pty);
+        }
+        if (param_err) {
+            symtable_free(&st);
+            goto cleanup;
         }
 
         /* Pre-pass: collect every label in the function so forward gotos
@@ -4307,11 +4332,13 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
          * zero if the function does not end in IR_RETURN. */
         if (!has_return && strcmp(fn->name, "main") == 0
             && fn->ret_type.kind != TY_VOID) {
-            return die_at(fn->loc.file, fn->loc.line, fn->loc.col,
+            die_at(fn->loc.file, fn->loc.line, fn->loc.col,
                    "non-void function must return a value");
+            goto cleanup;
         }
     }
 
+cleanup:
     ftab_cur_free();
     symtable_free(&globals);
     if (fakecc_had_error() || g_sema_error_count > 0) return FAKECC_ERR;
