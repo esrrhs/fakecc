@@ -97,10 +97,8 @@ jobs:
           set -x
           cd build_fuzz
 
-          # PR: quick smoke; push to master: 10 min; weekly: 60 min
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            DURATION=60
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # PR & push to master: 10 min; weekly: 60 min
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             DURATION=${{ github.event.inputs.duration }}
           elif [ "${{ github.event_name }}" = "schedule" ]; then
             DURATION=3600
@@ -203,10 +201,8 @@ jobs:
           export PATH="$PATH:/mingw64/bin"
           cd build_fuzz
 
-          # PR: quick smoke; push to master: 10 min; weekly: 60 min
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            DURATION=60
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # PR & push to master: 10 min; weekly: 60 min
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             DURATION=${{ github.event.inputs.duration }}
           elif [ "${{ github.event_name }}" = "schedule" ]; then
             DURATION=3600

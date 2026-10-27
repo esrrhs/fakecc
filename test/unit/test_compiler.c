@@ -112,12 +112,39 @@ static void test_reject_then_compile(void) {
     for (i = 0; i < 40; i++) {
         int rc = fakecc_compile_string_to_obj("this is not c\n", out, NULL);
         T_ASSERT(rc != 0);
+        rc = fakecc_compile_string_to_obj("package main;\n1 + 2;\n", out, NULL);
+        T_ASSERT(rc != 0);
+        rc = fakecc_compile_string_to_obj(
+            "package main;\nint f(void) { return 0; }\nint f(void) { return 1; }\n", out, NULL);
+        T_ASSERT(rc != 0);
+        rc = fakecc_compile_string_to_obj(
+            "package main;\nint f(int a, int a) { return a; }\n", out, NULL);
+        T_ASSERT(rc != 0);
+        rc = fakecc_compile_string_to_obj(
+            "package main;\nint f(struct UndeclaredS s) { return 0; }\n", out, NULL);
+        T_ASSERT(rc != 0);
     }
     fakecc_set_quiet(0);
     T_ASSERT_EQ_INT(
         fakecc_compile_string_to_obj(
             "package main;\nint main(void) { return 1; }\n", out, NULL),
         0);
+    remove(out);
+}
+
+/* Bitfield expressions can create complex/nested types, reallocating
+ * StructRegistry while parsing a struct body.  This must not use-after-free
+ * or corrupt alignment/size. */
+static void test_struct_bitfield_realloc(void) {
+    const char *out = TMP_DIR PATH_SEP "test_compiler_bf_realloc.o";
+    const char *src =
+        "package main;\n"
+        "struct s {\n"
+        "    int a : (int)(sizeof(struct nested { int x; }) + 2);\n"
+        "    int b : 4;\n"
+        "} __attribute__((aligned(8)));\n"
+        "int main(void) { return 0; }\n";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(src, out, NULL), 0);
     remove(out);
 }
 
@@ -168,6 +195,7 @@ int main(void) {
     test_compile_string_to_so();
     test_compile_file_to_so_and_executable();
     test_reject_then_compile();
+    test_struct_bitfield_realloc();
     test_deep_add_chain();
     return t_finalize();
 }
