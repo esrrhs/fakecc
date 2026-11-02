@@ -4060,7 +4060,21 @@ static int fold_gep(const IRFunction *fn, const int *def,
         if (cp != expect && !gep_const_only_gap(fn, cp, expect))
             return 0;
         const IRInst *d = &fn->insts.data[cp];
-        if (d->op != IR_ADD) return 0;
+        if (d->op != IR_ADD) {
+            /* Const GEPs peeled to a register / GADDR / load base:
+             *   ADD(ADD(p, 4), 4) → [p+8].  Without this, PARAM/LOAD
+             *   bases fall out of the loop and never become AF_SIB, so
+             *   O0 emits lea/add + load instead of mov 8(%reg). */
+            if (disp == 0) return 0;
+            if (d->op == IR_CONST || d->op == IR_MUL) return 0;
+            if (!looks_like_addr_base(fn, def, alloca_off, cur)) return 0;
+            if (!imm_fits_i32(disp)) return 0;
+            *base_out = cur;
+            *idx_out = -1;
+            *scale2_out = 0;
+            *disp_out = disp;
+            return 1;
+        }
         IRValue raw_idx = -1, other = -1;
         int sc = -1;
         if (gep_scaled_index(fn, def, d->a, &raw_idx, &sc))
@@ -4281,6 +4295,20 @@ static int peel_sib_scale(const IRFunction *fn, const int *def, IRValue idx,
  *   AF_SIB:     [base + idx*2^scale2 + disp] (idx may be -1)
  * Only called after the plain [rbp+disp] fold_ptr_off case failed and for
  * ordinary 1/2/4/8-byte GP accesses. */
+
+/* Prefer the SSA home for an AF_SIB base so mov 8(%rdi) wins over
+ * mov %rdi,%rax; mov 8(%rax).  Avoid RSP and the SIB index reg. */
+static int af_sib_base_reg(Buffer *b, IRValue af_base, int idx_r,
+                           const RAResult *ra) {
+    int base_r = gp_home(ra, af_base);
+    if (base_r < 0 || base_r == REG_RSP)
+        base_r = REG_RAX;
+    if (idx_r >= 0 && idx_r == base_r)
+        base_r = (base_r == REG_RAX) ? REG_RCX : REG_RAX;
+    ensure_reg(b, af_base, base_r, ra);
+    return base_r;
+}
+
 static int classify_ptr_addr(const IRFunction *fn, const int *def,
                              const int *alloca_off, IRValue v,
                              IRValue *base_out, IRValue *idx_out,
@@ -7309,12 +7337,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 emit_module_add_reloc(out, patch, R_X86_64_32S,
                                                       gsym, af_disp);
                             } else {
-                                ensure_reg(&out->text, af_base, REG_RAX, ra);
+                                int base_r = af_sib_base_reg(&out->text, af_base,
+                                                             idx_r, ra);
                                 if (af_idx >= 0)
-                                    emit_sse_load_sib(&out->text, dst_xmm, REG_RAX,
+                                    emit_sse_load_sib(&out->text, dst_xmm, base_r,
                                                       idx_r, af_sc, af_disp, is_float);
                                 else
-                                    emit_sse_load_disp(&out->text, dst_xmm, REG_RAX,
+                                    emit_sse_load_disp(&out->text, dst_xmm, base_r,
                                                        af_disp, is_float);
                             }
                         } else
@@ -7352,13 +7381,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_module_add_reloc(out, patch, R_X86_64_32S,
                                                   gsym, af_disp);
                         } else {
-                            ensure_reg(&out->text, af_base, REG_RAX, ra);
+                            int base_r = af_sib_base_reg(&out->text, af_base,
+                                                         idx_r, ra);
                             if (af_idx >= 0)
-                                emit_load_sib(&out->text, dst_gp, REG_RAX,
+                                emit_load_sib(&out->text, dst_gp, base_r,
                                               idx_r, af_sc, af_disp,
                                               inst->width, inst->is_unsigned);
                             else
-                                emit_load_disp(&out->text, dst_gp, REG_RAX,
+                                emit_load_disp(&out->text, dst_gp, base_r,
                                                af_disp, inst->width,
                                                inst->is_unsigned);
                         }
@@ -7506,13 +7536,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 emit_module_add_reloc(out, patch, R_X86_64_32S,
                                                       gsym, af_disp);
                             } else {
-                                ensure_reg(&out->text, af_base, REG_RAX, ra);
+                                int base_r = af_sib_base_reg(&out->text, af_base,
+                                                             idx_r, ra);
                                 if (af_idx >= 0)
-                                    emit_sse_store_sib(&out->text, REG_RAX, idx_r,
+                                    emit_sse_store_sib(&out->text, base_r, idx_r,
                                                        af_sc, af_disp, XMM_SCRATCH0,
                                                        is_float);
                                 else
-                                    emit_sse_store_disp(&out->text, REG_RAX,
+                                    emit_sse_store_disp(&out->text, base_r,
                                                         XMM_SCRATCH0, af_disp,
                                                         is_float);
                             }
@@ -7575,12 +7606,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_module_add_reloc(out, patch, R_X86_64_32S,
                                                   gsym, af_disp);
                         } else {
-                            ensure_reg(&out->text, af_base, REG_RAX, ra);
+                            int base_r = af_sib_base_reg(&out->text, af_base,
+                                                         idx_r, ra);
+                            if (base_r == val_r) {
+                                base_r = (val_r == REG_RAX) ? REG_RCX : REG_RAX;
+                                ensure_reg(&out->text, af_base, base_r, ra);
+                            }
                             if (af_idx >= 0)
-                                emit_store_sib(&out->text, REG_RAX, idx_r, af_sc,
+                                emit_store_sib(&out->text, base_r, idx_r, af_sc,
                                                af_disp, val_r, inst->width);
                             else
-                                emit_store_disp(&out->text, REG_RAX, val_r,
+                                emit_store_disp(&out->text, base_r, val_r,
                                                 af_disp, inst->width);
                         }
                     }
@@ -8859,8 +8895,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 if (!is_win) {
                     /* AL = vector-register count: required for variadic callees.
-                     * Skip when the callee is a known non-variadic TU function. */
-                    int need_al = 1;
+                     * Prefer the call's type (covers indirect non-variadic
+                     * fn-ptrs); refine from a known TU definition. */
+                    int need_al = inst->call_is_variadic;
                     if (inst->call_name) {
                         for (size_t fi = 0; fi < ir->functions.len; fi++) {
                             const IRFunction *cf = &ir->functions.data[fi];
