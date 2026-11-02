@@ -59,10 +59,14 @@ int main() {
     r = runtime.sscanf("nan", "%f", &f);
     if (r != 1 || f == f) return 18;
 
-    /* glibc scanf stops after NAN; `(12)x` is leftover (unlike strtod). */
+    /* NAN parses.  Whether scanf also consumes `(n-char-sequence)` depends on
+     * the host libc: glibc 2.39 / MinGW leave "(12)x"; glibc 2.43 (Ubuntu 26)
+     * and ISO strtod-shaped scanf consume "(12)" and leave "x".  Fakecc follows
+     * the modern form; accept either leftover so difftest stays green on both
+     * ubuntu-24.04 and ubuntu-latest. */
     r = runtime.sscanf("nan(12)x", "%f%s", &f, rest);
     if (r != 2 || f == f) return 29;
-    if (rest[0] != '(') return 30;
+    if (rest[0] != 'x' && rest[0] != '(') return 30;
 
     r = runtime.sscanf("ix", "%f", &f);
     if (r != 0) return 19;

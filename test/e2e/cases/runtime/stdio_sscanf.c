@@ -51,18 +51,25 @@ int main() {
     r = runtime.sscanf("9", "%hd", &sh);
     if (r != 1 || sh != 9) return 17;
 
-    /* glibc vfscanf consumes the 0x prefix even with no following hex digit. */
+    /* Incomplete "0x"/"0X" with no hex digit: glibc BZ #12701.  Older glibc
+     * and MinGW assign 0 and keep scanning; Ubuntu 26+ / ISO C make it a
+     * matching failure.  Fakecc follows the fixed/ISO rule.  Accept either
+     * outcome so difftest matches both ubuntu-24.04 and ubuntu-latest. */
     r = runtime.sscanf("0xZ", "%x%c", &u, buf);
-    if (r != 2) return 18;
-    if (u != 0u) return 19;
-    if (buf[0] != 'Z') return 20;
+    if (!(r == 0 || (r == 2 && u == 0u && buf[0] == 'Z'))) return 18;
 
     r = runtime.sscanf("0xZ", "%i%c", &a, buf);
-    if (r != 2 || a != 0 || buf[0] != 'Z') return 23;
+    if (!(r == 0 || (r == 2 && a == 0 && buf[0] == 'Z'))) return 23;
+    /* Field width 1 stops after the leading 0, so %1x still succeeds. */
     r = runtime.sscanf("0xZ", "%1x%c", &u, buf);
     if (r != 2 || u != 0u || buf[0] != 'x') return 24;
     r = runtime.sscanf("0x", "%x%n", &u, &n);
-    if (r != 1 || u != 0u || n != 2) return 25;
+    if (!(r == 0 || (r == 1 && u == 0u && n == 2))) return 25;
+    /* A lone 0 remains valid hex/decimal. */
+    r = runtime.sscanf("0Z", "%x%c", &u, buf);
+    if (r != 2 || u != 0u || buf[0] != 'Z') return 19;
+    r = runtime.sscanf("0xff", "%x", &u);
+    if (r != 1 || u != 255u) return 20;
 
     /* A lone sign is a matching failure (0), not EOF. */
     r = runtime.sscanf("-", "%d", &a);

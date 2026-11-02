@@ -4145,8 +4145,16 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
                                       prev->loc, prev->u.decl.align, 0);
                 }
                 if (!prev->u.decl.init && s->u.decl.init) {
+                    /* Transfer ownership of init/type to the surviving Stmt.
+                     * Neutralize `s` immediately: is_const_init below may
+                     * die_at+goto cleanup, and tu_free would then free the
+                     * same Expr/Type twice (fuzz_compile UAF on
+                     * `extern int x; int x = a = 1;`). */
                     prev->u.decl.init = s->u.decl.init;
+                    s->u.decl.init = NULL;
+                    type_free(&prev->u.decl.type);
                     prev->u.decl.type = s->u.decl.type;
+                    memset(&s->u.decl.type, 0, sizeof(s->u.decl.type));
                     if (s->u.decl.storage_class != 2)
                         prev->u.decl.storage_class = s->u.decl.storage_class;
                     /* Update symbol table with completed type */
@@ -4167,6 +4175,17 @@ static int sema_check_in_pkg_impl(const TranslationUnit *tu_const, int require_m
                             goto cleanup;
                         }
                 }
+                /* Drop the duplicate declarator.  Init/type were moved above
+                 * when present; otherwise free them here so tu_free does not
+                 * see a zombie ST_DECL (or leak after the ST_EXPR rewrite). */
+                free(s->u.decl.name);
+                s->u.decl.name = NULL;
+                free(s->u.decl.alias_target);
+                s->u.decl.alias_target = NULL;
+                type_free(&s->u.decl.type);
+                memset(&s->u.decl.type, 0, sizeof(s->u.decl.type));
+                expr_free(s->u.decl.init);
+                s->u.decl.init = NULL;
                 s->kind = ST_EXPR;
                 s->u.expr = NULL;
                 continue;

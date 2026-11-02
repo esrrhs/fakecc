@@ -186,6 +186,66 @@ static void test_deep_add_chain(void) {
     remove(out);
 }
 
+/* Nested enum definitions inside enumerator value expressions realloc
+ * EnumRegistry; parse_specifiers_full must not call enum_def_as_type on a
+ * stale EnumDef* (fuzz_differential ASan heap-use-after-free). */
+static void test_enum_nested_realloc_no_uaf(void) {
+    const char *out = TMP_DIR PATH_SEP "test_compiler_enum_realloc.o";
+    const char *src =
+        "package main;\n"
+        "enum zone_type {\n"
+        "  ZONE_DMA,\n"
+        "  ZONE_A = (int)sizeof(enum z1 { A1 = 1 }),\n"
+        "  ZONE_B = (int)sizeof(enum z2 { B1 = 2 }),\n"
+        "  ZONE_C = (int)sizeof(enum z3 { C1 = 3 }),\n"
+        "  ZONE_D = (int)sizeof(enum z4 { D1 = 4 }),\n"
+        "  ZONE_E = (int)sizeof(enum z5 { E1 = 5 }),\n"
+        "  ZONE_F = (int)sizeof(enum z6 { F1 = 6 })\n"
+        "};\n"
+        "int main(void) { return ZONE_DMA + ZONE_F; }\n";
+    /* Also exercise the reduced macOS fuzz_differential crash shape. */
+    const char *crashish =
+        "package main;\n"
+        "enum zone_type {\n"
+        "  ZONE_DMA,\n"
+        "  ZONE_NORMA = (enum nest1 { NORMA = 1 }) NORMA,\n"
+        "  ZONE_HIGH = (enum nest2 { HIGH = 2 }) HIGH,\n"
+        "  ZONE_MOV = (enum nest3 { MOV = 3 }) MOV,\n"
+        "  ZONE_DEV = (enum nest4 { DEV = 4 }) DEV,\n"
+        "  ZONE_LAST = (enum nest5 { LAST = 5 }) LAST\n"
+        "};\n"
+        "int main(void) { return ZONE_LAST; }\n";
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(src, out, NULL), 0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(crashish, out, NULL), 0);
+    remove(out);
+}
+
+/* Regression: merging `extern T x;` with a later `T x = <non-const>;`
+ * used to alias the initializer Expr onto both Stmts, then die_at+cleanup
+ * freed it twice (fuzz_compile ASan heap-use-after-free in expr_free). */
+static void test_extern_redecl_nonconst_init_no_uaf(void) {
+    const char *out = TMP_DIR PATH_SEP "test_compiler_redecl_init.o";
+    const char *crash =
+        "package main;\n"
+        "extern volatile int ReadyFlag_NotProperlyInitialized;\n"
+        "volatile int ReadyFlag_NotProperlyInitialized=ProperlyInitialized=1;\n"
+        "int main(void) {\n"
+        "  if (ReadyFlag_Not!= 1)\n"
+        "    __builtin_abort ();\n"
+        "  return 0;\n"
+        "}\n";
+    const char *ok =
+        "package main;\n"
+        "extern int g;\n"
+        "int g = 42;\n"
+        "int main(void) { return g; }\n";
+    fakecc_set_quiet(1);
+    T_ASSERT(fakecc_compile_string_to_obj(crash, out, NULL) != 0);
+    fakecc_set_quiet(0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(ok, out, NULL), 0);
+    remove(out);
+}
+
 int main(void) {
     /* The high-level API cases below assert ELF output; pin the x86-64
      * backend until the arm64-macos backend lands. */
@@ -197,5 +257,7 @@ int main(void) {
     test_reject_then_compile();
     test_struct_bitfield_realloc();
     test_deep_add_chain();
+    test_enum_nested_realloc_no_uaf();
+    test_extern_redecl_nonconst_init_no_uaf();
     return t_finalize();
 }
