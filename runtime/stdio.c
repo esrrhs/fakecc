@@ -880,23 +880,26 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
             else if (spec == 'o') base = 8;
 
             int read_digits = 0;
+            int saw_0x_prefix = 0;
             unsigned long long val = 0;
+            /* ISO C / glibc BZ #12701: a lone "0x"/"0X" prefix with no
+             * following hex digit is a matching failure, not value 0.
+             * A bare "0" (no x) remains a valid digit. */
             if ((spec == 'x' || spec == 'X' || spec == 'p' || spec == 'i')
                 && used < maxw && ch == '0') {
-                read_digits = 1;
                 used = used + 1;
                 nread = nread + 1;
                 ch = scan_getc(f);
                 if (used < maxw && (ch == 'x' || ch == 'X')) {
-                    /* glibc vfscanf consumes the 0x prefix even when no hex
-                     * digit follows (`sscanf("0xZ","%x%c")` assigns 'Z').
-                     * strtoul is different and still stops at 'x'. */
                     used = used + 1;
                     nread = nread + 1;
                     ch = scan_getc(f);
                     base = 16;
-                } else if (spec == 'i') {
-                    base = 8;
+                    saw_0x_prefix = 1;
+                    /* read_digits stays 0 until a real hex digit is seen. */
+                } else {
+                    read_digits = 1;
+                    if (spec == 'i') base = 8;
                 }
             }
             while (used < maxw) {
@@ -909,9 +912,10 @@ int vfscanf(FILE *f, const char *fmt, va_list ap) {
                 ch = scan_getc(f);
             }
             if (!read_digits) {
-                /* A lone sign at EOF is a matching failure, not input failure
-                 * (C99: sscanf("-", "%d") returns 0, not EOF). */
-                if (ch < 0 && !saw_sign) input_fail = 1;
+                /* Lone sign or incomplete 0x/0X prefix: matching failure (0),
+                 * not EOF — even when the next getc hits end-of-input.
+                 * Input failure only when no subject characters were seen. */
+                if (ch < 0 && !saw_sign && !saw_0x_prefix) input_fail = 1;
                 break;
             }
             if (sign < 0 && spec != 'd' && spec != 'i')

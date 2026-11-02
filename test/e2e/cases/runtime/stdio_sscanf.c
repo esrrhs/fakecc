@@ -51,18 +51,23 @@ int main() {
     r = runtime.sscanf("9", "%hd", &sh);
     if (r != 1 || sh != 9) return 17;
 
-    /* glibc vfscanf consumes the 0x prefix even with no following hex digit. */
+    /* glibc BZ #12701 / ISO C: "0x" with no hex digit is a matching failure.
+     * Older glibc assigned 0 and kept scanning; Ubuntu 26+ rejects the prefix. */
     r = runtime.sscanf("0xZ", "%x%c", &u, buf);
-    if (r != 2) return 18;
-    if (u != 0u) return 19;
-    if (buf[0] != 'Z') return 20;
+    if (r != 0) return 18;
 
     r = runtime.sscanf("0xZ", "%i%c", &a, buf);
-    if (r != 2 || a != 0 || buf[0] != 'Z') return 23;
+    if (r != 0) return 23;
+    /* Field width 1 stops after the leading 0, so %1x still succeeds. */
     r = runtime.sscanf("0xZ", "%1x%c", &u, buf);
     if (r != 2 || u != 0u || buf[0] != 'x') return 24;
     r = runtime.sscanf("0x", "%x%n", &u, &n);
-    if (r != 1 || u != 0u || n != 2) return 25;
+    if (r != 0) return 25;
+    /* A lone 0 remains valid hex/decimal. */
+    r = runtime.sscanf("0Z", "%x%c", &u, buf);
+    if (r != 2 || u != 0u || buf[0] != 'Z') return 19;
+    r = runtime.sscanf("0xff", "%x", &u);
+    if (r != 1 || u != 255u) return 20;
 
     /* A lone sign is a matching failure (0), not EOF. */
     r = runtime.sscanf("-", "%d", &a);
