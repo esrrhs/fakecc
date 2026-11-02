@@ -15,6 +15,8 @@
 /* EmitModule lifetime                                                 */
 /* ------------------------------------------------------------------ */
 
+int g_tls_local_exec = 1;
+
 void emit_module_init(EmitModule *m) {
     /* Only a TU the driver built from a command-line source is a user TU
      * (main.c promotes it after lowering); modules codegen'd for imported

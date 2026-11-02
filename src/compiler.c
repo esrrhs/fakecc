@@ -363,6 +363,8 @@ int fakecc_compile_files(const char **input_paths,
     int opt_level = opts ? opts->opt_level : 1;
     int want_debug = opts ? opts->want_debug : 0;
     int nostdlib = opts ? opts->nostdlib : (is_shared ? 1 : 0);
+    /* Match main.c: DSOs cannot use Local-Exec TPOFF32. */
+    g_tls_local_exec = is_shared ? 0 : 1;
 
     const char **needed = opts ? opts->needed : NULL;
     size_t num_needed = opts ? opts->num_needed : 0;

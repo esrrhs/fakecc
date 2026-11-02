@@ -652,6 +652,7 @@ int main(int argc, char **argv) {
             compile_only = 1;
         } else if (strcmp(argv[i], "-shared") == 0) {
             is_shared = 1;
+            g_tls_local_exec = 0; /* IE TLS; LE TPOFF32 is illegal in DSOs */
         } else if (strcmp(argv[i], "-nodefaultlibs") == 0) {
             nodefaultlibs = 1;
         } else if (strcmp(argv[i], "-finstrument-functions") == 0) {

@@ -292,6 +292,102 @@ static void emit_mov_fs0_reg(Buffer *b, int dst) {
     emit_int32(b, 0);                    /* disp32 = 0 → %fs:0 */
 }
 
+
+/* Emit `mov/movzx dst, %fs:disp32` and return the disp32 patch offset.
+ * Caller records R_X86_64_TPOFF32.  Width 1/2/4/8; unsigned governs zx vs sx
+ * for narrow loads (same convention as emit_load_disp). */
+static size_t emit_load_fs_tpoff(Buffer *b, int dst, int width, int is_unsigned) {
+    emit_byte(b, 0x64); /* %fs */
+    if (width == 8) {
+        emit_rex_wrb(b, 1, dst, 0);
+        emit_byte(b, 0x8B);
+        emit_modrm(b, 0, dst & 7, 4);
+        emit_byte(b, 0x25);
+    } else if (width == 4) {
+        if (dst >= 8) emit_byte(b, 0x44); /* REX.R */
+        emit_byte(b, 0x8B);
+        emit_modrm(b, 0, dst & 7, 4);
+        emit_byte(b, 0x25);
+    } else if (width == 2) {
+        /* No 0x66: movzx/movsx r32, r/m16 already fix the mem size; a 66
+         * prefix would shrink the dest to 16-bit and leave high garbage. */
+        if (is_unsigned) {
+            if (dst >= 8) emit_byte(b, 0x44);
+            emit_byte(b, 0x0F); emit_byte(b, 0xB7); /* movzx r32, r/m16 */
+            emit_modrm(b, 0, dst & 7, 4);
+            emit_byte(b, 0x25);
+        } else {
+            if (dst >= 8) emit_byte(b, 0x44);
+            emit_byte(b, 0x0F); emit_byte(b, 0xBF); /* movsx r32, r/m16 */
+            emit_modrm(b, 0, dst & 7, 4);
+            emit_byte(b, 0x25);
+        }
+    } else { /* width == 1 */
+        if (is_unsigned) {
+            if (dst >= 8) emit_byte(b, 0x44);
+            emit_byte(b, 0x0F); emit_byte(b, 0xB6); /* movzx r32, r/m8 */
+            emit_modrm(b, 0, dst & 7, 4);
+            emit_byte(b, 0x25);
+        } else {
+            if (dst >= 8) emit_byte(b, 0x44);
+            emit_byte(b, 0x0F); emit_byte(b, 0xBE); /* movsx */
+            emit_modrm(b, 0, dst & 7, 4);
+            emit_byte(b, 0x25);
+        }
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
+/* Emit `mov %fs:disp32, src` (width 1/4/8; width 2 uses 66 prefix).
+ * Returns disp32 patch offset for R_X86_64_TPOFF32. */
+static size_t emit_store_fs_tpoff(Buffer *b, int src, int width) {
+    emit_byte(b, 0x64); /* %fs */
+    if (width == 8) {
+        emit_rex_wrb(b, 1, src, 0);
+        emit_byte(b, 0x89);
+        emit_modrm(b, 0, src & 7, 4);
+        emit_byte(b, 0x25);
+    } else if (width == 4) {
+        if (src >= 8) emit_byte(b, 0x44);
+        emit_byte(b, 0x89);
+        emit_modrm(b, 0, src & 7, 4);
+        emit_byte(b, 0x25);
+    } else if (width == 2) {
+        emit_byte(b, 0x66);
+        if (src >= 8) emit_byte(b, 0x44);
+        emit_byte(b, 0x89);
+        emit_modrm(b, 0, src & 7, 4);
+        emit_byte(b, 0x25);
+    } else {
+        /* byte: REX if src is sil/dil/bpl/spl or high reg */
+        if (src >= 4) {
+            int rex = 0x40;
+            if (src >= 8) rex |= 0x04;
+            emit_byte(b, rex);
+        }
+        emit_byte(b, 0x88);
+        emit_modrm(b, 0, src & 7, 4);
+        emit_byte(b, 0x25);
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
+/* Emit `movl $imm32, %fs:disp32`; returns disp32 patch (imm follows). */
+static size_t emit_store_imm32_fs_tpoff(Buffer *b, int32_t imm) {
+    emit_byte(b, 0x64);
+    emit_byte(b, 0xC7);
+    emit_modrm(b, 0, 0, 4);
+    emit_byte(b, 0x25);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    emit_int32(b, imm);
+    return patch;
+}
+
 /* Emit `movq %gs:0x58, %dst` — load the ThreadLocalStoragePointer from Win64 TEB.
  * Encoding: 65 (GS override) REX.W 8B ModRM(mod=00,reg=dst,rm=4) SIB(00,4,5) 0x00000058. */
 static void emit_mov_gs58_reg(Buffer *b, int dst) {
@@ -3761,6 +3857,36 @@ static const char *peel_gaddr_name_unique(const IRFunction *fn, const int *def,
     return NULL;
 }
 
+
+static const char *peel_gaddr_tls_name_unique(const IRFunction *fn, const int *def,
+                                              IRValue v) {
+    if (!value_unique_def(fn, v)) return NULL;
+    IRValue cur = v;
+    for (int depth = 0; depth < 4; depth++) {
+        if (cur < 0 || cur >= fn->next_value_id || def[cur] < 0) return NULL;
+        if (!value_unique_def(fn, cur)) return NULL;
+        const IRInst *d = &fn->insts.data[def[cur]];
+        if (d->op == IR_COPY) { cur = d->a; continue; }
+        if (d->op == IR_GADDR_TLS) return d->call_name;
+        return NULL;
+    }
+    return NULL;
+}
+
+/* True when Local-Exec %fs:tpoff folds are allowed for this TLS symbol. */
+static int tls_le_ok(EmitModule *out, const char *name, int *gsym_out) {
+    if (!g_tls_local_exec || !name) return 0;
+    if (target_current()->os == TOS_WINDOWS) return 0;
+    if (target_current()->objfmt != TARGET_OBJFMT_ELF) return 0;
+    int gsym = emit_module_find_symbol(out, name);
+    if (gsym < 0) return 0;
+    if (out->syms[gsym].shndx != SECT_TDATA
+        && out->syms[gsym].shndx != SECT_TBSS)
+        return 0;
+    if (gsym_out) *gsym_out = gsym;
+    return 1;
+}
+
 /* Local non-TLS global defined in this TU — safe for R_X86_64_32S on ELF
  * small-code-model hosts.  PE ImageBase is 0x140000000, so a 32-bit absolute
  * cannot encode the VA; keep RIP-relative on Windows. */
@@ -4312,6 +4438,8 @@ static int deref_folds_addr(const IRModule *ir, const IRFunction *fn,
     {
         const char *gn = peel_gaddr_name_unique(fn, def, v);
         if (gn && gaddr_is_local_abs(ir, gn)) return 1;
+        const char *tgn = peel_gaddr_tls_name_unique(fn, def, v);
+        if (tgn && g_tls_local_exec) return 1;
     }
     if (local_abs_af(ir, fn, def, alloca_off, v, NULL, NULL, NULL, NULL))
         return 1;
@@ -4343,6 +4471,13 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             {
                 const char *gn = peel_gaddr_name_unique(fn, def, inst->a);
                 if (gn && gaddr_is_local_abs(ir, gn)
+                    && !value_is_float_class(fn, inst->dst)
+                    && !value_is_ld(fn, inst->dst)
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8))
+                    return;
+                const char *tgn = peel_gaddr_tls_name_unique(fn, def, inst->a);
+                if (tgn && g_tls_local_exec
                     && !value_is_float_class(fn, inst->dst)
                     && !value_is_ld(fn, inst->dst)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
@@ -4411,6 +4546,15 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             {
                 const char *gn = peel_gaddr_name_unique(fn, def, inst->a);
                 if (gn && gaddr_is_local_abs(ir, gn)
+                    && !value_is_float_class(fn, inst->b)
+                    && !value_is_ld(fn, inst->b)
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    mark_reg(needed, uses, nv, inst->b);
+                    return;
+                }
+                const char *tgn = peel_gaddr_tls_name_unique(fn, def, inst->a);
+                if (tgn && g_tls_local_exec
                     && !value_is_float_class(fn, inst->b)
                     && !value_is_ld(fn, inst->b)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
@@ -5995,6 +6139,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (gn && gaddr_is_local_abs(ir, gn))
                             continue;
                     }
+                    /* Local-Exec TLS folded into %fs:tpoff at the dereference. */
+                    if (inst->op == IR_GADDR_TLS && g_tls_local_exec) {
+                        const char *gn = inst->call_name;
+                        int gs = -1;
+                        if (gn && tls_le_ok(out, gn, &gs))
+                            continue;
+                    }
                     /* A GEP stride multiply or the extend feeding it, consumed
                      * by a folded [rbp+disp].  COPY is not skipped: mem2reg
                      * pointer selects are copies. */
@@ -6633,7 +6784,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * The linker patches the RIP-relative disp with R_X86_64_GOTTPOFF.
                  * The GOT slot is filled with TPOFF (S - tls_end) at static link,
                  * or with a dynamic R_X86_64_TPOFF64 in a shared object.
-                 * Local-Exec TPOFF32 is rejected by ld.so as reloc type 0x17.
+                 * Local-Exec TPOFF32 is used for executables (g_tls_local_exec);
+                 * shared objects keep IE because ld.so rejects dynamic TPOFF32.
                  *
                  * NOTE: `lea %fs:[rip+disp32]` is NOT equivalent — on x86-64 the
                  * `lea` instruction ignores segment overrides entirely, so the %fs
@@ -6676,7 +6828,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     size_t patch_off = out->text.len;
                     emit_int32(&out->text, 0);
                     emit_module_add_reloc(out, patch_off, R_PE_SECREL, gsym, 0);
+                } else if (g_tls_local_exec
+                           && target_current()->objfmt == TARGET_OBJFMT_ELF
+                           && (out->syms[gsym].shndx == SECT_TDATA
+                               || out->syms[gsym].shndx == SECT_TBSS)) {
+                    /* Local-Exec (executable): movq %fs:0, %r; add $tpoff, %r.
+                     * Matches gcc -O0 -fno-pic; avoids a GOT load per access.
+                     * Undefined/external TLS still uses IE below. */
+                    emit_mov_fs0_reg(&out->text, target);
+                    emit_rex_wrb(&out->text, 1, 0, target);
+                    emit_byte(&out->text, 0x81);
+                    emit_modrm(&out->text, 3, 0, target & 7);
+                    size_t patch = out->text.len;
+                    emit_int32(&out->text, 0);
+                    emit_module_add_reloc(out, patch, R_X86_64_TPOFF32, gsym, 0);
                 } else {
+                    /* Initial-Exec: movq %fs:0, %r; addq x@gottpoff(%rip), %r */
                     emit_mov_fs0_reg(&out->text, target);
                     size_t patch = emit_add_rip(&out->text, target);
                     emit_module_add_reloc(out, patch, R_X86_64_GOTTPOFF, gsym, -4);
@@ -6918,6 +7085,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 const char *rip_gn = NULL;
                 int rip_sym = -1;
+                int tls_sym = -1;
                 if (!folded && af_kind == AF_NONE
                     && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
@@ -6929,10 +7097,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             rip_sym = -1;
                     } else {
                         rip_gn = NULL;
+                        const char *tgn = peel_gaddr_tls_name_unique(fn, ssa_def, inst->a);
+                        if (tgn) tls_le_ok(out, tgn, &tls_sym);
                     }
                 }
                 int ptr_r = REG_RCX;
-                if (!folded && af_kind == AF_NONE && rip_sym < 0)
+                if (!folded && af_kind == AF_NONE && rip_sym < 0 && tls_sym < 0)
                     ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->dst)) {
                     int push = (x87_st0_v >= 0 && x87_st1_v < 0
@@ -7066,6 +7236,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                                        inst->width, inst->is_unsigned);
                         emit_module_add_reloc(out, patch, R_X86_64_PC32,
                                               rip_sym, -4);
+                    } else if (tls_sym >= 0) {
+                        size_t patch = emit_load_fs_tpoff(&out->text, dst_gp,
+                                                          inst->width, inst->is_unsigned);
+                        emit_module_add_reloc(out, patch, R_X86_64_TPOFF32,
+                                              tls_sym, 0);
                     } else
                         emit_load_via_ptr(&out->text, dst_gp, ptr_r,
                                           inst->width, inst->is_unsigned);
@@ -7116,6 +7291,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 const char *rip_gn = NULL;
                 int rip_sym = -1;
+                int tls_sym = -1;
                 if (!folded && af_kind == AF_NONE
                     && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
@@ -7127,10 +7303,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             rip_sym = -1;
                     } else {
                         rip_gn = NULL;
+                        const char *tgn = peel_gaddr_tls_name_unique(fn, ssa_def, inst->a);
+                        if (tgn) tls_le_ok(out, tgn, &tls_sym);
                     }
                 }
                 int ptr_r = REG_RCX;
-                if (!folded && af_kind == AF_NONE && rip_sym < 0)
+                if (!folded && af_kind == AF_NONE && rip_sym < 0 && tls_sym < 0)
                     ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->b)) {
                     if (x87_st0_v != inst->b) {
@@ -7340,12 +7518,35 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     int addend = (inst->width == 1) ? -5 : -8;
                     emit_module_add_reloc(out, patch, R_X86_64_PC32,
                                           rip_sym, addend);
+                } else if (tls_sym >= 0 && store_imm[j] && inst->width == 4) {
+                    int64_t immv = 0;
+                    IRValue cur = inst->b;
+                    for (int depth = 0; depth < 4; depth++) {
+                        if (ssa_const_imm(fn, ssa_def, cur, &immv)) break;
+                        if (cur < 0 || cur >= fn->next_value_id
+                            || ssa_def[cur] < 0) break;
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op != IR_ZEXT && d->op != IR_SEXT
+                            && d->op != IR_TRUNC && d->op != IR_COPY)
+                            break;
+                        cur = d->a;
+                    }
+                    size_t patch = emit_store_imm32_fs_tpoff(&out->text,
+                                                             (int32_t)immv);
+                    emit_module_add_reloc(out, patch, R_X86_64_TPOFF32,
+                                          tls_sym, 0);
                 } else if (rip_sym >= 0) {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
                     size_t patch = emit_store_rip_w(&out->text, REG_RAX,
                                                     inst->width);
                     emit_module_add_reloc(out, patch, R_X86_64_PC32,
                                           rip_sym, -4);
+                } else if (tls_sym >= 0) {
+                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    size_t patch = emit_store_fs_tpoff(&out->text, REG_RAX,
+                                                       inst->width);
+                    emit_module_add_reloc(out, patch, R_X86_64_TPOFF32,
+                                          tls_sym, 0);
                 } else {
                     /* Prefer the value's GP home so `add; mov home; store`
                      * does not bounce through %rax (init hot loop). */
