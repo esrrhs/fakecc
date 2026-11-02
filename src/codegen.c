@@ -2433,8 +2433,10 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
  * Match gcc -O0: add/sub/imul then setc/seto (CF unsigned / OF signed).
  * Operands are materialised first; only then is the flag reg zeroed so a
  * later setcc yields a clean 0/1 without a movzx. */
+/* keep_flags: leave CF/OF live for a fused CBR (no setcc).  Mov/spill of
+ * the wrapped result does not clobber flags, so the branch can jnc/jno. */
 static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
-                     const int *def, const RAResult *ra, int dr) {
+                     const int *def, const RAResult *ra, int dr, int keep_flags) {
     int width = inst->width > 0 ? inst->width : 8;
     int tu = inst->is_unsigned;
     int ov_dr = gp_home(ra, inst->c);
@@ -2442,7 +2444,7 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
     int fb = !(inst->op == IR_MULO && tu)
              && ssa_const_imm(fn, def, inst->b, &imm_b) && imm_fits_i32(imm_b);
     int bhome = fb ? -1 : gp_home(ra, inst->b);
-    int ov, acc, br = -1;
+    int ov = -1, acc, br = -1;
     uint8_t cc;
 
     if (inst->op == IR_MULO && tu) {
@@ -2457,15 +2459,18 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
             ensure_reg(b, inst->b, REG_RCX, ra);
             br = REG_RCX;
         }
-        ov = (ov_dr >= 0 && ov_dr != REG_RAX && ov_dr != REG_RDX && ov_dr != br)
-             ? ov_dr
-             : ((br != REG_RCX) ? REG_RCX : REG_RBX);
-        emit_xor_rr(b, ov);
+        if (!keep_flags) {
+            ov = (ov_dr >= 0 && ov_dr != REG_RAX && ov_dr != REG_RDX && ov_dr != br)
+                 ? ov_dr
+                 : ((br != REG_RCX) ? REG_RCX : REG_RBX);
+            emit_xor_rr(b, ov);
+        }
         emit_rex_if(b, alu_w64(width), 0, 0, br);
         emit_byte(b, 0xF7);
         emit_modrm(b, 3, 4, br & 7);
-        emit_setcc_r(b, 0x92 /* setc */, ov);
         finish_gp_dst(b, REG_RAX, dr, inst->dst, ra, width, 1);
+        if (!keep_flags)
+            emit_setcc_r(b, 0x92 /* setc */, ov);
     } else {
         if (!fb) {
             br = bhome >= 0 ? bhome : REG_RCX;
@@ -2476,11 +2481,13 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
             acc = (br != REG_RAX) ? REG_RAX : REG_RCX;
         ensure_reg(b, inst->a, acc, ra);
 
-        ov = (ov_dr >= 0 && ov_dr != acc && ov_dr != br && ov_dr != REG_RAX)
-             ? ov_dr : REG_RDX;
-        if (ov == acc || ov == br)
-            ov = (acc != REG_RCX && br != REG_RCX) ? REG_RCX : REG_RBX;
-        emit_xor_rr(b, ov);
+        if (!keep_flags) {
+            ov = (ov_dr >= 0 && ov_dr != acc && ov_dr != br && ov_dr != REG_RAX)
+                 ? ov_dr : REG_RDX;
+            if (ov == acc || ov == br)
+                ov = (acc != REG_RCX && br != REG_RCX) ? REG_RCX : REG_RBX;
+            emit_xor_rr(b, ov);
+        }
 
         if (inst->op == IR_MULO) {
             if (fb) emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
@@ -2495,13 +2502,16 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
             finish_gp_dst(b, acc, dr, inst->dst, ra, width, tu);
             cc = tu ? 0x92 : 0x90;
         }
-        emit_setcc_r(b, cc, ov);
+        if (!keep_flags)
+            emit_setcc_r(b, cc, ov);
     }
 
-    if (ov_dr >= 0) {
-        if (ov_dr != ov) emit_mov_rr(b, ov_dr, ov);
-    } else {
-        spill_if_needed(b, inst->c, ov, ra);
+    if (!keep_flags) {
+        if (ov_dr >= 0) {
+            if (ov_dr != ov) emit_mov_rr(b, ov_dr, ov);
+        } else {
+            spill_if_needed(b, inst->c, ov, ra);
+        }
     }
 }
 
@@ -5367,6 +5377,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         char *mask_nop = xmalloc(ninst_f);
         int *fused_cmp_at = xmalloc(ninst_f * sizeof(int));
         char *fused_inv_at = xmalloc(ninst_f);
+        int *fused_ovf_at = xmalloc(ninst_f * sizeof(int));
+        char *ovf_keep_flags = xmalloc(ninst_f);
         int *carry_hi_at = xmalloc(ninst_f * sizeof(int));
         char *carry_is_sub = xmalloc(ninst_f);
         char *carry_zero_hi = xmalloc(ninst_f);
@@ -5375,8 +5387,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         memset(mask_nop, 0, ninst_f);
         memset(carry_is_sub, 0, ninst_f);
         memset(carry_zero_hi, 0, ninst_f);
+        memset(ovf_keep_flags, 0, ninst_f);
         for (size_t uj = 0; uj < ninst_f; uj++) {
             fused_cmp_at[uj] = -1;
+            fused_ovf_at[uj] = -1;
             carry_hi_at[uj] = -1;
             mul_hi_at[uj] = -1;
         }
@@ -5451,6 +5465,34 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     && fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &loff, 0))
                     fused_skip[li] = 1;
             }
+        }
+        /* ADDO/SUBO/MULO → CBR: keep CF/OF and jcc (skip setcc+test when
+         * the overflow bit only feeds the branch).  STORE of the wrapped
+         * result between arith and CBR is flag-safe. */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *cb = &fn->insts.data[uj];
+            if (cb->op != IR_CBR || skip_body[uj] || fused_cmp_at[uj] >= 0)
+                continue;
+            if (cb->a < 0 || cb->a >= fn->next_value_id || ssa_def[cb->a] < 0)
+                continue;
+            if (raw_uses[cb->a] != 1) continue;
+            int oi = ssa_def[cb->a];
+            if (oi < 0 || skip_body[oi] || fused_skip[oi]) continue;
+            const IRInst *ovf = &fn->insts.data[oi];
+            if (!ir_op_with_overflow(ovf->op) || ovf->c != cb->a) continue;
+            int blocked = 0;
+            for (int k = oi + 1; k < (int)uj; k++) {
+                if (skip_body[k] || fused_skip[k]) continue;
+                const IRInst *m = &fn->insts.data[k];
+                if (m->op == IR_DBG_VALUE) continue;
+                if ((m->op == IR_STORE_PTR || m->op == IR_STORE)
+                    && m->b == ovf->dst) continue;
+                blocked = 1;
+                break;
+            }
+            if (blocked) continue;
+            fused_ovf_at[uj] = oi;
+            ovf_keep_flags[oi] = 1;
         }
         /* Bare CBR of a sole-use frame int: cmpl $0, off(%rbp) (logic). */
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
@@ -6309,7 +6351,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_ADDO:
             case IR_SUBO:
             case IR_MULO:
-                isel_ovf(&out->text, inst, fn, ssa_def, ra, dr);
+                isel_ovf(&out->text, inst, fn, ssa_def, ra, dr,
+                         ovf_keep_flags[j]);
                 break;
 
             case IR_ADD: {
@@ -7795,11 +7838,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                 /* CBR: a = cond, imm = true_label, b = false_label.
                  * Fused compare: `cmp a,b; j<cc> true; jmp false`.
-                 * Otherwise test the materialized 0/1 condition.
+                 * Fused overflow: CF/OF still live from ADDO/SUBO/MULO —
+                 * jc/jo directly (no setcc+test).  Else test 0/1 cond.
                  * When the true label is the next instruction, invert the
                  * condition and fall through (gcc -O0 shape). */
                 uint8_t cc = 0x85; /* jne */
-                if (fused_cmp_at[j] >= 0) {
+                if (fused_ovf_at[j] >= 0) {
+                    const IRInst *ovf = &fn->insts.data[fused_ovf_at[j]];
+                    cc = ovf->is_unsigned ? 0x82 /* jb/jc */ : 0x80 /* jo */;
+                } else if (fused_cmp_at[j] >= 0) {
                     const IRInst *cmp = &fn->insts.data[fused_cmp_at[j]];
                     int cwidth = cmp->width > 0 ? cmp->width : 8;
                     int64_t cimmv = 0;
@@ -9820,6 +9867,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(needed);
         free(carry_zero_hi);
         free(mul_hi_at);
+        free(fused_cmp_at);
+        free(fused_inv_at);
+        free(fused_ovf_at);
+        free(ovf_keep_flags);
+        free(fused_skip);
+        free(carry_hi_at);
+        free(carry_is_sub);
 
         size_t fn_size = out->text.len - start_offset;
         uint8_t binding = fn->is_static ? 0 /* STB_LOCAL */ : 1 /* STB_GLOBAL */;
