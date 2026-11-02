@@ -2545,6 +2545,99 @@ static IRValue i128_from_scalar(IRFunction *fn, IRValue v, int src_w, int src_u,
     return dst;
 }
 
+
+/* When both operands and the result share the same non-i128 integer type
+ * (width + signedness), infinite-precision overflow into that type is exactly
+ * native-width wraparound.  Prefer that over the general i128 lift — the
+ * latter dominates __builtin_*_overflow microbenchmarks (~2.6x vs gcc -O0).
+ * Mixed signedness / mismatched widths still take the i128 path below. */
+static int overflow_same_type(Type a, Type b, Type res, int *pw, int *pu) {
+    if (type_is_i128(a) || type_is_i128(b) || type_is_i128(res)) return 0;
+    if (a.kind != TY_INT || b.kind != TY_INT || res.kind != TY_INT) return 0;
+    int aw = a.width ? a.width : 4;
+    int bw = b.width ? b.width : 4;
+    int tw = res.width ? res.width : 4;
+    if (aw != bw || aw != tw) return 0;
+    if (aw <= 0 || aw > 8) return 0;
+    if (a.is_unsigned != b.is_unsigned || a.is_unsigned != res.is_unsigned)
+        return 0;
+    *pw = tw;
+    *pu = res.is_unsigned;
+    return 1;
+}
+
+/* Returns i32 overflow flag; stores wrapped result through rptr when rptr >= 0.
+ * is_add / is_sub select the op (else mul). */
+static IRValue overflow_native(IRFunction *fn, IRValue a, IRValue b,
+                               int tw, int tu, int is_add, int is_sub,
+                               IRValue rptr, SourceLoc loc) {
+    a = coerce(fn, a, get_value_width(fn, a), get_value_is_unsigned(fn, a),
+               tw, tu, loc);
+    b = coerce(fn, b, get_value_width(fn, b), get_value_is_unsigned(fn, b),
+               tw, tu, loc);
+    IRValue res;
+    IRValue ov;
+    if (is_add) {
+        res = emit_bin_w(fn, IR_ADD, a, b, tw, tu, loc);
+        if (tu) {
+            ov = emit_bin_w(fn, IR_LT, res, a, tw, 1, loc);
+        } else {
+            IRValue axr = emit_bin_w(fn, IR_BXOR, a, res, tw, 0, loc);
+            IRValue bxr = emit_bin_w(fn, IR_BXOR, b, res, tw, 0, loc);
+            IRValue both = emit_bin_w(fn, IR_BAND, axr, bxr, tw, 0, loc);
+            IRValue z = new_value(fn);
+            emit_inst_w(fn, IR_CONST, z, -1, -1, 0, tw, 0, loc);
+            ov = emit_bin_w(fn, IR_LT, both, z, tw, 0, loc);
+        }
+    } else if (is_sub) {
+        res = emit_bin_w(fn, IR_SUB, a, b, tw, tu, loc);
+        if (tu) {
+            ov = emit_bin_w(fn, IR_LT, a, b, tw, 1, loc);
+        } else {
+            IRValue axb = emit_bin_w(fn, IR_BXOR, a, b, tw, 0, loc);
+            IRValue axr = emit_bin_w(fn, IR_BXOR, a, res, tw, 0, loc);
+            IRValue both = emit_bin_w(fn, IR_BAND, axb, axr, tw, 0, loc);
+            IRValue z = new_value(fn);
+            emit_inst_w(fn, IR_CONST, z, -1, -1, 0, tw, 0, loc);
+            ov = emit_bin_w(fn, IR_LT, both, z, tw, 0, loc);
+        }
+    } else if (tw <= 4) {
+        IRValue a64 = coerce(fn, a, tw, tu, 8, tu, loc);
+        IRValue b64 = coerce(fn, b, tw, tu, 8, tu, loc);
+        IRValue prod = emit_bin_w(fn, IR_MUL, a64, b64, 8, tu, loc);
+        res = coerce(fn, prod, 8, tu, tw, tu, loc);
+        IRValue back = coerce(fn, res, tw, tu, 8, tu, loc);
+        ov = emit_bin_w(fn, IR_NE, prod, back, 8, 1, loc);
+    } else if (tu) {
+        res = emit_bin_w(fn, IR_MUL, a, b, 8, 1, loc);
+        IRValue hi = emit_bin_w(fn, IR_UMULH, a, b, 8, 1, loc);
+        IRValue z = i64imm(fn, 0, loc);
+        ov = emit_bin_w(fn, IR_NE, hi, z, 8, 1, loc);
+    } else {
+        /* signed i64: hi = umulh(a,b) - (a<0 ? b : 0) - (b<0 ? a : 0) */
+        res = emit_bin_w(fn, IR_MUL, a, b, 8, 0, loc);
+        IRValue uhi = emit_bin_w(fn, IR_UMULH, a, b, 8, 1, loc);
+        IRValue z = i64imm(fn, 0, loc);
+        IRValue a_neg = emit_bin_w(fn, IR_LT, a, z, 8, 0, loc);
+        IRValue b_neg = emit_bin_w(fn, IR_LT, b, z, 8, 0, loc);
+        IRValue am = coerce(fn, a_neg, get_value_width(fn, a_neg), 0, 8, 0, loc);
+        IRValue bm = coerce(fn, b_neg, get_value_width(fn, b_neg), 0, 8, 0, loc);
+        am = emit_bin_w(fn, IR_NEG, am, -1, 8, 0, loc);
+        bm = emit_bin_w(fn, IR_NEG, bm, -1, 8, 0, loc);
+        IRValue t1 = emit_bin_w(fn, IR_BAND, am, b, 8, 0, loc);
+        IRValue t2 = emit_bin_w(fn, IR_BAND, bm, a, 8, 0, loc);
+        IRValue hi = emit_bin_w(fn, IR_SUB, uhi, t1, 8, 0, loc);
+        hi = emit_bin_w(fn, IR_SUB, hi, t2, 8, 0, loc);
+        IRValue sh = i64imm(fn, 63, loc);
+        IRValue exp = emit_bin_w(fn, IR_SHR, res, sh, 8, 0, loc);
+        ov = emit_bin_w(fn, IR_NE, hi, exp, 8, 1, loc);
+    }
+    if (rptr >= 0)
+        emit_inst_w(fn, IR_STORE_PTR, -1, rptr, res, 0, tw, tu, loc);
+    return coerce(fn, ov, get_value_width(fn, ov), get_value_is_unsigned(fn, ov),
+                  4, 0, loc);
+}
+
 /* Lift an overflow-builtin operand to a 128-bit slot using *its own*
  * signedness (GCC: both operands are promoted to infinite precision). */
 static IRValue overflow_lift_i128(IRFunction *fn, IRValue v, Type ty,
@@ -8370,12 +8463,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int tu = res_ty.is_unsigned;
             IRValue a = lower_expr(fn, st, arg0);
             IRValue b = lower_expr(fn, st, arg1);
-            /* GCC: promote each operand to infinite precision using its own
-             * signedness, compute, then ask whether the mathematical result
-             * fits in the last argument's type.  64-bit dest-type arithmetic
-             * cannot represent both "signed * unsigned → unsigned long"
-             * (pr30314: 42 * ~0UL/42 fits) and "signed * signed → unsigned
-             * long long" (pr91450: -2 * 1 is negative and overflows). */
+            /* Same-type operands+result: native-width wrap + cheap ov check.
+             * Else GCC infinite-precision via i128 (needed for mixed
+             * signedness: pr30314 / pr91450). */
+            int fw = 0, fu = 0;
+            if (overflow_same_type(arg0->type, arg1->type, res_ty, &fw, &fu)) {
+                IRValue rptr = -1;
+                if (!is_p)
+                    rptr = lower_expr(fn, st, arg2);
+                return overflow_native(fn, a, b, fw, fu, is_add, is_sub,
+                                       rptr, e->loc);
+            }
             IRValue a128 = overflow_lift_i128(fn, a, arg0->type, e->loc);
             IRValue b128 = overflow_lift_i128(fn, b, arg1->type, e->loc);
             IRValue prod = i128_alloc(fn, e->loc);
