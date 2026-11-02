@@ -935,20 +935,69 @@ static void emit_ld_load_op(Buffer *b, EmitModule *out, const IRFunction *fn,
         emit_ld_load(b, v, ld_off);
 }
 
-/* Flush a value parked in st0 back to its home slot (discard CONST). */
-static void x87_flush_st0(Buffer *b, int *st0_v, const int *ld_off,
-                          const IRFunction *fn, const int *ssa_def) {
-    int v = *st0_v;
-    if (v < 0) return;
-    if (ld_is_const(fn, ssa_def, v)) {
-        emit_byte(b, 0xDD); emit_byte(b, 0xD8); /* fstp %st(0) */
-    } else {
-        emit_ld_store(b, v, ld_off);
+/* True when inst references SSA value v as an operand. */
+static int x87_inst_uses_v(const IRInst *n, int v) {
+    if (n->a == v || n->b == v) return 1;
+    if (n->op == IR_CALL && n->call_args) {
+        for (int i = 0; i < n->call_nargs; i++)
+            if (n->call_args[i] == v) return 1;
+        if (n->call_callee == v) return 1;
     }
-    *st0_v = -1;
+    return 0;
 }
 
-/* Keep result in st0 only when the sole use is the next emitted ld consumer. */
+static int x87_is_barrier(const IRInst *n) {
+    switch (n->op) {
+    case IR_LABEL: case IR_BR: case IR_CBR: case IR_CALL:
+    case IR_RETURN: case IR_JMP_PTR: case IR_BR_TABLE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Sole use of `dst` is an ld consumer we can feed from st0 (possibly after
+ * intervening GP ops / other ld defs that push on top). */
+static int x87_is_st0_consumer(const IRInst *n, int dst) {
+    switch (n->op) {
+    case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV:
+    case IR_FCMP:
+        return n->a == dst || n->b == dst;
+    case IR_STORE_PTR: case IR_STORE:
+        return n->b == dst;
+    case IR_COPY: case IR_LOAD:
+        return n->a == dst;
+    case IR_FPTOSI: case IR_RETURN:
+        return n->a == dst;
+    default:
+        return 0;
+    }
+}
+
+/* Flush st0 (and optional st1 underneath) to home slots. */
+static void x87_flush_stack(Buffer *b, int *st0_v, int *st1_v, const int *ld_off,
+                            const IRFunction *fn, const int *ssa_def) {
+    if (*st0_v >= 0) {
+        if (ld_is_const(fn, ssa_def, *st0_v)) {
+            emit_byte(b, 0xDD); emit_byte(b, 0xD8); /* fstp %st(0) */
+        } else {
+            emit_ld_store(b, *st0_v, ld_off);
+        }
+        *st0_v = -1;
+    }
+    if (st1_v && *st1_v >= 0) {
+        if (ld_is_const(fn, ssa_def, *st1_v)) {
+            emit_byte(b, 0xDD); emit_byte(b, 0xD8);
+        } else {
+            emit_ld_store(b, *st1_v, ld_off);
+        }
+        *st1_v = -1;
+    }
+}
+
+/* Compat wrapper: most call sites only track st0. */
+/* Keep in st0 when the sole use is a later ld consumer in this BB, allowing
+ * intervening GP arithmetic (x87 is independent of the integer unit). */
 static int x87_can_keep_st0(const IRFunction *fn, const char *skip_body,
                             const char *fused_skip, const int *raw_uses,
                             size_t j, int dst) {
@@ -960,36 +1009,39 @@ static int x87_can_keep_st0(const IRFunction *fn, const char *skip_body,
         if (sk->op == IR_DBG_VALUE) { k++; continue; }
         if (skip_body && skip_body[k]) { k++; continue; }
         if (fused_skip && fused_skip[k]) { k++; continue; }
-        /* Ops that emit no ld consumer code — keep scanning. */
-        if (sk->op == IR_CONST && sk->call_name && sk->width == 16) {
-            k++; continue;
-        }
-        if (sk->op == IR_ADDR || sk->op == IR_GADDR || sk->op == IR_ALLOCA
-            || sk->op == IR_PARAM) {
-            k++; continue;
-        }
-        break;
+        if (x87_is_barrier(sk)) return 0;
+        if (x87_inst_uses_v(sk, dst))
+            return x87_is_st0_consumer(sk, dst);
+        /* Skip GP ops and unrelated ld defs — they may push on top later. */
+        k++;
     }
-    if (k >= fn->insts.len) return 0;
-    const IRInst *n = &fn->insts.data[k];
-    switch (n->op) {
-    case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV:
-        return n->a == dst || n->b == dst;
-    case IR_FCMP:
-        return n->a == dst || n->b == dst;
-    case IR_STORE_PTR:
-    case IR_STORE:
-        return n->b == dst;
-    case IR_COPY:
-    case IR_LOAD:
-        return n->a == dst;
-    case IR_FPTOSI:
-        return n->a == dst;
-    case IR_RETURN:
-        return n->a == dst;
-    default:
-        return 0;
+    return 0;
+}
+
+/* Upcoming sole use of `dst` is commutative FADD/FMUL with `other` as the
+ * other operand (so we can push dst on top of other already in st0). */
+static int x87_push_on_other(const IRFunction *fn, const char *skip_body,
+                             const char *fused_skip, const int *raw_uses,
+                             size_t j, int dst, int other) {
+    if (other < 0 || dst < 0) return 0;
+    if (!raw_uses || raw_uses[dst] != 1) return 0;
+    size_t k = j + 1;
+    while (k < fn->insts.len) {
+        const IRInst *sk = &fn->insts.data[k];
+        if (sk->op == IR_DBG_VALUE) { k++; continue; }
+        if (skip_body && skip_body[k]) { k++; continue; }
+        if (fused_skip && fused_skip[k]) { k++; continue; }
+        if (x87_is_barrier(sk)) return 0;
+        if (x87_inst_uses_v(sk, dst)) {
+            if ((sk->op == IR_FADD || sk->op == IR_FMUL)
+                && ((sk->a == dst && sk->b == other)
+                    || (sk->b == dst && sk->a == other)))
+                return 1;
+            return 0;
+        }
+        k++;
     }
+    return 0;
 }
 
 /* lea %dst, [rsp]  →  REX 8D [ModRM: mod=00, rm=100 (SIB)] [SIB: base=rsp] */
@@ -5899,9 +5951,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             num_patches++; \
         } while (0)
 
-        /* SSA value currently live in st0 within this basic block, or -1.
+        /* SSA values live in st0 / st1 within this basic block, or -1.
+         * st1 is only set when we push on top of a kept st0 (fild/fldt).
          * Flushed at every block boundary / call so predecessors agree. */
         int x87_st0_v = -1;
+        int x87_st1_v = -1;
 
         /* ---- Instruction loop ---- */
         for (size_t j = 0; j < fn->insts.len; j++) {
@@ -6214,7 +6268,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
                     if (x87_st0_v != inst->a) {
                         if (x87_st0_v >= 0)
-                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                            x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                         emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
                     }
                     if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
@@ -6420,7 +6474,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
                     if (x87_st0_v != inst->a) {
                         if (x87_st0_v >= 0)
-                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                            x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                         emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
                     }
                     if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
@@ -6463,7 +6517,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if ((inst->a >= 0 && value_is_ld(fn, inst->a)) || (inst->b >= 0 && value_is_ld(fn, inst->b))) {
                     if (x87_st0_v != inst->b) {
                         if (x87_st0_v >= 0)
-                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                            x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                         emit_ld_load_op(&out->text, out, fn, ssa_def, inst->b, ld_off);
                     }
                     emit_ld_store(&out->text, inst->a, ld_off);
@@ -6646,7 +6700,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_JMP_PTR: {
-                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                 /* goto *ptr — emit `jmp *r11` (FF /4 with ModRM 0xE3).
                  * We load the pointer into R11 first. */
                 ensure_reg(&out->text, inst->a, REG_R11, ra);
@@ -6658,7 +6712,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_BR_TABLE: {
-                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                 /* Dense switch: bounds already checked.  Emit
                  *   lea rdx, table(%rip)
                  *   movsxd rax, [rdx+rax*4]
@@ -6881,20 +6935,30 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (!folded && af_kind == AF_NONE && rip_sym < 0)
                     ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->dst)) {
-                    if (x87_st0_v >= 0)
-                        x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                    int push = (x87_st0_v >= 0 && x87_st1_v < 0
+                                && x87_push_on_other(fn, skip_body, fused_skip,
+                                                    raw_uses, j, inst->dst,
+                                                    x87_st0_v));
+                    if (x87_st0_v >= 0 && !push)
+                        x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v,
+                                        ld_off, fn, ssa_def);
                     if (folded)
                         emit_x87_fldt_disp(&out->text, REG_RBP, ptr_off);
                     else {
                         emit_byte(&out->text, 0xDB);
                         emit_modrm(&out->text, 0, 5, ptr_r & 7);
                     }
-                    if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
-                                         j, inst->dst)) {
+                    if (push) {
+                        x87_st1_v = x87_st0_v;
                         x87_st0_v = inst->dst;
+                    } else if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
+                                                j, inst->dst)) {
+                        x87_st0_v = inst->dst;
+                        x87_st1_v = -1;
                     } else {
                         emit_ld_store(&out->text, inst->dst, ld_off);
                         x87_st0_v = -1;
+                        x87_st1_v = -1;
                     }
                 } else if (value_is_float_class(fn, inst->dst)) {
                     int dst_xmm = dr >= 0 ? dr : XMM_SCRATCH0;
@@ -7071,7 +7135,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (value_is_ld(fn, inst->b)) {
                     if (x87_st0_v != inst->b) {
                         if (x87_st0_v >= 0)
-                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                            x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                         emit_ld_load_op(&out->text, out, fn, ssa_def, inst->b, ld_off);
                     }
                     if (folded)
@@ -7408,7 +7472,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_LABEL: {
-                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                 if (inst->imm >= 0 && inst->imm < nlabels) {
                     label_off[inst->imm] = out->text.len;
                 }
@@ -7416,7 +7480,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_BR: {
-                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                 /* Fall-through: next real insn is the target label.
                  * Skip IR_DBG_VALUE — markers emit no bytes, so -g must
                  * not force a jmp that plain builds omit. */
@@ -7439,7 +7503,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_CBR: {
-                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                 /* CBR: a = cond, imm = true_label, b = false_label.
                  * Fused compare: `cmp a,b; j<cc> true; jmp false`.
                  * Otherwise test the materialized 0/1 condition.
@@ -7579,7 +7643,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
 
             case IR_CALL: {
-                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                 /* Arm64 memory barrier.  x86 keeps the historical no-op. */
                 if (inst->call_name && strcmp(inst->call_name, "__fakecc_dmb") == 0)
                     break;
@@ -8738,7 +8802,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 /* x87_pair / scalar ld paths reload into st0 below. */
                 if (x87_st0_v >= 0 && !(inst->a >= 0 && x87_st0_v == inst->a
                                        && value_is_ld(fn, inst->a) && !inst->x87_pair))
-                    x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                    x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                 /* Void function: bare `return;` — no value in a.
                  * SysV multi-eightbyte returns: INTEGER eightbytes go to
                  * RAX then RDX; SSE eightbytes go to XMM0 then XMM1. */
@@ -8787,7 +8851,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (value_is_ld(fn, inst->a)) {
                         if (x87_st0_v != inst->a) {
                             if (x87_st0_v >= 0)
-                                x87_flush_st0(&out->text, &x87_st0_v, ld_off,
+                                x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off,
                                               fn, ssa_def);
                             emit_ld_load_op(&out->text, out, fn, ssa_def,
                                             inst->a, ld_off);
@@ -8808,11 +8872,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_FMUL:
             case IR_FDIV: {
                 if (value_is_ld(fn, inst->dst)) {
-                    /* long double arithmetic.  x87 has no fadd/fmul m80
-                     * form (DC /n is m64), so always fldt the right-hand
-                     * operand (frame slot or .LC rip) then faddp/fmulp.
-                     * Keep the result in st0 when the sole next use
-                     * consumes it. */
+                    /* long double: fldt + faddp/fmulp (no m80 mem arith).
+                     * If both operands already sit in st0/st1 (push-on-top
+                     * from a prior keep across GP ops), just faddp. */
                     int pop;
                     switch (inst->op) {
                     case IR_FADD: pop = 0xC1; break; /* faddp */
@@ -8821,18 +8883,46 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     default:      pop = 0xF9; break; /* fdivp */
                     }
                     int commutative = (inst->op == IR_FADD || inst->op == IR_FMUL);
-                    int left = inst->a, right = inst->b;
-                    if (commutative && x87_st0_v == inst->b && x87_st0_v != inst->a) {
-                        left = inst->b;
-                        right = inst->a;
+                    int both_on_stack = 0;
+                    if (x87_st0_v >= 0 && x87_st1_v >= 0
+                        && ((x87_st0_v == inst->a && x87_st1_v == inst->b)
+                            || (x87_st0_v == inst->b && x87_st1_v == inst->a))) {
+                        /* st0=one op, st1=other.  faddp/fmulp: st1 = st1 op st0.
+                         * Historical fsubrp: st1 = st0 - st1 (load a then b).
+                         * Match: want st0=b, st1=a for FSUB/FDIV. */
+                        if (commutative) {
+                            both_on_stack = 1;
+                        } else if (x87_st0_v == inst->b && x87_st1_v == inst->a) {
+                            both_on_stack = 1;
+                        } else {
+                            /* wrong order for sub/div — spill and reload. */
+                            x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v,
+                                            ld_off, fn, ssa_def);
+                        }
                     }
-                    if (x87_st0_v != left) {
-                        if (x87_st0_v >= 0)
-                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
-                        emit_ld_load_op(&out->text, out, fn, ssa_def, left, ld_off);
+                    if (both_on_stack) {
+                        emit_x87_arith_pop(&out->text, pop);
+                        x87_st1_v = -1;
+                    } else {
+                        int left = inst->a, right = inst->b;
+                        if (commutative && x87_st0_v == inst->b
+                            && x87_st0_v != inst->a && x87_st1_v < 0) {
+                            left = inst->b;
+                            right = inst->a;
+                        }
+                        if (x87_st0_v == left && x87_st1_v < 0) {
+                            /* left already in st0 */
+                        } else {
+                            if (x87_st0_v >= 0 || x87_st1_v >= 0)
+                                x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v,
+                                                ld_off, fn, ssa_def);
+                            emit_ld_load_op(&out->text, out, fn, ssa_def, left,
+                                            ld_off);
+                        }
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, right, ld_off);
+                        emit_x87_arith_pop(&out->text, pop);
                     }
-                    emit_ld_load_op(&out->text, out, fn, ssa_def, right, ld_off);
-                    emit_x87_arith_pop(&out->text, pop);
+                    x87_st1_v = -1;
                     if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
                                          j, inst->dst)) {
                         x87_st0_v = inst->dst;
@@ -8895,7 +8985,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      * GCC cmplt/cmpgt.  Zero RDX before (xor clobbers flags). */
                     int is_lt_le = (inst->is_unsigned == 0 || inst->is_unsigned == 1);
                     if (x87_st0_v >= 0)
-                        x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                     emit_xor_rr(&out->text, REG_RDX);
                     if (is_lt_le) {
                         emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
@@ -8998,18 +9088,31 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int src_u = inst->is_unsigned;
                 int dst_is_f = (inst->width == 4);
                 if (value_is_ld(fn, inst->dst)) {
-                    /* int→long double via fild; keep st0 when sole next use. */
-                    if (x87_st0_v >= 0)
-                        x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                    /* int→ld via fild.  If st0 already holds the other operand
+                     * of an upcoming commutative FADD/FMUL with this result,
+                     * push on top (gcc: fild; fldt x; faddp — we do the
+                     * reverse order which is fine for add/mul). */
+                    int push = (x87_st0_v >= 0 && x87_st1_v < 0
+                                && x87_push_on_other(fn, skip_body, fused_skip,
+                                                    raw_uses, j, inst->dst,
+                                                    x87_st0_v));
+                    if (x87_st0_v >= 0 && !push)
+                        x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v,
+                                        ld_off, fn, ssa_def);
                     ensure_reg(&out->text, inst->a, REG_RAX, ra);
                     emit_ld_from_gp_int_st0(&out->text, REG_RAX, inst->dst, ld_off,
                                             src_w, src_u);
-                    if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
-                                         j, inst->dst)) {
+                    if (push) {
+                        x87_st1_v = x87_st0_v;
                         x87_st0_v = inst->dst;
+                    } else if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
+                                                j, inst->dst)) {
+                        x87_st0_v = inst->dst;
+                        x87_st1_v = -1;
                     } else {
                         emit_ld_store(&out->text, inst->dst, ld_off);
                         x87_st0_v = -1;
+                        x87_st1_v = -1;
                     }
                     break;
                 }
@@ -9060,7 +9163,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                    (int64_t)0x4000000000000000LL);
                     emit_store_rsp_off(&out->text, REG_RAX, 0);
                     if (x87_st0_v >= 0)
-                        x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                     emit_lea_rsp0(&out->text, REG_RCX);
                     emit_byte(&out->text, 0xDF);
                     emit_modrm(&out->text, 0, 5, REG_RCX & 7); /* fild qword */
@@ -9097,7 +9200,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      * RAX/RCX/RDX. */
                     if (x87_st0_v != inst->a) {
                         if (x87_st0_v >= 0)
-                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                            x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                         emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
                     }
                     x87_st0_v = -1; /* fisttp will pop */
@@ -9225,7 +9328,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     int dst_is_f32 = inst->width == 4;
                     if (x87_st0_v != inst->a) {
                         if (x87_st0_v >= 0)
-                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                            x87_flush_stack(&out->text, &x87_st0_v, &x87_st1_v, ld_off, fn, ssa_def);
                         emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
                     }
                     x87_st0_v = -1; /* narrowing store pops */
