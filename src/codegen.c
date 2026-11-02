@@ -2429,6 +2429,82 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
     finish_gp_dst(b, acc, dr, inst->dst, ra, width, inst->is_unsigned);
 }
 
+/* IR_ADDO/SUBO/MULO: wrapped result in dst, overflow flag in c.
+ * Match gcc -O0: add/sub/imul then setc/seto (CF unsigned / OF signed).
+ * Operands are materialised first; only then is the flag reg zeroed so a
+ * later setcc yields a clean 0/1 without a movzx. */
+static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
+                     const int *def, const RAResult *ra, int dr) {
+    int width = inst->width > 0 ? inst->width : 8;
+    int tu = inst->is_unsigned;
+    int ov_dr = gp_home(ra, inst->c);
+    int64_t imm_b = 0;
+    int fb = !(inst->op == IR_MULO && tu)
+             && ssa_const_imm(fn, def, inst->b, &imm_b) && imm_fits_i32(imm_b);
+    int bhome = fb ? -1 : gp_home(ra, inst->b);
+    int ov, acc, br = -1;
+    uint8_t cc;
+
+    if (inst->op == IR_MULO && tu) {
+        br = bhome >= 0 ? bhome : REG_RCX;
+        ensure_reg(b, inst->b, br, ra);
+        if (br == REG_RAX) {
+            emit_mov_rr(b, REG_RCX, br);
+            br = REG_RCX;
+        }
+        ensure_reg(b, inst->a, REG_RAX, ra);
+        if (br == REG_RAX) {
+            ensure_reg(b, inst->b, REG_RCX, ra);
+            br = REG_RCX;
+        }
+        ov = (ov_dr >= 0 && ov_dr != REG_RAX && ov_dr != REG_RDX && ov_dr != br)
+             ? ov_dr
+             : ((br != REG_RCX) ? REG_RCX : REG_RBX);
+        emit_xor_rr(b, ov);
+        emit_rex_if(b, alu_w64(width), 0, 0, br);
+        emit_byte(b, 0xF7);
+        emit_modrm(b, 3, 4, br & 7);
+        emit_setcc_r(b, 0x92 /* setc */, ov);
+        finish_gp_dst(b, REG_RAX, dr, inst->dst, ra, width, 1);
+    } else {
+        if (!fb) {
+            br = bhome >= 0 ? bhome : REG_RCX;
+            ensure_reg(b, inst->b, br, ra);
+        }
+        acc = pick_alu_acc(dr, br >= 0 ? br : -1);
+        if (acc == br)
+            acc = (br != REG_RAX) ? REG_RAX : REG_RCX;
+        ensure_reg(b, inst->a, acc, ra);
+
+        ov = (ov_dr >= 0 && ov_dr != acc && ov_dr != br && ov_dr != REG_RAX)
+             ? ov_dr : REG_RDX;
+        if (ov == acc || ov == br)
+            ov = (acc != REG_RCX && br != REG_RCX) ? REG_RCX : REG_RBX;
+        emit_xor_rr(b, ov);
+
+        if (inst->op == IR_MULO) {
+            if (fb) emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
+            else emit_imul_rr_w(b, acc, br, width);
+            finish_gp_dst(b, acc, dr, inst->dst, ra, width, 0);
+            cc = 0x90;
+        } else {
+            uint8_t rr_op = (inst->op == IR_SUBO) ? 0x29 : 0x01;
+            int imm_ext = (inst->op == IR_SUBO) ? 5 : 0;
+            if (fb) emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_b, width);
+            else emit_arith_rr_w(b, rr_op, acc, br, width);
+            finish_gp_dst(b, acc, dr, inst->dst, ra, width, tu);
+            cc = tu ? 0x92 : 0x90;
+        }
+        emit_setcc_r(b, cc, ov);
+    }
+
+    if (ov_dr >= 0) {
+        if (ov_dr != ov) emit_mov_rr(b, ov_dr, ov);
+    } else {
+        spill_if_needed(b, inst->c, ov, ra);
+    }
+}
+
 static void isel_shift(Buffer *b, const IRInst *inst, const IRFunction *fn,
                        const int *def, const RAResult *ra, int dr, int ext) {
     int width = inst->width > 0 ? inst->width : 8;
@@ -3595,8 +3671,11 @@ static int *codegen_build_defs(const IRFunction *fn) {
     int *def = xmalloc((size_t)(nv > 0 ? nv : 1) * sizeof(int));
     for (int i = 0; i < nv; i++) def[i] = -1;
     for (size_t i = 0; i < fn->insts.len; i++) {
-        int d = fn->insts.data[i].dst;
+        const IRInst *inst = &fn->insts.data[i];
+        int d = inst->dst;
         if (d >= 0 && d < nv) def[d] = (int)i;
+        if (ir_op_with_overflow(inst->op) && inst->c >= 0 && inst->c < nv)
+            def[inst->c] = (int)i;
     }
     return def;
 }
@@ -3630,8 +3709,11 @@ static void codegen_set_def_count(const IRFunction *fn) {
     memset(g_def_count, 0, (size_t)n * sizeof(int));
     g_def_count_n = n;
     for (size_t i = 0; i < fn->insts.len; i++) {
-        int d = fn->insts.data[i].dst;
+        const IRInst *inst = &fn->insts.data[i];
+        int d = inst->dst;
         if (d >= 0 && d < n) g_def_count[d]++;
+        if (ir_op_with_overflow(inst->op) && inst->c >= 0 && inst->c < n)
+            g_def_count[inst->c]++;
     }
 }
 
@@ -6223,6 +6305,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 break;
             }
+
+            case IR_ADDO:
+            case IR_SUBO:
+            case IR_MULO:
+                isel_ovf(&out->text, inst, fn, ssa_def, ra, dr);
+                break;
 
             case IR_ADD: {
                 IRValue li = -1;

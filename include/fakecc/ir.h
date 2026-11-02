@@ -21,6 +21,13 @@ typedef enum {
     IR_SUB,         /* dst = a - b */
     IR_MUL,         /* dst = a * b */
     IR_UMULH,       /* dst = high 64 bits of unsigned 64x64 multiply */
+    /* With-overflow arithmetic: dst = wrapped a op b; c = i32 overflow
+     * flag (0/1).  is_unsigned selects CF (unsigned) vs OF (signed) on
+     * x86, and CS/VS on a64.  Used by __builtin_*_overflow when both
+     * operands and the result share a native integer type. */
+    IR_ADDO,        /* dst = a + b; c = overflow */
+    IR_SUBO,        /* dst = a - b; c = overflow */
+    IR_MULO,        /* dst = a * b; c = overflow */
     IR_DIV,         /* dst = a / b  (signed) */
     IR_MOD,         /* dst = a % b  (signed) */
     IR_NEG,         /* dst = -a */
@@ -401,5 +408,11 @@ int ir_builtin_disabled(const char *name);
 /* Return the live struct registry during lowering (NULL outside it).
  * type_size() uses this to refresh stale cached struct widths. */
 const StructRegistry *get_ir_structs(void);
+
+
+/* True for IR_ADDO/SUBO/MULO — `c` is a second SSA def (overflow flag). */
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 
 #endif /* FAKECC_IR_H */

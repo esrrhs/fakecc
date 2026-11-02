@@ -4265,6 +4265,76 @@ static int fold_page_addend(C64 *c, const IRInst *s) {
     return 1;
 }
 
+/* IR_ADDO/SUBO/MULO: result in dst, overflow flag in c. */
+static void emit_ovf(C64 *c, const IRInst *s) {
+    A64Asm *a = c->as;
+    int d = dst_reg(c, s->dst);
+    int ov = dst_reg(c, s->c);
+    int is64 = s->width == 8;
+    int ra = load_op(c, s->a, -1);
+    int rb = load_op(c, s->b, ra);
+    int tu = s->is_unsigned;
+
+    if (s->op == IR_ADDO) {
+        a64_add_reg(a, d, ra, rb, A64_LSL, 0, is64, 1 /* sets NZCV */);
+        a64_cset(a, ov, tu ? A64_CS : A64_VS, 0);
+    } else if (s->op == IR_SUBO) {
+        a64_sub_reg(a, d, ra, rb, A64_LSL, 0, is64, 1);
+        /* Unsigned sub overflow = borrow = C clear; signed = V set. */
+        a64_cset(a, ov, tu ? A64_CC : A64_VS, 0);
+    } else {
+        /* MULO: mul then check high half / sign. */
+        a64_mul(a, d, ra, rb, is64);
+        if (tu) {
+            if (is64) {
+                int hi = (SCR1 != d && SCR1 != ra && SCR1 != rb) ? SCR1 : A64_X0;
+                a64_umulh(a, hi, ra, rb);
+                a64_cmp_imm12(a, hi, 0, 0, 1);
+                a64_cset(a, ov, A64_NE, 0);
+            } else {
+                /* UMULL into xTMP, compare high 32 with 0. */
+                int wide = (SCR1 != d) ? SCR1 : A64_X0;
+                /* UMULL Xd, Wn, Wm */
+                a64_word(a, 0x9BA07C00u
+                         | ((uint32_t)(rb & 31) << 16)
+                         | ((uint32_t)(ra & 31) << 5)
+                         | (uint32_t)(wide & 31));
+                a64_lsr_imm(a, wide, wide, 32, 1);
+                a64_cmp_imm12(a, wide, 0, 0, 1);
+                a64_cset(a, ov, A64_NE, 0);
+            }
+        } else if (is64) {
+            /* signed i64: SMULH then compare to ASR #63 of product. */
+            int hi = (SCR1 != d && SCR1 != ra && SCR1 != rb) ? SCR1 : A64_X0;
+            /* SMULH Xd, Xn, Xm */
+            a64_word(a, 0x9B407C00u
+                     | ((uint32_t)(rb & 31) << 16)
+                     | ((uint32_t)(ra & 31) << 5)
+                     | (uint32_t)(hi & 31));
+            int exp = (hi != SCR1 && SCR1 != d) ? SCR1 : A64_X16;
+            if (exp == hi) exp = A64_X17;
+            a64_asr_imm(a, exp, d, 63, 1);
+            a64_cmp_reg(a, hi, exp, 1);
+            a64_cset(a, ov, A64_NE, 0);
+        } else {
+            /* SMULL to 64, check high 32 equals sign of low. */
+            int wide = (SCR1 != d) ? SCR1 : A64_X0;
+            a64_word(a, 0x9B207C00u
+                     | ((uint32_t)(rb & 31) << 16)
+                     | ((uint32_t)(ra & 31) << 5)
+                     | (uint32_t)(wide & 31));
+            int exp = (wide != SCR1 && SCR1 != d) ? SCR1 : A64_X16;
+            if (exp == wide) exp = A64_X17;
+            a64_asr_imm(a, exp, d, 31, 1);
+            a64_lsr_imm(a, wide, wide, 32, 1);
+            a64_cmp_reg(a, wide, exp, 1);
+            a64_cset(a, ov, A64_NE, 0);
+        }
+    }
+    commit(c, s->dst, d);
+    commit(c, s->c, ov);
+}
+
 static void emit_binop(C64 *c, const IRInst *s) {
     if (fold_page_addend(c, s)) return;
     A64Asm *a = c->as;
@@ -5288,6 +5358,9 @@ static void emit_function(C64 *c, int fi) {
             commit(c, s->dst, d);
             break;
         }
+        case IR_ADDO: case IR_SUBO: case IR_MULO:
+            emit_ovf(c, s);
+            break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_UMULH:
         case IR_DIV: case IR_MOD:
         case IR_BAND: case IR_BOR: case IR_BXOR: case IR_SHL: case IR_SHR:

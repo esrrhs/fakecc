@@ -2567,7 +2567,8 @@ static int overflow_same_type(Type a, Type b, Type res, int *pw, int *pu) {
 }
 
 /* Returns i32 overflow flag; stores wrapped result through rptr when rptr >= 0.
- * is_add / is_sub select the op (else mul). */
+ * is_add / is_sub select the op (else mul).  Emits IR_ADDO/SUBO/MULO so
+ * codegen can use add;setc / imul;seto (gcc -O0) instead of a compare tree. */
 static IRValue overflow_native(IRFunction *fn, IRValue a, IRValue b,
                                int tw, int tu, int is_add, int is_sub,
                                IRValue rptr, SourceLoc loc) {
@@ -2575,67 +2576,28 @@ static IRValue overflow_native(IRFunction *fn, IRValue a, IRValue b,
                tw, tu, loc);
     b = coerce(fn, b, get_value_width(fn, b), get_value_is_unsigned(fn, b),
                tw, tu, loc);
-    IRValue res;
-    IRValue ov;
-    if (is_add) {
-        res = emit_bin_w(fn, IR_ADD, a, b, tw, tu, loc);
-        if (tu) {
-            ov = emit_bin_w(fn, IR_LT, res, a, tw, 1, loc);
-        } else {
-            IRValue axr = emit_bin_w(fn, IR_BXOR, a, res, tw, 0, loc);
-            IRValue bxr = emit_bin_w(fn, IR_BXOR, b, res, tw, 0, loc);
-            IRValue both = emit_bin_w(fn, IR_BAND, axr, bxr, tw, 0, loc);
-            IRValue z = new_value(fn);
-            emit_inst_w(fn, IR_CONST, z, -1, -1, 0, tw, 0, loc);
-            ov = emit_bin_w(fn, IR_LT, both, z, tw, 0, loc);
-        }
-    } else if (is_sub) {
-        res = emit_bin_w(fn, IR_SUB, a, b, tw, tu, loc);
-        if (tu) {
-            ov = emit_bin_w(fn, IR_LT, a, b, tw, 1, loc);
-        } else {
-            IRValue axb = emit_bin_w(fn, IR_BXOR, a, b, tw, 0, loc);
-            IRValue axr = emit_bin_w(fn, IR_BXOR, a, res, tw, 0, loc);
-            IRValue both = emit_bin_w(fn, IR_BAND, axb, axr, tw, 0, loc);
-            IRValue z = new_value(fn);
-            emit_inst_w(fn, IR_CONST, z, -1, -1, 0, tw, 0, loc);
-            ov = emit_bin_w(fn, IR_LT, both, z, tw, 0, loc);
-        }
-    } else if (tw <= 4) {
-        IRValue a64 = coerce(fn, a, tw, tu, 8, tu, loc);
-        IRValue b64 = coerce(fn, b, tw, tu, 8, tu, loc);
-        IRValue prod = emit_bin_w(fn, IR_MUL, a64, b64, 8, tu, loc);
-        res = coerce(fn, prod, 8, tu, tw, tu, loc);
-        IRValue back = coerce(fn, res, tw, tu, 8, tu, loc);
-        ov = emit_bin_w(fn, IR_NE, prod, back, 8, 1, loc);
-    } else if (tu) {
-        res = emit_bin_w(fn, IR_MUL, a, b, 8, 1, loc);
-        IRValue hi = emit_bin_w(fn, IR_UMULH, a, b, 8, 1, loc);
-        IRValue z = i64imm(fn, 0, loc);
-        ov = emit_bin_w(fn, IR_NE, hi, z, 8, 1, loc);
-    } else {
-        /* signed i64: hi = umulh(a,b) - (a<0 ? b : 0) - (b<0 ? a : 0) */
-        res = emit_bin_w(fn, IR_MUL, a, b, 8, 0, loc);
-        IRValue uhi = emit_bin_w(fn, IR_UMULH, a, b, 8, 1, loc);
-        IRValue z = i64imm(fn, 0, loc);
-        IRValue a_neg = emit_bin_w(fn, IR_LT, a, z, 8, 0, loc);
-        IRValue b_neg = emit_bin_w(fn, IR_LT, b, z, 8, 0, loc);
-        IRValue am = coerce(fn, a_neg, get_value_width(fn, a_neg), 0, 8, 0, loc);
-        IRValue bm = coerce(fn, b_neg, get_value_width(fn, b_neg), 0, 8, 0, loc);
-        am = emit_bin_w(fn, IR_NEG, am, -1, 8, 0, loc);
-        bm = emit_bin_w(fn, IR_NEG, bm, -1, 8, 0, loc);
-        IRValue t1 = emit_bin_w(fn, IR_BAND, am, b, 8, 0, loc);
-        IRValue t2 = emit_bin_w(fn, IR_BAND, bm, a, 8, 0, loc);
-        IRValue hi = emit_bin_w(fn, IR_SUB, uhi, t1, 8, 0, loc);
-        hi = emit_bin_w(fn, IR_SUB, hi, t2, 8, 0, loc);
-        IRValue sh = i64imm(fn, 63, loc);
-        IRValue exp = emit_bin_w(fn, IR_SHR, res, sh, 8, 0, loc);
-        ov = emit_bin_w(fn, IR_NE, hi, exp, 8, 1, loc);
-    }
+    IRValue res = new_value(fn);
+    IRValue ov = new_value(fn);
+    IROpcode op = is_add ? IR_ADDO : (is_sub ? IR_SUBO : IR_MULO);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = op;
+    inst.dst = res;
+    inst.a = a;
+    inst.b = b;
+    inst.c = ov;
+    inst.d = -1;
+    inst.imm = 0;
+    inst.loc = loc;
+    inst.width = tw;
+    inst.is_unsigned = tu;
+    inst.call_callee = -1;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, res, tw, tu);
+    set_value_type(fn, ov, 4, 0);
     if (rptr >= 0)
         emit_inst_w(fn, IR_STORE_PTR, -1, rptr, res, 0, tw, tu, loc);
-    return coerce(fn, ov, get_value_width(fn, ov), get_value_is_unsigned(fn, ov),
-                  4, 0, loc);
+    return ov;
 }
 
 /* Lift an overflow-builtin operand to a 128-bit slot using *its own*
