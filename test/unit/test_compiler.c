@@ -186,6 +186,32 @@ static void test_deep_add_chain(void) {
     remove(out);
 }
 
+/* Regression: merging `extern T x;` with a later `T x = <non-const>;`
+ * used to alias the initializer Expr onto both Stmts, then die_at+cleanup
+ * freed it twice (fuzz_compile ASan heap-use-after-free in expr_free). */
+static void test_extern_redecl_nonconst_init_no_uaf(void) {
+    const char *out = TMP_DIR PATH_SEP "test_compiler_redecl_init.o";
+    const char *crash =
+        "package main;\n"
+        "extern volatile int ReadyFlag_NotProperlyInitialized;\n"
+        "volatile int ReadyFlag_NotProperlyInitialized=ProperlyInitialized=1;\n"
+        "int main(void) {\n"
+        "  if (ReadyFlag_Not!= 1)\n"
+        "    __builtin_abort ();\n"
+        "  return 0;\n"
+        "}\n";
+    const char *ok =
+        "package main;\n"
+        "extern int g;\n"
+        "int g = 42;\n"
+        "int main(void) { return g; }\n";
+    fakecc_set_quiet(1);
+    T_ASSERT(fakecc_compile_string_to_obj(crash, out, NULL) != 0);
+    fakecc_set_quiet(0);
+    T_ASSERT_EQ_INT(fakecc_compile_string_to_obj(ok, out, NULL), 0);
+    remove(out);
+}
+
 int main(void) {
     /* The high-level API cases below assert ELF output; pin the x86-64
      * backend until the arm64-macos backend lands. */
@@ -197,5 +223,6 @@ int main(void) {
     test_reject_then_compile();
     test_struct_bitfield_realloc();
     test_deep_add_chain();
+    test_extern_redecl_nonconst_init_no_uaf();
     return t_finalize();
 }
