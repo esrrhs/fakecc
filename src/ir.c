@@ -4992,7 +4992,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 
 static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
                                   Type lt, Type rt, BinOp bop,
-                                  IRValue forced_l_addr) {
+                                  IRValue forced_l_addr, IRValue dest_addr) {
     if (fakecc_had_error()) return FAKECC_ERR;
     int lt_is_cplx = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
     int rt_is_cplx = (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0);
@@ -5117,30 +5117,70 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
     IROpcode div_op = is_float ? IR_FDIV : IR_DIV;
     
     if (bop == BOP_ADD) {
-        out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
-        out_i = emit_bin_w(fn, add_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        /* complex ± real: imag is unchanged / just copied — skip the
+         * add-with-zero that the real-promoted imag path would emit. */
+        if (!rt_is_cplx) {
+            out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = l_imag;
+        } else if (!lt_is_cplx) {
+            out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = r_imag;
+        } else {
+            out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = emit_bin_w(fn, add_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        }
     } else if (bop == BOP_SUB) {
-        out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
-        out_i = emit_bin_w(fn, sub_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        if (!rt_is_cplx) {
+            out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = l_imag;
+        } else if (!lt_is_cplx) {
+            out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
+            /* real - complex: imag = -r_imag */
+            if (is_float) {
+                IRValue z = emit_float_const(fn, elem_sz, 0, e->loc);
+                out_i = emit_bin_w(fn, sub_op, z, r_imag, elem_sz, 1, e->loc);
+            } else {
+                IRValue z = new_value(fn);
+                emit_inst_w(fn, IR_CONST, z, -1, -1, 0, elem_sz, 1, e->loc);
+                out_i = emit_bin_w(fn, sub_op, z, r_imag, elem_sz, 1, e->loc);
+            }
+        } else {
+            out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = emit_bin_w(fn, sub_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        }
     } else if (bop == BOP_MUL) {
-        /* (ac-bd) + (ad+bc)i.  Float intermediates must be marked so RA
-         * homes them in XMM; otherwise the FMUL/FSUB results never land. */
-        IRValue r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
-        IRValue r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
-        if (is_float) {
-            set_value_float(fn, r1, 1);
-            set_value_float(fn, r2, 1);
-        }
-        out_r = emit_bin_w(fn, sub_op, r1, r2, elem_sz, 1, e->loc);
-        if (is_float) set_value_float(fn, out_r, 1);
+        /* Real×complex / complex×real: two real multiplies (covers the hot
+         * `z * 0.5` scale).  Full complex×complex stays the classic
+         * (ac-bd)+(ad+bc)i product — a libcall was tried and lost at -O0
+         * because marshalling six args into the SysV XMM ABI dominated. */
+        int r_is_real = !rt_is_cplx;
+        int l_is_real = !lt_is_cplx;
+        if (is_float && (r_is_real || l_is_real)) {
+            IRValue scale = r_is_real ? r_real : l_real;
+            IRValue ar = r_is_real ? l_real : r_real;
+            IRValue ai = r_is_real ? l_imag : r_imag;
+            out_r = emit_bin_w(fn, mul_op, ar, scale, elem_sz, 1, e->loc);
+            set_value_float(fn, out_r, 1);
+            out_i = emit_bin_w(fn, mul_op, ai, scale, elem_sz, 1, e->loc);
+            set_value_float(fn, out_i, 1);
+        } else {
+            IRValue r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
+            IRValue r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
+            if (is_float) {
+                set_value_float(fn, r1, 1);
+                set_value_float(fn, r2, 1);
+            }
+            out_r = emit_bin_w(fn, sub_op, r1, r2, elem_sz, 1, e->loc);
+            if (is_float) set_value_float(fn, out_r, 1);
 
-        IRValue i1 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
-        IRValue i2 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
-        if (is_float) {
-            set_value_float(fn, i1, 1);
-            set_value_float(fn, i2, 1);
+            IRValue i1 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
+            IRValue i2 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
+            if (is_float) {
+                set_value_float(fn, i1, 1);
+                set_value_float(fn, i2, 1);
+            }
+            out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
         }
-        out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
     } else if (bop == BOP_DIV) {
         if (is_float && elem_sz <= 8 && type_long_double_width() < 16) {
             /* The platform has no float wider than double (arm64 Darwin's
@@ -5329,15 +5369,21 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
         set_value_float(fn, out_i, 1);
     }
     
-    /* Allocate stack slot for result struct */
+    /* Store into caller-provided dest when present — avoids a temp slot
+     * and a later struct_copy for `z = z * w` / `z *= w`. */
     int total_sz = elem_sz * 2;
-    IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
-    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    IRValue addr = dest_addr;
+    if (addr < 0) {
+        IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+        addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    }
     emit_inst_w(fn, IR_STORE_PTR, -1, addr, out_r, 0, elem_sz, 1, e->loc);
+    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
     IRValue off = new_value(fn);
     emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
     IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
     emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, out_i, 0, elem_sz, 1, e->loc);
+    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
     return addr;
 }
 
@@ -6845,7 +6891,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
-            return lower_complex_binop(fn, st, e, lt, rt, bop, -1);
+            return lower_complex_binop(fn, st, e, lt, rt, bop, -1, -1);
         }
         if (type_is_i128(lt) || type_is_i128(rt) || type_is_i128(e->type)) {
             if (type_is_i128(e->type) && i128_pair_shape(e)) {
@@ -7274,6 +7320,32 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                                          e->u.assign.rvalue->u.bin.r->type,
                                          e->u.assign.rvalue->u.bin.op, dst);
             }
+        }
+        /* `z = z * w` / `z = a + b` on a complex lvalue: lower the binop
+         * straight into z (avoids a temp + struct_copy). Loads happen
+         * before the final store, so a self-update is safe. */
+        if (lv->type.kind == TY_STRUCT && lv->type.tag
+            && strncmp(lv->type.tag, "__complex_", 10) == 0
+            && e->u.assign.rvalue && e->u.assign.rvalue->kind == EX_BINOP
+            && e->u.assign.rvalue->type.kind == TY_STRUCT
+            && e->u.assign.rvalue->type.tag
+            && strcmp(lv->type.tag, e->u.assign.rvalue->type.tag) == 0
+            && (lv->kind == EX_VAR || lv->kind == EX_DEREF
+                || lv->kind == EX_INDEX || lv->kind == EX_MEMBER)) {
+            IRValue dst = lower_lvalue_addr(fn, st, lv);
+            if (dst < 0) return dst;
+            Expr *rhs = e->u.assign.rvalue;
+            /* When the binop's left operand is the same EX_VAR, share the
+             * address so we do not re-materialize it for the load. */
+            IRValue forced = -1;
+            if (rhs->u.bin.l && rhs->u.bin.l->kind == EX_VAR
+                && lv->kind == EX_VAR
+                && lv->u.var.name && rhs->u.bin.l->u.var.name
+                && strcmp(lv->u.var.name, rhs->u.bin.l->u.var.name) == 0)
+                forced = dst;
+            return lower_complex_binop(fn, st, rhs, rhs->u.bin.l->type,
+                                       rhs->u.bin.r->type, rhs->u.bin.op,
+                                       forced, dst);
         }
         /* `p = f();` with a register-returned struct: store into p. */
         if (e->u.assign.rvalue && e->u.assign.rvalue->kind == EX_CALL
@@ -10023,11 +10095,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             fake_bin.u.bin.op = op;
             fake_bin.u.bin.l = lv;
             fake_bin.u.bin.r = e->u.comp.rvalue;
-            IRValue res_addr = lower_complex_binop(fn, st, &fake_bin, lv->type,
-                                                   e->u.comp.rvalue->type, op,
-                                                   addr);
-            emit_struct_copy(fn, addr, res_addr, type_size(lv->type), e->loc);
-            return res_addr;
+            /* Write the product/sum straight into the lvalue. */
+            return lower_complex_binop(fn, st, &fake_bin, lv->type,
+                                       e->u.comp.rvalue->type, op,
+                                       addr, addr);
         }
         if (lv->type.is_decimal) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
