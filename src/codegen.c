@@ -881,18 +881,115 @@ static void emit_x87_fcomip(Buffer *b) {
 static void emit_ld_addr(Buffer *b, int reg, int ld_off);
 static void emit_store_base_off(Buffer *b, int base, int reg, int off);
 static void emit_load_base_off(Buffer *b, int dst, int base, int off);
+static void emit_x87_fldt_disp(Buffer *b, int base, int off);
+static void emit_x87_fstpt_disp(Buffer *b, int base, int off);
+static int value_is_ld(const IRFunction *fn, int v);
 
-/* Materialize long-double value `v`'s slot address into RCX, then fldt it
- * into st0.  `ld_off` is the prologue-computed rbp-relative slot array. */
-static void emit_ld_load(Buffer *b, int v, const int *ld_off) {
-    emit_ld_addr(b, REG_RCX, ld_off[v]);
-    emit_x87_fldtRCX(b);
+/* fldt m80 from [rip+disp].  Prefer over lea+fldtRCX so constants match
+ * gcc -O0's fldt .LC(%rip).  Slot loads use emit_x87_fldt_disp. */
+static size_t emit_x87_fldt_rip(Buffer *b) {
+    emit_byte(b, 0xDB);
+    emit_modrm(b, 0, 5, 5); /* mod=00 rm=5 → rip+disp32 */
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
 }
 
-/* Load st0 into long-double value `v`'s slot and pop. */
+/* True when SSA value `v` is an IR_CONST long double (rodata symbol). */
+static int ld_is_const(const IRFunction *fn, const int *ssa_def, int v) {
+    if (v < 0 || v >= fn->next_value_id || !ssa_def || ssa_def[v] < 0) return 0;
+    const IRInst *d = &fn->insts.data[ssa_def[v]];
+    return d->op == IR_CONST && d->call_name != NULL;
+}
+
+static const char *ld_const_name(const IRFunction *fn, const int *ssa_def, int v) {
+    return fn->insts.data[ssa_def[v]].call_name;
+}
+
+/* fldt from a rodata long-double constant; returns 1 on success. */
+static int emit_ld_fldt_const(Buffer *b, EmitModule *out, const char *name) {
+    if (!name) return 0;
+    size_t patch = emit_x87_fldt_rip(b);
+    int gsym = emit_module_find_symbol(out, name);
+    if (gsym < 0) gsym = emit_module_add_undefined(out, name);
+    emit_module_add_reloc(out, patch, R_X86_64_PC32, gsym, -4);
+    return 1;
+}
+
+/* Materialize long-double value `v` into st0 from its frame slot. */
+static void emit_ld_load(Buffer *b, int v, const int *ld_off) {
+    emit_x87_fldt_disp(b, REG_RBP, ld_off[v]);
+}
+
+/* Store st0 into long-double value `v`'s slot and pop. */
 static void emit_ld_store(Buffer *b, int v, const int *ld_off) {
-    emit_ld_addr(b, REG_RCX, ld_off[v]);
-    emit_x87_fstptRCX(b);
+    emit_x87_fstpt_disp(b, REG_RBP, ld_off[v]);
+}
+
+/* Load ld operand `v` into st0: CONST → fldt .LC(%rip), else slot. */
+static void emit_ld_load_op(Buffer *b, EmitModule *out, const IRFunction *fn,
+                            const int *ssa_def, int v, const int *ld_off) {
+    if (ld_is_const(fn, ssa_def, v))
+        emit_ld_fldt_const(b, out, ld_const_name(fn, ssa_def, v));
+    else
+        emit_ld_load(b, v, ld_off);
+}
+
+/* Flush a value parked in st0 back to its home slot (discard CONST). */
+static void x87_flush_st0(Buffer *b, int *st0_v, const int *ld_off,
+                          const IRFunction *fn, const int *ssa_def) {
+    int v = *st0_v;
+    if (v < 0) return;
+    if (ld_is_const(fn, ssa_def, v)) {
+        emit_byte(b, 0xDD); emit_byte(b, 0xD8); /* fstp %st(0) */
+    } else {
+        emit_ld_store(b, v, ld_off);
+    }
+    *st0_v = -1;
+}
+
+/* Keep result in st0 only when the sole use is the next emitted ld consumer. */
+static int x87_can_keep_st0(const IRFunction *fn, const char *skip_body,
+                            const char *fused_skip, const int *raw_uses,
+                            size_t j, int dst) {
+    if (dst < 0 || dst >= fn->next_value_id) return 0;
+    if (!raw_uses || raw_uses[dst] != 1) return 0;
+    size_t k = j + 1;
+    while (k < fn->insts.len) {
+        const IRInst *sk = &fn->insts.data[k];
+        if (sk->op == IR_DBG_VALUE) { k++; continue; }
+        if (skip_body && skip_body[k]) { k++; continue; }
+        if (fused_skip && fused_skip[k]) { k++; continue; }
+        /* Ops that emit no ld consumer code — keep scanning. */
+        if (sk->op == IR_CONST && sk->call_name && sk->width == 16) {
+            k++; continue;
+        }
+        if (sk->op == IR_ADDR || sk->op == IR_GADDR || sk->op == IR_ALLOCA
+            || sk->op == IR_PARAM) {
+            k++; continue;
+        }
+        break;
+    }
+    if (k >= fn->insts.len) return 0;
+    const IRInst *n = &fn->insts.data[k];
+    switch (n->op) {
+    case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV:
+        return n->a == dst || n->b == dst;
+    case IR_FCMP:
+        return n->a == dst || n->b == dst;
+    case IR_STORE_PTR:
+    case IR_STORE:
+        return n->b == dst;
+    case IR_COPY:
+    case IR_LOAD:
+        return n->a == dst;
+    case IR_FPTOSI:
+        return n->a == dst;
+    case IR_RETURN:
+        return n->a == dst;
+    default:
+        return 0;
+    }
 }
 
 /* lea %dst, [rsp]  →  REX 8D [ModRM: mod=00, rm=100 (SIB)] [SIB: base=rsp] */
@@ -922,34 +1019,37 @@ static void emit_and_imm32(Buffer *b, int dst, int32_t imm) {
 /* Load the integer in GP register `src` into long-double value `dst`'s slot
  * via x87: stage src in the slot, fild it, fstpt the result back.
  * int→long-double (IR_SITOFP ld).  Clobbers RAX/RCX/RDX. */
-static void emit_ld_from_gp_int(Buffer *b, int src, int dst, const int *ld_off,
-                                int src_w, int src_u) {
-    emit_ld_addr(b, REG_RCX, ld_off[dst]);
+/* Convert GP int in `src` to long double in st0, using dst's slot as scratch
+ * for the fild memory operand.  Does NOT store the result; caller decides
+ * whether to fstpt or keep st0.  Clobbers RDX when src is u64. */
+static void emit_ld_from_gp_int_st0(Buffer *b, int src, int dst, const int *ld_off,
+                                   int src_w, int src_u) {
+    int off = ld_off[dst];
     if (src_w == 8 && src_u) {
         /* fild reads a signed integer, so a value above 2^63 would come out
          * negative.  Feed it as 2*(u>>1) + (u&1) instead: both halves fit in
          * 63 bits and the x87's 64-bit mantissa holds each exactly. */
         emit_mov_rr(b, REG_RDX, src);
         emit_shr_imm8(b, REG_RDX, 1);
-        emit_store_base_off(b, REG_RCX, REG_RDX, 0);
-        emit_byte(b, 0xDF); emit_modrm(b, 0, 5, REG_RCX & 7); /* fild qword */
-        emit_byte(b, 0xD8); emit_byte(b, 0xC0);               /* fadd st0,st0 */
+        emit_store_base_off(b, REG_RBP, REG_RDX, off);
+        emit_byte(b, 0xDF); emit_modrm_disp(b, 5, REG_RBP, off); /* fild qword */
+        emit_byte(b, 0xD8); emit_byte(b, 0xC0);                   /* fadd st0,st0 */
         emit_mov_rr(b, REG_RDX, src);
         emit_and_imm32(b, REG_RDX, 1);
-        emit_store_base_off(b, REG_RCX, REG_RDX, 0);
-        emit_byte(b, 0xDF); emit_modrm(b, 0, 5, REG_RCX & 7); /* fild qword */
-        emit_byte(b, 0xDE); emit_byte(b, 0xC1);               /* faddp st1,st0 */
+        emit_store_base_off(b, REG_RBP, REG_RDX, off);
+        emit_byte(b, 0xDF); emit_modrm_disp(b, 5, REG_RBP, off); /* fild qword */
+        emit_byte(b, 0xDE); emit_byte(b, 0xC1);                   /* faddp st1,st0 */
     } else if (src_w == 8 || src_u) {
         /* Signed 64-bit, or a narrower unsigned whose register is already
          * zero-extended: both are correct as a signed 64-bit fild. */
-        emit_store_base_off(b, REG_RCX, src, 0);
-        emit_byte(b, 0xDF); emit_modrm(b, 0, 5, REG_RCX & 7); /* fild qword */
+        emit_store_base_off(b, REG_RBP, src, off);
+        emit_byte(b, 0xDF); emit_modrm_disp(b, 5, REG_RBP, off); /* fild qword */
     } else {
-        emit_store_base_off(b, REG_RCX, src, 0);
-        emit_byte(b, 0xDB); emit_modrm(b, 0, 0, REG_RCX & 7); /* fild dword */
+        emit_store_base_off(b, REG_RBP, src, off);
+        emit_byte(b, 0xDB); emit_modrm_disp(b, 0, REG_RBP, off); /* fild dword */
     }
-    emit_x87_fstptRCX(b); /* fstpt [rcx] — st0 (the ld) → slot, pop */
 }
+
 
 /* SysV AMD64: first 6 integer args in rdi, rsi, rdx, rcx, r8, r9. */
 static const int SYSV_ARG_REGS[6] = {
@@ -4602,8 +4702,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (inst->op == IR_ALLOCA && inst->alloca_bytes > 0) {
                 /* ld local: reuse its pinned-alloca slot (16-byte aligned). */
                 ld_off[inst->dst] = alloca_off[inst->dst];
+            } else if (inst->op == IR_CONST) {
+                /* long-double constants load from .rodata via fldt .LC(%rip)
+                 * at each use; no frame slot. */
             } else if (inst->op != IR_PARAM) {
-                /* ld operation result or constant: fresh 16-byte slot. */
+                /* ld operation result: fresh 16-byte slot. */
                 ld_area += 16;
                 ld_off[inst->dst] = -(cs_save_area + gp_spill_area + xmm_spill_area + pinned_area + ld_area);
             }
@@ -5796,6 +5899,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             num_patches++; \
         } while (0)
 
+        /* SSA value currently live in st0 within this basic block, or -1.
+         * Flushed at every block boundary / call so predecessors agree. */
+        int x87_st0_v = -1;
+
         /* ---- Instruction loop ---- */
         for (size_t j = 0; j < fn->insts.len; j++) {
             const IRInst *inst = &fn->insts.data[j];
@@ -5885,17 +5992,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
             case IR_CONST: {
                 if (value_is_ld(fn, inst->dst)) {
-                    /* long double constant: 80-bit value lives in a rodata
-                     * global (name in inst->call_name).  lea rcx,[rip+0] with a
-                     * PC32 reloc targeting the global symbol, fldt [rcx],
-                     * fstpt into dst's slot.  Clobbers RCX. */
-                    size_t patch = emit_lea_rip(&out->text, REG_RCX);
-                    int gsym = emit_module_find_symbol(out, inst->call_name);
-                    if (gsym < 0)
-                        gsym = emit_module_add_undefined(out, inst->call_name);
-                    emit_module_add_reloc(out, patch, R_X86_64_PC32, gsym, -4);
-                    emit_x87_fldtRCX(&out->text); /* fldt [rcx] */
-                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    /* long double constant: loaded from .rodata at each use
+                     * via fldt .LC(%rip).  No frame materialization. */
                 } else if (inst->is_float) {
                     /* Float constant: bit pattern in float_imm.  Materialize via
                      * RAX (movabs) then movq into the XMM file. */
@@ -6114,8 +6212,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
             case IR_COPY: {
                 if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
-                    emit_ld_load(&out->text, inst->a, ld_off);
-                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    if (x87_st0_v != inst->a) {
+                        if (x87_st0_v >= 0)
+                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
+                    }
+                    if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
+                                         j, inst->dst)) {
+                        x87_st0_v = inst->dst;
+                    } else {
+                        emit_ld_store(&out->text, inst->dst, ld_off);
+                        x87_st0_v = -1;
+                    }
                     break;
                 }
                 if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
@@ -6310,8 +6418,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
             case IR_LOAD: {
                 if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
-                    emit_ld_load(&out->text, inst->a, ld_off);
-                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    if (x87_st0_v != inst->a) {
+                        if (x87_st0_v >= 0)
+                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
+                    }
+                    if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
+                                         j, inst->dst)) {
+                        x87_st0_v = inst->dst;
+                    } else {
+                        emit_ld_store(&out->text, inst->dst, ld_off);
+                        x87_st0_v = -1;
+                    }
                     break;
                 }
                 if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
@@ -6343,8 +6461,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
             case IR_STORE: {
                 if ((inst->a >= 0 && value_is_ld(fn, inst->a)) || (inst->b >= 0 && value_is_ld(fn, inst->b))) {
-                    emit_ld_load(&out->text, inst->b, ld_off);
+                    if (x87_st0_v != inst->b) {
+                        if (x87_st0_v >= 0)
+                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->b, ld_off);
+                    }
                     emit_ld_store(&out->text, inst->a, ld_off);
+                    x87_st0_v = -1;
                     break;
                 }
                 if ((inst->a >= 0 && value_is_float_class(fn, inst->a)) || (inst->b >= 0 && value_is_float_class(fn, inst->b))) {
@@ -6523,6 +6646,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_JMP_PTR: {
+                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                 /* goto *ptr — emit `jmp *r11` (FF /4 with ModRM 0xE3).
                  * We load the pointer into R11 first. */
                 ensure_reg(&out->text, inst->a, REG_R11, ra);
@@ -6534,6 +6658,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_BR_TABLE: {
+                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                 /* Dense switch: bounds already checked.  Emit
                  *   lea rdx, table(%rip)
                  *   movsxd rax, [rdx+rax*4]
@@ -6756,13 +6881,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (!folded && af_kind == AF_NONE && rip_sym < 0)
                     ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->dst)) {
+                    if (x87_st0_v >= 0)
+                        x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                     if (folded)
                         emit_x87_fldt_disp(&out->text, REG_RBP, ptr_off);
                     else {
                         emit_byte(&out->text, 0xDB);
                         emit_modrm(&out->text, 0, 5, ptr_r & 7);
                     }
-                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
+                                         j, inst->dst)) {
+                        x87_st0_v = inst->dst;
+                    } else {
+                        emit_ld_store(&out->text, inst->dst, ld_off);
+                        x87_st0_v = -1;
+                    }
                 } else if (value_is_float_class(fn, inst->dst)) {
                     int dst_xmm = dr >= 0 ? dr : XMM_SCRATCH0;
                     int vw = inst->width;
@@ -6936,16 +7069,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (!folded && af_kind == AF_NONE && rip_sym < 0)
                     ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->b)) {
-                    emit_ld_load(&out->text, inst->b, ld_off);
+                    if (x87_st0_v != inst->b) {
+                        if (x87_st0_v >= 0)
+                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->b, ld_off);
+                    }
                     if (folded)
                         emit_x87_fstpt_disp(&out->text, REG_RBP, ptr_off);
                     else {
-                        /* emit_ld_load addresses the spill via %rcx; the
-                         * pointer must be refreshed before fstpt. */
                         ensure_reg(&out->text, inst->a, REG_RCX, ra);
                         emit_byte(&out->text, 0xDB);
                         emit_modrm(&out->text, 0, 7, REG_RCX & 7);
                     }
+                    x87_st0_v = -1; /* fstpt popped */
                 } else if (value_is_float_class(fn, inst->b)) {
                     ensure_reg_xmm(&out->text, inst->b, XMM_SCRATCH0, ra_xmm,
                                    gp_spill_area);
@@ -7272,6 +7408,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_LABEL: {
+                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                 if (inst->imm >= 0 && inst->imm < nlabels) {
                     label_off[inst->imm] = out->text.len;
                 }
@@ -7279,6 +7416,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_BR: {
+                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                 /* Fall-through: next real insn is the target label.
                  * Skip IR_DBG_VALUE — markers emit no bytes, so -g must
                  * not force a jmp that plain builds omit. */
@@ -7301,6 +7439,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_CBR: {
+                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                 /* CBR: a = cond, imm = true_label, b = false_label.
                  * Fused compare: `cmp a,b; j<cc> true; jmp false`.
                  * Otherwise test the materialized 0/1 condition.
@@ -7440,6 +7579,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
 
             case IR_CALL: {
+                x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                 /* Arm64 memory barrier.  x86 keeps the historical no-op. */
                 if (inst->call_name && strcmp(inst->call_name, "__fakecc_dmb") == 0)
                     break;
@@ -8108,8 +8248,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (target_reg[k] >= 0) continue;
                         int off = 8 * arg_slot[k];
                         if (value_is_ld(fn, inst->call_args[k])) {
-                            emit_ld_load(&out->text, inst->call_args[k], ld_off);
+                            emit_ld_load_op(&out->text, out, fn, ssa_def,
+                                            inst->call_args[k], ld_off);
                             emit_x87_fstpt_disp(&out->text, REG_RSP, off);
+                            x87_st0_v = -1;
                         } else if (call_arg_blob_bytes(inst, k)) {
                             emit_memcpy_to_addr(&out->text, REG_RSP, off,
                                                 inst->call_args[k], ra,
@@ -8166,9 +8308,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         continue;
                     }
                     if (value_is_ld(fn, inst->call_args[found])) {
-                        emit_ld_load(&out->text, inst->call_args[found], ld_off);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def,
+                                        inst->call_args[found], ld_off);
                         emit_sub_rsp_imm32(&out->text, 16);
                         emit_x87_fstpt_rsp(&out->text);
+                        x87_st0_v = -1;
                         slot -= 2;
                     } else if (call_arg_blob_bytes(inst, found)) {
                         int bn = call_arg_blob_bytes(inst, found);
@@ -8533,9 +8677,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
 
                 if (inst->dst >= 0 && value_is_ld(fn, inst->dst)) {
-                    /* long double result comes back in st0 (SysV ld ABI).  fstpt
-                     * it into dst's slot.  Clobbers RCX.  Void: dst == -1. */
-                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    /* long double result comes back in st0 (SysV ld ABI). */
+                    if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
+                                         j, inst->dst)) {
+                        x87_st0_v = inst->dst;
+                    } else {
+                        emit_ld_store(&out->text, inst->dst, ld_off);
+                        x87_st0_v = -1;
+                    }
                 } else if (inst->dst >= 0 && value_is_float_class(fn, inst->dst)) {
                     /* Float result comes back in XMM0 (SysV float ABI).  Move
                      * it to dst's XMM home, or spill.  Void: dst == -1. */
@@ -8586,6 +8735,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_RETURN: {
+                /* x87_pair / scalar ld paths reload into st0 below. */
+                if (x87_st0_v >= 0 && !(inst->a >= 0 && x87_st0_v == inst->a
+                                       && value_is_ld(fn, inst->a) && !inst->x87_pair))
+                    x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                 /* Void function: bare `return;` — no value in a.
                  * SysV multi-eightbyte returns: INTEGER eightbytes go to
                  * RAX then RDX; SSE eightbytes go to XMM0 then XMM1. */
@@ -8631,9 +8784,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                     }
                 } else if (inst->a != -1) {
-                    if (value_is_ld(fn, inst->a))
-                        emit_ld_load(&out->text, inst->a, ld_off); /* → st0 */
-                    else if (value_is_float_class(fn, inst->a))
+                    if (value_is_ld(fn, inst->a)) {
+                        if (x87_st0_v != inst->a) {
+                            if (x87_st0_v >= 0)
+                                x87_flush_st0(&out->text, &x87_st0_v, ld_off,
+                                              fn, ssa_def);
+                            emit_ld_load_op(&out->text, out, fn, ssa_def,
+                                            inst->a, ld_off);
+                        }
+                        x87_st0_v = -1; /* ownership transferred to ABI */
+                    } else if (value_is_float_class(fn, inst->a))
                         ensure_reg_xmm(&out->text, inst->a, 0, ra_xmm,
                                        gp_spill_area); /* XMM0 */
                     else
@@ -8648,22 +8808,38 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_FMUL:
             case IR_FDIV: {
                 if (value_is_ld(fn, inst->dst)) {
-                    /* long double arithmetic: ld a, ld b, f**p, fstpt dst.
-                     * x87 stack ends empty (the `*p` pop + fstpt clear st0). */
-                    emit_ld_load(&out->text, inst->a, ld_off);
-                    emit_ld_load(&out->text, inst->b, ld_off);
-                    int op;
+                    /* long double arithmetic.  x87 has no fadd/fmul m80
+                     * form (DC /n is m64), so always fldt the right-hand
+                     * operand (frame slot or .LC rip) then faddp/fmulp.
+                     * Keep the result in st0 when the sole next use
+                     * consumes it. */
+                    int pop;
                     switch (inst->op) {
-                    /* load a then b (st0=b,st1=a); the pop-op does st1 = st1 op st0
-                     * (faddp/fmulp) or st1 = st0 op st1 (fsubrp/fdivp) — chosen
-                     * so the result is a+b, a-b, a*b, a/b respectively. */
-                    case IR_FADD: op = 0xC1; break; /* DE C1: faddp */
-                    case IR_FSUB: op = 0xE9; break; /* DE E9: fsubrp */
-                    case IR_FMUL: op = 0xC9; break; /* DE C9: fmulp */
-                    default:      op = 0xF9; break; /* DE F9: fdivp */
+                    case IR_FADD: pop = 0xC1; break; /* faddp */
+                    case IR_FSUB: pop = 0xE9; break; /* fsubrp */
+                    case IR_FMUL: pop = 0xC9; break; /* fmulp */
+                    default:      pop = 0xF9; break; /* fdivp */
                     }
-                    emit_x87_arith_pop(&out->text, op);
-                    emit_ld_store(&out->text, inst->dst, ld_off);
+                    int commutative = (inst->op == IR_FADD || inst->op == IR_FMUL);
+                    int left = inst->a, right = inst->b;
+                    if (commutative && x87_st0_v == inst->b && x87_st0_v != inst->a) {
+                        left = inst->b;
+                        right = inst->a;
+                    }
+                    if (x87_st0_v != left) {
+                        if (x87_st0_v >= 0)
+                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, left, ld_off);
+                    }
+                    emit_ld_load_op(&out->text, out, fn, ssa_def, right, ld_off);
+                    emit_x87_arith_pop(&out->text, pop);
+                    if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
+                                         j, inst->dst)) {
+                        x87_st0_v = inst->dst;
+                    } else {
+                        emit_ld_store(&out->text, inst->dst, ld_off);
+                        x87_st0_v = -1;
+                    }
                     break;
                 }
                 /* dst = a op b.  Prefer dst's XMM home as the accumulator
@@ -8718,17 +8894,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      * load order (LT/LE load a first; GT/GE load b first): see
                      * GCC cmplt/cmpgt.  Zero RDX before (xor clobbers flags). */
                     int is_lt_le = (inst->is_unsigned == 0 || inst->is_unsigned == 1);
+                    if (x87_st0_v >= 0)
+                        x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                     emit_xor_rr(&out->text, REG_RDX);
                     if (is_lt_le) {
-                        emit_ld_load(&out->text, inst->a, ld_off); /* st0=a */
-                        emit_ld_load(&out->text, inst->b, ld_off); /* st0=b,st1=a */
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->b, ld_off);
                     } else {
-                        emit_ld_load(&out->text, inst->b, ld_off); /* st0=b */
-                        emit_ld_load(&out->text, inst->a, ld_off); /* st0=a,st1=b */
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->b, ld_off);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
                     }
                     if (inst->is_unsigned >= 4) emit_xor_rr(&out->text, REG_RAX);
                     emit_x87_fcomip(&out->text);
                     emit_byte(&out->text, 0xDD); emit_byte(&out->text, 0xD8); /* fstp %st(0) */
+                    x87_st0_v = -1;
                     uint8_t cc;
                     switch (inst->is_unsigned) {
                     case 0: cc = 0x97; break; /* LT: a<b ↔ b>a → seta */
@@ -8819,17 +8998,19 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int src_u = inst->is_unsigned;
                 int dst_is_f = (inst->width == 4);
                 if (value_is_ld(fn, inst->dst)) {
-                    /* int→long double.  Load int into a GP reg, store into dst's
-                     * slot, fild from the slot (pushes ld to st0), fstpt the
-                     * result back into dst's slot.  Clobbers RAX/RCX/RDX. */
-                    /* ensure_reg handles register / spill / out-of-range
-                     * operands; indexing ra->spill_slot[inst->a] here read
-                     * past the map when the operand has no slot. */
-                    if (ra && (inst->a < 0 || inst->a >= ra->num_values))
-                        fprintf(stderr, "PROBE: SITOFP a=%d num_values=%d ra=%p\n", inst->a, ra->num_values, (void*)ra);
+                    /* int→long double via fild; keep st0 when sole next use. */
+                    if (x87_st0_v >= 0)
+                        x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                     ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                    emit_ld_from_gp_int(&out->text, REG_RAX, inst->dst, ld_off,
-                                        src_w, src_u);
+                    emit_ld_from_gp_int_st0(&out->text, REG_RAX, inst->dst, ld_off,
+                                            src_w, src_u);
+                    if (x87_can_keep_st0(fn, skip_body, fused_skip, raw_uses,
+                                         j, inst->dst)) {
+                        x87_st0_v = inst->dst;
+                    } else {
+                        emit_ld_store(&out->text, inst->dst, ld_off);
+                        x87_st0_v = -1;
+                    }
                     break;
                 }
                 /* dst (float) = (float)a.  Load a into a GP scratch. */
@@ -8878,11 +9059,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_mov_imm64(&out->text, REG_RAX,
                                    (int64_t)0x4000000000000000LL);
                     emit_store_rsp_off(&out->text, REG_RAX, 0);
+                    if (x87_st0_v >= 0)
+                        x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
                     emit_lea_rsp0(&out->text, REG_RCX);
                     emit_byte(&out->text, 0xDF);
                     emit_modrm(&out->text, 0, 5, REG_RCX & 7); /* fild qword */
                     emit_byte(&out->text, 0xD8); emit_byte(&out->text, 0xC0); /* fadd st0,st0 */
-                    emit_ld_load(&out->text, inst->a, ld_off); /* st0=a, st1=2^63 */
+                    emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off); /* st0=a, st1=2^63 */
                     emit_byte(&out->text, 0xDB); emit_byte(&out->text, 0xF1); /* fcomi st0,st1 */
                     size_t j_small = emit_jcc_rel32(&out->text, 0x82); /* jb */
                     emit_byte(&out->text, 0xD8); emit_byte(&out->text, 0xE1); /* fsub st0,st1 */
@@ -8912,7 +9095,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      * on the stack, fisttp dword to it, read into a GP reg.  Uses
                      * 8 bytes below rsp (SysV red zone is safe here).  Clobbers
                      * RAX/RCX/RDX. */
-                    emit_ld_load(&out->text, inst->a, ld_off); /* fldt [a] → st0 */
+                    if (x87_st0_v != inst->a) {
+                        if (x87_st0_v >= 0)
+                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
+                    }
+                    x87_st0_v = -1; /* fisttp will pop */
                     emit_sub_rsp_imm32(&out->text, 8);
                     /* lea rcx, [rsp] */
                     emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x8D);
@@ -9035,7 +9223,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      * source is consumed, so reusing it as scratch is safe),
                      * load into XMM scratch → dst home. */
                     int dst_is_f32 = inst->width == 4;
-                    emit_ld_load(&out->text, inst->a, ld_off); /* fldt → st0 */
+                    if (x87_st0_v != inst->a) {
+                        if (x87_st0_v >= 0)
+                            x87_flush_st0(&out->text, &x87_st0_v, ld_off, fn, ssa_def);
+                        emit_ld_load_op(&out->text, out, fn, ssa_def, inst->a, ld_off);
+                    }
+                    x87_st0_v = -1; /* narrowing store pops */
                     emit_ld_addr(&out->text, REG_RCX, ld_off[inst->a]);
                     /* fstp dword/qword [rcx] — narrowing happens here, so the
                      * store size must match the destination's float width. */
