@@ -577,8 +577,27 @@ static int scan_collect_fp(FILE *f, int *chp, int *nreadp, int maxw,
             goto fail;
         }
         any = 1;
-        /* Match glibc scanf: NAN is the subject sequence; a following
-         * `(n-char-sequence)` is leftover, unlike C99 strtod. */
+        /* glibc scanf (and C99 strtod) consume an optional
+         * `(n-char-sequence)` after NAN.  n-char is letter/digit/_ .
+         * Incomplete or invalid parentheses make the conversion fail. */
+        if (ch == '(') {
+            if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap))
+                goto fail;
+            for (;;) {
+                int ok = (ch >= '0' && ch <= '9')
+                    || (ch >= 'a' && ch <= 'z')
+                    || (ch >= 'A' && ch <= 'Z')
+                    || ch == '_';
+                if (ch == ')') {
+                    if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap))
+                        goto done;
+                    break;
+                }
+                if (!ok) goto fail;
+                if (!scan_take_ch(f, &ch, &used, &nread, maxw, buf, &blen, cap))
+                    goto fail;
+            }
+        }
         goto done;
     }
 

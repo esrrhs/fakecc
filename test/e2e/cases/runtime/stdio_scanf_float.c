@@ -59,10 +59,10 @@ int main() {
     r = runtime.sscanf("nan", "%f", &f);
     if (r != 1 || f == f) return 18;
 
-    /* glibc scanf stops after NAN; `(12)x` is leftover (unlike strtod). */
+    /* glibc scanf consumes optional `(n-char-sequence)` after NAN, like strtod. */
     r = runtime.sscanf("nan(12)x", "%f%s", &f, rest);
     if (r != 2 || f == f) return 29;
-    if (rest[0] != '(') return 30;
+    if (rest[0] != 'x') return 30;
 
     r = runtime.sscanf("ix", "%f", &f);
     if (r != 0) return 19;
