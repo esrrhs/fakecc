@@ -1179,7 +1179,10 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
             return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
         }
     }
-    /* enum Tag — treated as int for the type system (or C23 fixed underlying). */
+    /* enum Tag — treated as int for the type system (or C23 fixed underlying).
+     * EnumDef* is a slot into EnumRegistry; nested enum definitions inside an
+     * enumerator expression (or a nested type-name) can realloc the registry.
+     * Keep the slot index and re-resolve before enum_def_as_type. */
     if (peek(p)->kind == TK_KW_ENUM) {
         advance(p);
         const Token *tag = NULL;
@@ -1188,6 +1191,8 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
             advance(p);
         }
         EnumDef *ed = NULL;
+        size_t ed_idx = 0;
+        int have_ed = 0;
         if (peek(p)->kind == TK_LBRACE || peek(p)->kind == TK_COLON) {
             char anon_tag[64];
             const char *reg_tag = tag ? tag->text : NULL;
@@ -1197,11 +1202,18 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
                 reg_tag = anon_tag;
             }
             ed = enum_registry_add(&p->tu->enums, reg_tag, reg_loc);
+            ed_idx = (size_t)(ed - p->tu->enums.data);
+            have_ed = 1;
             parse_enum_underlying_opt(p, ed);
+            ed = &p->tu->enums.data[ed_idx];
             if (peek(p)->kind == TK_LBRACE)
                 parse_enum_body(p, ed);
         } else if (tag) {
             ed = enum_registry_find(&p->tu->enums, tag->text);
+            if (ed) {
+                ed_idx = (size_t)(ed - p->tu->enums.data);
+                have_ed = 1;
+            }
         } else {
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col,
@@ -1209,8 +1221,13 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
             return type_make_void();
         }
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
-        Type t = ed ? enum_def_as_type(ed, (int)(ed - p->tu->enums.data + 1))
-                    : type_default_int();
+        Type t;
+        if (have_ed) {
+            ed = &p->tu->enums.data[ed_idx];
+            t = enum_def_as_type(ed, (int)ed_idx + 1);
+        } else {
+            t = type_default_int();
+        }
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     /* typedef name — local, pkg.Type, or same-package fallback. */
@@ -5618,7 +5635,9 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
                     goto cleanup;
                 }
                 EnumDef *ed = enum_registry_add(&tu->enums, tag->text, tag->loc);
+                size_t ed_idx = (size_t)(ed - tu->enums.data);
                 parse_enum_underlying_opt(&p, ed);
+                ed = &tu->enums.data[ed_idx];
                 if (peek(&p)->kind == TK_LBRACE)
                     parse_enum_body(&p, ed);
                 expect_kind(&p, TK_SEMICOLON, "';'");
