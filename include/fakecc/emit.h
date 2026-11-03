@@ -330,8 +330,8 @@ typedef struct EmitModule {
 /* Lifetime                                                            */
 /* ------------------------------------------------------------------ */
 
-/* 1 = emit Local-Exec TPOFF32 for __thread on ELF x86-64 (executables).
- * 0 = Initial-Exec GOTTPOFF (required for -shared).  Default 1. */
+/* 1 = emit Local-Exec TPOFF32 for __thread on ELF x86-64 executables.
+ * 0 = Initial-Exec GOTTPOFF (required for -c / -shared / non-ELF). Default 0. */
 extern int g_tls_local_exec;
 
 void emit_module_init(EmitModule *m);
