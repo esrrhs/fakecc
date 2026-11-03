@@ -6818,6 +6818,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 mark_reg(needed, ssa_uses_f, nvals_f, alu->b);
             if (cmp->b >= 0 && cmp->b < nvals_f && raw_uses[cmp->b] == 1)
                 needed[cmp->b] = 0;
+            /* Peel sole-use COPY/SEXT/ZEXT so ensure_reg sees the underlying
+             * home (is_prime movzbl→and without rdi shuttle). */
+            for (int side = 0; side < 2; side++) {
+                IRValue ov = side ? alu->b : alu->a;
+                if (alu->op == IR_NEG && side) break;
+                if (ov < 0 || ov >= nvals_f || raw_uses[ov] != 1) continue;
+                if (!value_unique_def(fn, ov) || ssa_def[ov] < 0) continue;
+                int oi = ssa_def[ov];
+                if (skip_body[oi] || fused_skip[oi]) continue;
+                const IRInst *peel = &fn->insts.data[oi];
+                if (peel->op != IR_COPY && peel->op != IR_SEXT && peel->op != IR_ZEXT)
+                    continue;
+                fused_skip[oi] = 1;
+                mark_reg(needed, ssa_uses_f, nvals_f, peel->a);
+            }
         }
         /* Sole-use spilled ADD+imm consumed only as a stack-passed call arg:
          * skip the lea+spill and rematerialize at the push (sret i+3/i+4). */
@@ -7962,10 +7977,39 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         else if (alu->op == IR_BAND) rr = 0x21;
                         else if (alu->op == IR_BOR) rr = 0x09;
                         else if (alu->op == IR_BXOR) rr = 0x31;
-                        ensure_reg(&out->text, alu->a, REG_RAX, ra);
-                        ensure_reg(&out->text, alu->b, REG_RCX, ra);
-                        if (!to_rax) emit_xor_rr(&out->text, zd);
-                        emit_arith_rr_w(&out->text, rr, REG_RAX, REG_RCX, aw);
+                        /* Chase sole-use COPY/SEXT/ZEXT under alu operands
+                         * (paired with fused_skip peel above). */
+                        IRValue aa = alu->a, bb = alu->b;
+                        for (int once = 0; once < 2; once++) {
+                            IRValue *pv = once ? &bb : &aa;
+                            if (*pv < 0 || *pv >= nvals_f || ssa_def[*pv] < 0)
+                                continue;
+                            int oi = ssa_def[*pv];
+                            if (!fused_skip[oi]) continue;
+                            const IRInst *peel = &fn->insts.data[oi];
+                            if (peel->op == IR_COPY || peel->op == IR_SEXT
+                                || peel->op == IR_ZEXT)
+                                *pv = peel->a;
+                        }
+                        if (to_rax) {
+                            int ah = gp_home(ra, aa), bh = gp_home(ra, bb);
+                            if (bh >= 0 && bh != REG_RAX) {
+                                ensure_reg(&out->text, aa, REG_RAX, ra);
+                                emit_arith_rr_w(&out->text, rr, REG_RAX, bh, aw);
+                            } else if (ah >= 0 && ah != REG_RAX) {
+                                ensure_reg(&out->text, bb, REG_RAX, ra);
+                                emit_arith_rr_w(&out->text, rr, REG_RAX, ah, aw);
+                            } else {
+                                ensure_reg(&out->text, aa, REG_RAX, ra);
+                                ensure_reg(&out->text, bb, REG_RCX, ra);
+                                emit_arith_rr_w(&out->text, rr, REG_RAX, REG_RCX, aw);
+                            }
+                        } else {
+                            ensure_reg(&out->text, aa, REG_RAX, ra);
+                            ensure_reg(&out->text, bb, REG_RCX, ra);
+                            emit_xor_rr(&out->text, zd);
+                            emit_arith_rr_w(&out->text, rr, REG_RAX, REG_RCX, aw);
+                        }
                     }
                     if (to_rax) {
                         emit_setcc_r(&out->text, cc, REG_RAX);
