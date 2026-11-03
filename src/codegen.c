@@ -6969,11 +6969,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 && raw_uses[ld->a] == 1 && ssa_def[ld->a] >= 0)
                 fused_skip[ssa_def[ld->a]] = 1;
         }
-        /* BXOR of two sole-use frame LOADs: `xor off(%rbp), %reg` (fptr). */
+        /* BAND/BOR/BXOR, and ADD/SUB of two param-home LOADs (width<=8). */
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             const IRInst *al = &fn->insts.data[uj];
             if (skip_body[uj] || fused_skip[uj]) continue;
-            if (al->op != IR_BXOR || al->is_float) continue;
+            if ((al->op != IR_BXOR && al->op != IR_BAND && al->op != IR_BOR
+                 && al->op != IR_ADD && al->op != IR_SUB)
+                || al->is_float)
+                continue;
+            if (al->width > 8) continue;
             int off_a = 0, off_b = 0, ok_a = 0, ok_b = 0;
             for (int side = 0; side < 2; side++) {
                 IRValue sv = side ? al->b : al->a;
@@ -7000,11 +7004,38 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 *ok = 1;
             }
             if (!ok_a || !ok_b) continue;
-            /* Keep a in reg, xor from b's slot (gcc shape). */
+            /* ADD/SUB mem-fold only when both slots are param homes — broader
+             * fold broke ternary_basic / torture (select temps). */
+            if (al->op == IR_ADD || al->op == IR_SUB) {
+                /* i128 low-half is width 8 on param homes — keep w==4 only. */
+                if (al->width != 4) continue;
+                int pa = 0, pb = 0;
+                if (!param_home_off) continue;
+                for (int p = 0; p < nparams; p++) {
+                    if (param_home_off[p] == off_a) pa = 1;
+                    if (param_home_off[p] == off_b) pb = 1;
+                }
+                if (!pa || !pb) continue;
+            }
+            /* Keep a in reg, op from b's slot (gcc shape). Always skip RHS
+             * LOAD (mem operand). Skip LHS LOAD only when remat can rebuild
+             * it via fold_ptr_off (plain alloca IR_LOAD remat can fail). */
             alu_mem_off[uj] = off_b;
             alu_mem_side[uj] = 1;
+            {
+                int la = ssa_def[al->a], lb = ssa_def[al->b];
+                if (lb >= 0 && lb < (int)ninst_f) fused_skip[lb] = 1;
+                if (la >= 0 && la < (int)ninst_f) {
+                    const IRInst *lda = &fn->insts.data[la];
+                    int roff = 0;
+                    if ((lda->op == IR_LOAD || lda->op == IR_LOAD_PTR)
+                        && fold_ptr_off(fn, ssa_def, alloca_off, lda->a, &roff, 0)
+                        && roff != 0)
+                        fused_skip[la] = 1;
+                }
+            }
         }
-/* Call results consumed only by a CBR: leave in RAX and test there
+        /* Call results consumed only by a CBR: leave in RAX and test there
          * (sieve `if (is_prime(i))`) instead of rax→home→test. */
         char *call_cbr_rax = xmalloc(nvals_f ? nvals_f : 1);
         memset(call_cbr_rax, 0, nvals_f ? nvals_f : 1);
@@ -7064,7 +7095,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 needed[v->a] = 0;
             if (v->b >= 0 && v->b < nvals_f && raw_uses[v->b] == 1)
                 needed[v->b] = 0;
-            /* Dst ADDR sole-use skipped: broke vec (SEGV) — leave needed. */
         }
         /* Call result sole-use STORE to frame: movl %eax, off (fptr). */
         int *call_store_off = xmalloc((size_t)nvals_f * sizeof(int));
@@ -7129,8 +7159,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
         /* GP values whose sole use is a scalar IR_RETURN: leave the def in
          * RAX and skip the home shuttle.  Jump-table functions get this for
-         * any ALU (switch case arms).  Elsewhere only compare results
-         * (sieve is_prime) — broader ALU leave-in-RAX regressed fptr. */
+         * any return value (switch case arms).  Elsewhere: compares (sieve
+         * is_prime) and scalar ALU binops (fptr op_* leaves). */
         char *ret_only = xmalloc(nvals_f ? nvals_f : 1);
         memset(ret_only, 0, nvals_f ? nvals_f : 1);
         int has_br_table = 0;
@@ -7151,8 +7181,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
             if (ssa_def[r->a] < 0 || !value_unique_def(fn, r->a)) continue;
             int dop = fn->insts.data[ssa_def[r->a]].op;
+            /* Leaf binops returning their ALU (fptr op_*): leave in RAX.
+             * Prior "broader ALU" regression was without ret_only gate. */
             if (dop == IR_EQ || dop == IR_NE || dop == IR_LT || dop == IR_LE
-                || dop == IR_GT || dop == IR_GE)
+                || dop == IR_GT || dop == IR_GE
+                || dop == IR_BAND || dop == IR_BOR || dop == IR_BXOR
+                || dop == IR_ADD || dop == IR_SUB || dop == IR_MUL
+                || dop == IR_SHL || dop == IR_SHR || dop == IR_NEG
+                || dop == IR_BNOT)
                 ret_only[r->a] = 1;
         }
         for (size_t uj = 0; uj + 3 < fn->insts.len; uj++) {
