@@ -144,9 +144,11 @@ static uint16_t rd16(const unsigned char *p) {
 static uint32_t rd32(const unsigned char *p) {
     uint32_t v; memcpy(&v, p, 4); return v;
 }
+#if defined(__linux__) && (defined(__x86_64__) || defined(__amd64__))
 static uint64_t rd64(const unsigned char *p) {
     uint64_t v; memcpy(&v, p, 8); return v;
 }
+#endif
 
 static unsigned char *slurp(const char *path, size_t *n_out) {
     FILE *f = fopen(path, "rb");

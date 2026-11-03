@@ -16,7 +16,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
 #include <sys/stat.h>
 #if defined(_WIN32) && !defined(FAKECC_SELFHOST)
@@ -1264,9 +1263,15 @@ int main(int argc, char **argv) {
                 continue;
             }
 {
-                char buf[64];
-                snprintf(buf, sizeof buf, "/tmp/fakecc_kmb_%d_%d.o",
-                         (int)getpid(), i);
+                /* tmpnam (stdio) avoids <unistd.h>/getpid so bootstrap
+                 * preprocess (-nostdinc + v0/fakeinc) still works. */
+                const char *tn = tmpnam(NULL);
+                if (!tn) {
+                    fprintf(stderr, "fakecc: tmpnam failed\n");
+                    exit(1);
+                }
+                char buf[256];
+                snprintf(buf, sizeof buf, "%s.o", tn);
                 temps[i] = xstrdup(buf);
                 if (!temps[i]) exit(1);
             }
