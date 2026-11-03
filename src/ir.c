@@ -25,6 +25,11 @@ static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
 /* When set, a register-returned struct call stores into this address
  * instead of allocating a temporary and copying. */
 static IRValue g_call_ret_into = -1;
+/* When set, a register-returned INTEGER struct call leaves the ABI return
+ * registers alone (no stack slot).  Used for `return f(...);` so the
+ * epilogue can fall through with RAX(/RDX) still holding the callee result
+ * — matching gcc -O0 (`call; leave; ret`). */
+static int g_call_ret_forward = 0;
 /* When ≥0, EX_TERNARY stores each arm into this alloca instead of a temp
  * (gcc -O0: `a = c ? a+b : …` writes `a` on both sides). */
 static IRValue g_tern_store_into = -1;
@@ -9283,7 +9288,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             sret_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
         IRValue slot_addr = -1;
-        if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
+        int forward_abi_ret = 0;
+        if (g_call_ret_forward && is_ret_struct && ret_nreg > 0
+            && ret_nreg <= 2 && !is_x87_st0 && !ret_in_mem
+            && !abi_is_hfa(e->type) && type_size(e->type) <= 16) {
+            int all_int = 1;
+            for (int k = 0; k < ret_nreg; k++)
+                if (ret_cls[k] != SYSV_CLS_INTEGER) all_int = 0;
+            forward_abi_ret = all_int;
+        }
+        if (is_ret_struct && (ret_nreg > 0 || is_x87_st0) && !forward_abi_ret) {
             if (g_call_ret_into >= 0) {
                 slot_addr = g_call_ret_into;
                 g_call_ret_into = -1;
@@ -9295,7 +9309,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
         }
         IRValue v;
-        if (ret_in_mem) {
+        if (forward_abi_ret) {
+            v = -1;
+        } else if (ret_in_mem) {
             v = sret_addr;
         } else if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
             v = slot_addr;
@@ -9473,6 +9489,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             free(arg_on_stack);
             free(arg_nbytes);
             return v;
+        }
+        if (forward_abi_ret) {
+            /* Leave RAX(/RDX) as the expression result; caller is about to
+             * IR_RETURN with no operands (epilogue only). */
+            inst.dst = -1;
+            inst.a = -1;
+            inst.b = -1;
+            inst.imm = 0;
+            inst.width = 0;
+            inst.is_unsigned = 0;
+            ir_inst_array_push(&fn->insts, inst);
+            restore_big_copy(fn, big_copy_sp, e->loc);
+            free(arg_vals);
+            free(arg_on_stack);
+            free(arg_nbytes);
+            return -1;
         }
         if (is_ret_struct && ret_nreg > 0) {
             if (direct_ret_slot) {
@@ -11097,6 +11129,28 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 emit_inst_w(fn, IR_RETURN, -1, z, -1, 0, dw, du, s->loc);
             }
         } else if (fn->ret_is_struct) {
+            /* `return f(...);` of an INTEGER-class register struct: leave the
+             * callee's RAX(/RDX) in place and emit a bare epilogue.  Avoids
+             * the -O0 temp slot + reload that dominated fl_closure. */
+            Expr *ev = s->u.value;
+            if (ev && ev->kind == EX_CALL && fn->ret_reg_n > 0
+                && fn->ret_reg_n <= 2 && fn->ret_x87_bytes == 0
+                && !fn->ret_is_complex_ld && g_ir_cur_fd
+                && type_size(ev->type) <= 16
+                && !abi_is_hfa(g_ir_cur_fd->ret_type)
+                && same_aggregate_type(&ev->type, &g_ir_cur_fd->ret_type)) {
+                int all_int = 1;
+                for (int k = 0; k < fn->ret_reg_n; k++)
+                    if ((SysVRegClass)fn->ret_reg_cls[k] != SYSV_CLS_INTEGER)
+                        all_int = 0;
+                if (all_int) {
+                    g_call_ret_forward = 1;
+                    lower_expr(fn, st, ev);
+                    g_call_ret_forward = 0;
+                    emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
+                    break;
+                }
+            }
             IRValue v = lower_expr(fn, st, s->u.value);
             if (fn->ret_is_complex_ld || fn->ret_x87_bytes > 0) {
                 emit_inst_w(fn, IR_RETURN, -1, v, -1,
