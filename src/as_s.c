@@ -5,6 +5,7 @@
  * privileged ops used by later desc/sysentry migration.
  */
 #include "fakecc/iasm.h"
+#include "fakecc/emit.h"
 #include "fakecc/common.h"
 
 #include <ctype.h>
@@ -23,7 +24,8 @@ typedef struct {
     char *name;
     size_t off;
     int defined;
-} RodataLab;
+    int sect; /* 1=.rodata 2=.data 3=.bss */
+} DataLab;
 
 typedef struct {
     Macro *macros;
@@ -34,10 +36,10 @@ typedef struct {
     int nexterns, ecap;
     char *text;
     size_t tlen, tcap;
-    int sect; /* 0=.text 1=.rodata */
+    int sect; /* 0=.text 1=.rodata 2=.data 3=.bss */
     EmitModule *out;
     const char *src_dir;
-    RodataLab *rlabs;
+    DataLab *rlabs;
     int nrlab, rcap;
 } AsState;
 
@@ -153,33 +155,216 @@ static void free_state(AsState *st) {
     free(st->rlabs);
 }
 
-static void rodata_align(AsState *st, size_t a) {
-    if (!st->out || a <= 1) return;
-    while (st->out->rodata.len % a) {
-        char z = 0;
-        buffer_append(&st->out->rodata, &z, 1);
+static size_t sect_len(AsState *st) {
+    if (!st->out) return 0;
+    if (st->sect == 1) return st->out->rodata.len;
+    if (st->sect == 2) return st->out->data.len;
+    if (st->sect == 3) return st->out->bss_size;
+    return st->out->text.len;
+}
+
+static void sect_append_bytes(AsState *st, const void *bytes, size_t n) {
+    if (!st->out || !n) return;
+    if (st->sect == 1) {
+        buffer_append(&st->out->rodata, bytes, n);
+    } else if (st->sect == 2) {
+        buffer_append(&st->out->data, bytes, n);
+    } else if (st->sect == 3) {
+        st->out->bss_size += n;
+    } else {
+        buffer_append(&st->out->text, bytes, n);
     }
 }
 
-static void define_rodata_lab(AsState *st, const char *name) {
+static void sect_append_zeros(AsState *st, size_t n) {
+    if (!st->out || !n) return;
+    if (st->sect == 3) {
+        st->out->bss_size += n;
+        return;
+    }
+    char z = 0;
+    for (size_t i = 0; i < n; i++)
+        sect_append_bytes(st, &z, 1);
+}
+
+static void sect_align(AsState *st, size_t a) {
+    if (!st->out || a <= 1) return;
+    size_t cur = sect_len(st);
+    while (cur % a) {
+        sect_append_zeros(st, 1);
+        cur = sect_len(st);
+    }
+}
+
+static void define_data_lab(AsState *st, const char *name) {
     if (!st->out) return;
+    size_t off = sect_len(st);
     for (int i = 0; i < st->nrlab; i++) {
         if (strcmp(st->rlabs[i].name, name) == 0) {
-            st->rlabs[i].off = st->out->rodata.len;
+            st->rlabs[i].off = off;
             st->rlabs[i].defined = 1;
+            st->rlabs[i].sect = st->sect;
             return;
         }
     }
     if (st->nrlab >= st->rcap) {
         int nc = st->rcap ? st->rcap * 2 : 8;
-        st->rlabs = realloc(st->rlabs, (size_t)nc * sizeof(RodataLab));
+        st->rlabs = realloc(st->rlabs, (size_t)nc * sizeof(DataLab));
         if (!st->rlabs) exit(1);
         st->rcap = nc;
     }
     st->rlabs[st->nrlab].name = xdup(name);
-    st->rlabs[st->nrlab].off = st->out->rodata.len;
+    st->rlabs[st->nrlab].off = off;
     st->rlabs[st->nrlab].defined = 1;
+    st->rlabs[st->nrlab].sect = st->sect;
     st->nrlab++;
+}
+
+/* Emit little-endian integer or R_X86_64_64 / absolute reloc against a symbol.
+ * Returns 1 on success. */
+static int emit_data_value(AsState *st, const char *tok, size_t width,
+                           const char *file, int line) {
+    const char *p = skip_ws(tok);
+    if (!*p) {
+        as_fail(file, line, "empty data value");
+        return 0;
+    }
+    /* Optional leading '$' (gas immediate style in data is uncommon but harmless). */
+    if (*p == '$') p++;
+
+    /* Integer literal? */
+    if (*p == '-' || *p == '+' || isdigit((unsigned char)*p)) {
+        char *end = NULL;
+        long long v = strtoll(p, &end, 0);
+        if (end == p) {
+            as_fail(file, line, "bad integer in data directive");
+            return 0;
+        }
+        unsigned char buf[8];
+        memset(buf, 0, sizeof buf);
+        for (size_t i = 0; i < width && i < 8; i++)
+            buf[i] = (unsigned char)((unsigned long long)v >> (8 * i));
+        if (st->sect == 3) {
+            /* Initialized value in .bss is odd; treat as reservation. */
+            sect_append_zeros(st, width);
+        } else {
+            sect_append_bytes(st, buf, width);
+        }
+        return 1;
+    }
+
+    /* Symbol [+/- addend] — emit zeros + reloc (data/rodata only). */
+    if (!(isalpha((unsigned char)*p) || *p == '_' || *p == '.')) {
+        as_fail(file, line, "expected integer or symbol in data directive");
+        return 0;
+    }
+    const char *s = p;
+    while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.')) p++;
+    char id[128];
+    size_t n = (size_t)(p - s);
+    if (!n || n >= sizeof id) {
+        as_fail(file, line, "bad symbol in data directive");
+        return 0;
+    }
+    memcpy(id, s, n); id[n] = 0;
+    int32_t addend = 0;
+    p = skip_ws(p);
+    if (*p == '+' || *p == '-') {
+        char *end = NULL;
+        long long adj = strtoll(p, &end, 0);
+        if (end == p) {
+            as_fail(file, line, "bad symbol addend");
+            return 0;
+        }
+        addend = (int32_t)adj;
+        p = end;
+    }
+    (void)p;
+    if (st->sect != 1 && st->sect != 2) {
+        as_fail(file, line, "symbol data value only in .data/.rodata");
+        return 0;
+    }
+    if (width != 8 && width != 4) {
+        as_fail(file, line, "symbol reloc needs .quad/.long");
+        return 0;
+    }
+    size_t off = sect_len(st);
+    sect_append_zeros(st, width);
+    int sym = emit_module_add_undefined(st->out, id);
+    /* R_X86_64_64=1 for 8-byte; for .long use same absolute family (linker
+     * width follows reloc site size via emit path — store as 64-bit type and
+     * 4-byte slot is still patched low 32 on hosts that honor size). */
+    uint32_t rty = R_X86_64_64;
+    emit_module_add_data_reloc(st->out, off, rty, sym, addend);
+    if (st->sect == 1 && st->out->num_data_relocs > 0)
+        st->out->data_relocs[st->out->num_data_relocs - 1].shndx = SECT_RODATA;
+    return 1;
+}
+
+static int parse_data_directive(AsState *st, const char *lp,
+                                const char *file, int line) {
+    size_t width = 0;
+    const char *args = NULL;
+    int is_zero = 0;
+    if (starts(lp, ".quad") || starts(lp, "dq")) {
+        width = 8;
+        args = skip_ws(lp + (starts(lp, ".quad") ? 5 : 2));
+    } else if (starts(lp, ".long") || starts(lp, ".int") || starts(lp, "dd")) {
+        width = 4;
+        args = skip_ws(lp + (starts(lp, ".long") ? 5 : starts(lp, ".int") ? 4 : 2));
+    } else if (starts(lp, ".word") || starts(lp, ".short") || starts(lp, "dw")) {
+        width = 2;
+        args = skip_ws(lp + (starts(lp, ".word") ? 5 : starts(lp, ".short") ? 6 : 2));
+    } else if (starts(lp, ".byte") || starts(lp, "db")) {
+        width = 1;
+        args = skip_ws(lp + (starts(lp, ".byte") ? 5 : 2));
+    } else if (starts(lp, ".zero") || starts(lp, ".space")) {
+        is_zero = 1;
+        args = skip_ws(lp + (starts(lp, ".zero") ? 5 : 6));
+    } else {
+        return 0; /* not a data directive */
+    }
+
+    if (is_zero) {
+        char *end = NULL;
+        long n = strtol(args, &end, 0);
+        if (n < 0) n = 0;
+        if (n > 1 << 20) {
+            as_fail(file, line, ".zero/.space too large");
+            return -1;
+        }
+        sect_append_zeros(st, (size_t)n);
+        return 1;
+    }
+
+    if (!args || !*args) {
+        as_fail(file, line, "data directive needs a value");
+        return -1;
+    }
+    while (*args) {
+        args = skip_ws(args);
+        if (*args == ',') { args++; continue; }
+        if (!*args) break;
+        /* one value up to next comma */
+        const char *s = args;
+        int depth = 0;
+        while (*args) {
+            if (*args == '(') depth++;
+            else if (*args == ')') { if (depth) depth--; }
+            else if (*args == ',' && depth == 0) break;
+            args++;
+        }
+        char tmp[256];
+        size_t n = (size_t)(args - s);
+        if (n >= sizeof tmp) n = sizeof tmp - 1;
+        memcpy(tmp, s, n); tmp[n] = 0;
+        /* trim trailing space */
+        while (n > 0 && isspace((unsigned char)tmp[n - 1])) tmp[--n] = 0;
+        if (!emit_data_value(st, tmp, width, file, line))
+            return -1;
+        if (*args == ',') args++;
+    }
+    return 1;
 }
 
 static char *join_path(const char *dir, const char *rel) {
@@ -223,7 +408,8 @@ static int do_incbin(AsState *st, const char *path_tok, const char *file, int li
         return 0;
     }
     free(full);
-    if (st->sect == 0) st->sect = 1;
+    /* .incbin always materializes into .rodata */
+    st->sect = 1;
     char buf[4096];
     size_t n;
     while ((n = fread(buf, 1, sizeof buf, fp)) > 0)
@@ -271,10 +457,15 @@ static void ingest_line(AsState *st, const char *line) {
         return;
     }
     if (starts(lp, ".text")) { st->sect = 0; return; }
-    if (starts(lp, ".data") || starts(lp, ".bss")) { st->sect = 1; return; }
+    if (starts(lp, ".data")) { st->sect = 2; return; }
+    if (starts(lp, ".bss")) { st->sect = 3; return; }
     if (starts(lp, ".section")) {
-        if (strstr(lp, ".rodata") || strstr(lp, ".data") || strstr(lp, ".bss"))
+        if (strstr(lp, ".rodata"))
             st->sect = 1;
+        else if (strstr(lp, ".data"))
+            st->sect = 2;
+        else if (strstr(lp, ".bss"))
+            st->sect = 3;
         else if (strstr(lp, ".text"))
             st->sect = 0;
         return;
@@ -289,7 +480,7 @@ static void ingest_line(AsState *st, const char *line) {
             a = 1L << a;
         }
         if (a <= 0) a = 1;
-        if (st->sect == 1) rodata_align(st, (size_t)a);
+        if (st->sect != 0) sect_align(st, (size_t)a);
         return;
     }
     if (starts(lp, ".incbin")) {
@@ -302,8 +493,15 @@ static void ingest_line(AsState *st, const char *line) {
         starts(lp, ".att_syntax") || starts(lp, ".set") || starts(lp, ".equ"))
         return;
 
-    /* label: in rodata section */
-    if (st->sect == 1) {
+    /* .quad/.long/.byte/.zero (and dq/dd/db) — valid in any section */
+    {
+        int dr = parse_data_directive(st, lp, "<asm>", 0);
+        if (dr < 0) exit(1);
+        if (dr > 0) return;
+    }
+
+    /* label: in data / rodata / bss */
+    if (st->sect != 0) {
         const char *q = lp;
         if ((isalpha((unsigned char)*q) || *q == '_' || *q == '.')) {
             const char *s = q;
@@ -314,14 +512,14 @@ static void ingest_line(AsState *st, const char *line) {
                 size_t n = (size_t)(q - s);
                 if (n >= sizeof id) n = sizeof id - 1;
                 memcpy(id, s, n); id[n] = 0;
-                define_rodata_lab(st, id);
+                define_data_lab(st, id);
                 r++;
                 r = skip_ws(r);
-                if (*r) ingest_line(st, r); /* rare: label+insn */
+                if (*r) ingest_line(st, r); /* label + directive/insn */
                 return;
             }
         }
-        /* ignore unknown rodata content besides .incbin/.align/labels */
+        /* unknown non-text content */
         return;
     }
 
@@ -521,15 +719,18 @@ int assemble_s_file(const char *src, const char *filename, EmitModule *out) {
             free(line); lineno++; continue;
         }
 
-        /* Ignored / section switches — section content goes to .text for now
-         * (S3 stubs are code-only). .bss/.data bytes via .zero/.quad still ok. */
+        /* Section switches, align, incbin, data directives, ignored metas. */
         if (starts(lp, ".incbin") || starts(lp, ".text") || starts(lp, ".data") ||
             starts(lp, ".bss") || starts(lp, ".section") || starts(lp, ".align") ||
             starts(lp, ".p2align") || starts(lp, ".type") || starts(lp, ".size") ||
             starts(lp, ".file") || starts(lp, ".ident") || starts(lp, ".code64") ||
             starts(lp, ".intel_syntax") || starts(lp, ".att_syntax") ||
-            starts(lp, ".set") || starts(lp, ".equ")) {
-            /* Section / align / incbin / ignored — go through ingest_line. */
+            starts(lp, ".set") || starts(lp, ".equ") ||
+            starts(lp, ".quad") || starts(lp, ".long") || starts(lp, ".int") ||
+            starts(lp, ".word") || starts(lp, ".short") || starts(lp, ".byte") ||
+            starts(lp, ".zero") || starts(lp, ".space") ||
+            starts(lp, "dq") || starts(lp, "dd") || starts(lp, "dw") ||
+            starts(lp, "db")) {
             ingest_line(&st, lp);
             free(line); lineno++; continue;
         }
@@ -598,7 +799,7 @@ int assemble_s_file(const char *src, const char *filename, EmitModule *out) {
     int rc = iasm_assemble_body(out, st.text ? st.text : "",
                                 (const char **)st.globals, st.nglobals,
                                 (const char **)st.externs, st.nexterns);
-    /* Register .rodata labels (S5 .incbin blobs) as STB_GLOBAL STT_OBJECT. */
+    /* Register .data/.rodata/.bss labels as STT_OBJECT (S3 conduit / tables). */
     for (int i = 0; i < st.nrlab; i++) {
         if (!st.rlabs[i].defined) continue;
         int is_global = 0;
@@ -608,15 +809,22 @@ int assemble_s_file(const char *src, const char *filename, EmitModule *out) {
             }
         uint8_t bind = is_global ? 1 : 0; /* STB_GLOBAL / LOCAL */
         size_t off = st.rlabs[i].off;
-        size_t end = out->rodata.len;
+        int sect = st.rlabs[i].sect;
+        size_t sect_end = 0;
+        uint16_t shndx = SECT_RODATA;
+        if (sect == 2) { sect_end = out->data.len; shndx = SECT_DATA; }
+        else if (sect == 3) { sect_end = out->bss_size; shndx = SECT_BSS; }
+        else { sect_end = out->rodata.len; shndx = SECT_RODATA; }
+        size_t end = sect_end;
         for (int j = 0; j < st.nrlab; j++) {
             if (!st.rlabs[j].defined) continue;
+            if (st.rlabs[j].sect != sect) continue;
             if (st.rlabs[j].off > off && st.rlabs[j].off < end)
                 end = st.rlabs[j].off;
         }
         size_t sz = end >= off ? end - off : 0;
         emit_module_add_symbol(out, st.rlabs[i].name, bind, /*STT_OBJECT*/1,
-                               SECT_RODATA, off, sz);
+                               shndx, off, sz);
     }
     free_state(&st);
     return rc;

@@ -8,10 +8,13 @@ assembler (`iasm`).
 
 | Directive | Support |
 |-----------|---------|
-| `.text` / `.data` / `.bss` / `.section …` | Accepted (code emitted to `.text`) |
-| `.globl` / `.global` | Export label as `STB_GLOBAL` `STT_FUNC` |
+| `.text` / `.data` / `.bss` / `.section …` | Section select; code → `.text`, data dirs → `.data`/`.rodata`/`.bss` |
+| `.globl` / `.global` | Export label (`STT_FUNC` in `.text`, `STT_OBJECT` in data) |
 | `.extern` | `SHN_UNDEF` |
-| `.align` / `.p2align` / `.type` / `.size` | Ignored |
+| `.quad` / `.long` / `.word` / `.byte` (aliases `dq`/`dd`/`dw`/`db`) | Integers or symbol[+addend]; symbol → `R_X86_64_64` in `.data`/`.rodata` |
+| `.zero` / `.space N` | Reserve N bytes (`.bss` grows; others write zeros) |
+| `.align` / `.p2align` | Honored in data/rodata/bss; ignored in `.text` |
+| `.type` / `.size` | Ignored |
 | `.macro name args…` / `.endm` | Expanded; `\arg` and `\()` |
 | `.rept N` / `.endr` | Repeat body N times (stub tables) |
 | `.incbin "path"` | Embed file bytes in `.rodata` (S5) |
@@ -37,10 +40,11 @@ Local labels and forward `jmp`/`call` work within one file; externals get
 
 1. **io / usys / crt0** — see `docs/examples/io.S`, `usys.S`, `crt0.S`
 2. **switch.asm** — **example-ready**: `docs/examples/switch.S` (`fakecc -c`)
-3. **sysentry / desc** — need `movdqa` (now in iasm); see
-   `docs/examples/sysentry_xmm.S`. Full ports still want `.data`/`.quad`
-   conduit symbols, ISR `.macro`/`.rept` tables, and remaining privileged ops
-   (lgdt/lidt/ltr/rdmsr/wrmsr/invlpg already claimed).
+3. **sysentry / desc** — `movdqa`, `.data` `.quad` conduit, and stub tables
+   work; see `docs/examples/sysentry.S` and `docs/examples/desc_stubs.S`
+   (plus older `sysentry_xmm.S`). Remaining gaps: full ISR error-code matrix /
+   `%assign`-style counters, `user_iret_trampoline` / `fork_ret_trampoline`,
+   and wiring to C `syscall_dispatch` / `isr_common` in a real fakeos link.
 4. boot.asm (32-bit — out of scope for this subset)
 
 ## C + M1/M2 alternative (no `.S`)
@@ -70,6 +74,8 @@ RIP-relative data (`syscall_user_rsp(%rip)`).
 ```text
 fakecc -c arch/x86_64/io.S -o io.o
 fakecc -c arch/x86_64/switch.S -o switch.o
+fakecc -c docs/examples/sysentry.S -o sysentry.o
+fakecc -c docs/examples/desc_stubs.S -o desc_stubs.o
 fakecc --kernel-multiboot -nostdlib boot.o io.o … -o fakeos.elf
 ```
 

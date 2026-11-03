@@ -722,6 +722,30 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
                 e32(b, (int32_t)imm1);
             }
             handled = 1;
+        } else if (k1 == 4 && k2 == 0 && sym1) {
+            /* mov sym(%rip), %reg */
+            int rw = (strcmp(mn, "movl") == 0) ? 4 : 8;
+            if (strcmp(mn, "movb") == 0) rw = 1;
+            else if (strcmp(mn, "movw") == 0) rw = 2;
+            rex(b, rw == 8, r2, 0, 0); eb(b, rw == 1 ? 0x8A : 0x8B); modrm(b, 0, r2, 5);
+            size_t po = b->len; e32(b, 0);
+            if (out) {
+                int sym = emit_module_add_undefined(out, sym1);
+                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
+            }
+            handled = 1;
+        } else if (k1 == 0 && k2 == 4 && sym2) {
+            /* mov %reg, sym(%rip) */
+            int rw = (strcmp(mn, "movl") == 0) ? 4 : 8;
+            if (strcmp(mn, "movb") == 0) rw = 1;
+            else if (strcmp(mn, "movw") == 0) rw = 2;
+            rex(b, rw == 8, r1, 0, 0); eb(b, rw == 1 ? 0x88 : 0x89); modrm(b, 0, r1, 5);
+            size_t po = b->len; e32(b, 0);
+            if (out) {
+                int sym = emit_module_add_undefined(out, sym2);
+                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
+            }
+            handled = 1;
         }
     } else if (strcmp(mn, "out") == 0 || strcmp(mn, "outb") == 0 ||
                strcmp(mn, "outw") == 0 || strcmp(mn, "outl") == 0) {
@@ -837,28 +861,6 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
             size_t po = b->len; e32(b, 0);
             if (out) {
                 int sym = emit_module_add_undefined(out, sym1);
-                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
-            }
-            handled = 1;
-        }
-    } else if ((strcmp(mn, "mov") == 0 || strcmp(mn, "movq") == 0 ||
-                strcmp(mn, "movl") == 0) &&
-               ((k1 == 4 && k2 == 0) || (k1 == 0 && k2 == 4))) {
-        /* movq sym(%rip), %reg  /  movq %reg, sym(%rip) */
-        int w = (strcmp(mn, "movl") == 0) ? 4 : 8;
-        if (k1 == 4 && k2 == 0 && sym1) {
-            rex(b, w == 8, r2, 0, 0); eb(b, 0x8B); modrm(b, 0, r2, 5);
-            size_t po = b->len; e32(b, 0);
-            if (out) {
-                int sym = emit_module_add_undefined(out, sym1);
-                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
-            }
-            handled = 1;
-        } else if (k1 == 0 && k2 == 4 && sym2) {
-            rex(b, w == 8, r1, 0, 0); eb(b, 0x89); modrm(b, 0, r1, 5);
-            size_t po = b->len; e32(b, 0);
-            if (out) {
-                int sym = emit_module_add_undefined(out, sym2);
                 emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
             }
             handled = 1;

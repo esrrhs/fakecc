@@ -283,6 +283,77 @@ static void test_movdqa_xmm(void) {
     emit_module_free(&em);
 }
 
+
+static void test_data_quad_byte(void) {
+    static const char src[] =
+        "    .text\n"
+        "    .globl touch, stub0, stub1\n"
+        "touch:\n"
+        "    mov syscall_user_rsp(%rip), %rax\n"
+        "    mov %rax, syscall_user_rsp(%rip)\n"
+        "    ret\n"
+        "stub0:\n"
+        "    push $0\n"
+        "    ret\n"
+        "stub1:\n"
+        "    push $1\n"
+        "    ret\n"
+        "    .data\n"
+        "    .align 8\n"
+        "    .globl syscall_user_rsp, isr_stub_table, marker_bytes\n"
+        "syscall_user_rsp:\n"
+        "    .quad 0\n"
+        "isr_stub_table:\n"
+        "    .quad stub0\n"
+        "    .quad stub1\n"
+        "marker_bytes:\n"
+        "    .byte 0x48, 0x0F, 0x07\n"
+        "    .long 0x11223344\n";
+    EmitModule em;
+    emit_module_init(&em);
+    T_ASSERT_EQ_INT(assemble_s_file(src, "data.S", &em), 0);
+    T_ASSERT(has_sym(&em, "syscall_user_rsp"));
+    T_ASSERT(has_sym(&em, "isr_stub_table"));
+    T_ASSERT(has_sym(&em, "marker_bytes"));
+    T_ASSERT(em.data.len >= 8 + 8 + 8 + 3 + 4);
+    /* syscall_user_rsp = 8 zero bytes */
+    T_ASSERT_EQ_INT((int)(unsigned char)em.data.data[0], 0);
+    /* marker_bytes at offset 24: 0x48 0x0F 0x07 */
+    T_ASSERT_EQ_INT((int)(unsigned char)em.data.data[24], 0x48);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.data.data[25], 0x0F);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.data.data[26], 0x07);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.data.data[27], 0x44);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.data.data[28], 0x33);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.data.data[29], 0x22);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.data.data[30], 0x11);
+    /* two R_X86_64_64 data relocs for stub0/stub1 */
+    T_ASSERT(em.num_data_relocs >= 2);
+    int si = emit_module_find_symbol(&em, "syscall_user_rsp");
+    T_ASSERT(si >= 0);
+    T_ASSERT_EQ_INT((int)em.syms[si].shndx, (int)SECT_DATA);
+    /* RIP-relative loads/stores against conduit */
+    T_ASSERT(em.num_relocs >= 2);
+    emit_module_free(&em);
+}
+
+static void test_byte_in_text_sysret(void) {
+    static const char src[] =
+        "    .text\n"
+        "    .globl raw_sysret\n"
+        "raw_sysret:\n"
+        "    .byte 0x48, 0x0F, 0x07\n"
+        "    ret\n";
+    EmitModule em;
+    emit_module_init(&em);
+    T_ASSERT_EQ_INT(assemble_s_file(src, "sysret.S", &em), 0);
+    T_ASSERT(em.text.len >= 4);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[0], 0x48);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[1], 0x0F);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[2], 0x07);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[3], 0xC3);
+    emit_module_free(&em);
+}
+
 int main(void) {
     target_set_current(target_x86_64_linux());
     test_assemble_io_subset();
@@ -292,5 +363,7 @@ int main(void) {
     test_incbin_rodata();
     test_switch_subset();
     test_movdqa_xmm();
+    test_data_quad_byte();
+    test_byte_in_text_sysret();
     return t_finalize();
 }
