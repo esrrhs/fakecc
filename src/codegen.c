@@ -2507,9 +2507,32 @@ static int emit_mul_imm_strength(Buffer *b, int acc, int64_t imm, int width) {
     return 1;
 }
 
+
+static int value_unique_def(const IRFunction *fn, IRValue v);
+static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_off,
+                        IRValue v, int *out_off, int depth);
+
+/* Sole-use frame LOAD into dst — pairs with fused_skip of that LOAD so
+ * is_prime `i>>3` / `i&7` load straight into the ALU acc (no home bounce). */
+static int remat_sole_frame_load(Buffer *b, const IRFunction *fn, const int *def,
+                                 const int *alloca_off, IRValue v, int dst) {
+    if (!fn || !def || !alloca_off || v < 0 || v >= fn->next_value_id
+        || def[v] < 0 || !value_unique_def(fn, v))
+        return 0;
+    const IRInst *ld = &fn->insts.data[def[v]];
+    if (ld->op != IR_LOAD && ld->op != IR_LOAD_PTR) return 0;
+    int off = 0;
+    if (!fold_ptr_off(fn, def, alloca_off, ld->a, &off, 0) || off == 0)
+        return 0;
+    int w = ld->width > 0 ? ld->width : 4;
+    emit_load_disp(b, dst, REG_RBP, off, w, ld->is_unsigned);
+    return 1;
+}
+
 /* Binary integer ALU at native width, with gcc-O0-style immediates. */
 static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
-                       const int *def, const RAResult *ra, int dr, int is_mul) {
+                       const int *def, const RAResult *ra, const int *alloca_off,
+                       int dr, int is_mul) {
     int width = inst->width > 0 ? inst->width : 8;
     int64_t imm_a = 0, imm_b = 0;
     int bitwise = !is_mul && (inst->op == IR_BAND || inst->op == IR_BOR
@@ -2546,7 +2569,11 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
             }
         }
         acc = pick_alu_acc(dr, -1);
-        ensure_reg(b, inst->a, acc, ra);
+        if (bitwise
+            && remat_sole_frame_load(b, fn, def, alloca_off, inst->a, acc))
+            ;
+        else
+            ensure_reg(b, inst->a, acc, ra);
         if (is_mul && !emit_mul_imm_strength(b, acc, imm_b, width))
             emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
         else if (!is_mul) {
@@ -2572,7 +2599,11 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
             }
         }
         acc = pick_alu_acc(dr, -1);
-        ensure_reg(b, inst->b, acc, ra);
+        if (bitwise
+            && remat_sole_frame_load(b, fn, def, alloca_off, inst->b, acc))
+            ;
+        else
+            ensure_reg(b, inst->b, acc, ra);
         if (is_mul && !emit_mul_imm_strength(b, acc, imm_a, width))
             emit_imul_imm_w(b, acc, (int32_t)imm_a, width);
         else if (!is_mul) {
@@ -2587,7 +2618,11 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
     } else {
         int bhome = gp_home(ra, inst->b);
         acc = pick_alu_acc(dr, bhome);
-        ensure_reg(b, inst->a, acc, ra);
+        if (bitwise
+            && remat_sole_frame_load(b, fn, def, alloca_off, inst->a, acc))
+            ;
+        else
+            ensure_reg(b, inst->a, acc, ra);
         int br = bhome >= 0 ? bhome : REG_RCX;
         if (bhome < 0) ensure_reg(b, inst->b, br, ra);
         if (is_mul) emit_imul_rr_w(b, acc, br, width);
@@ -2605,8 +2640,8 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
  * wrap_off!=0: sole use is a frame STORE — emit from ALU acc (flag-safe
  * movl) and skip the GP-home shuttle gcc also avoids. */
 static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
-                     const int *def, const RAResult *ra, int dr, int keep_flags,
-                     int wrap_off, int wrap_w) {
+                     const int *def, const RAResult *ra, const int *alloca_off,
+                     int dr, int keep_flags, int wrap_off, int wrap_w) {
     int width = inst->width > 0 ? inst->width : 8;
     int tu = inst->is_unsigned;
     int ov_dr = gp_home(ra, inst->c);
@@ -2624,7 +2659,8 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
             emit_mov_rr(b, REG_RCX, br);
             br = REG_RCX;
         }
-        ensure_reg(b, inst->a, REG_RAX, ra);
+        if (!remat_sole_frame_load(b, fn, def, alloca_off, inst->a, REG_RAX))
+            ensure_reg(b, inst->a, REG_RAX, ra);
         if (br == REG_RAX) {
             ensure_reg(b, inst->b, REG_RCX, ra);
             br = REG_RCX;
@@ -2647,12 +2683,14 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
     } else {
         if (!fb) {
             br = bhome >= 0 ? bhome : REG_RCX;
-            ensure_reg(b, inst->b, br, ra);
+            if (!remat_sole_frame_load(b, fn, def, alloca_off, inst->b, br))
+                ensure_reg(b, inst->b, br, ra);
         }
         acc = pick_alu_acc(dr, br >= 0 ? br : -1);
         if (acc == br)
             acc = (br != REG_RAX) ? REG_RAX : REG_RCX;
-        ensure_reg(b, inst->a, acc, ra);
+        if (!remat_sole_frame_load(b, fn, def, alloca_off, inst->a, acc))
+            ensure_reg(b, inst->a, acc, ra);
 
         if (!keep_flags) {
             ov = (ov_dr >= 0 && ov_dr != acc && ov_dr != br && ov_dr != REG_RAX)
@@ -2695,23 +2733,27 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
 }
 
 static void isel_shift(Buffer *b, const IRInst *inst, const IRFunction *fn,
-                       const int *def, const RAResult *ra, int dr, int ext) {
+                       const int *def, const RAResult *ra, const int *alloca_off,
+                       int dr, int ext) {
     int width = inst->width > 0 ? inst->width : 8;
     int64_t imm = 0;
     int acc;
     if (ssa_const_imm(fn, def, inst->b, &imm) && imm >= 0 && imm < 64) {
         acc = pick_alu_acc(dr, -1);
-        ensure_reg(b, inst->a, acc, ra);
+        if (!remat_sole_frame_load(b, fn, def, alloca_off, inst->a, acc))
+            ensure_reg(b, inst->a, acc, ra);
         emit_shift_imm_w(b, ext, acc, (int)imm, width);
     } else {
         int ahome = gp_home(ra, inst->a);
         acc = pick_alu_acc(dr, REG_RCX);
         if (ahome == REG_RCX) {
-            ensure_reg(b, inst->a, acc, ra);
+            if (!remat_sole_frame_load(b, fn, def, alloca_off, inst->a, acc))
+                ensure_reg(b, inst->a, acc, ra);
             ensure_reg(b, inst->b, REG_RCX, ra);
         } else {
             ensure_reg(b, inst->b, REG_RCX, ra);
-            ensure_reg(b, inst->a, acc, ra);
+            if (!remat_sole_frame_load(b, fn, def, alloca_off, inst->a, acc))
+                ensure_reg(b, inst->a, acc, ra);
         }
         if (ext == 0)
             emit_rol_rcx(b, acc, width);
@@ -6852,7 +6894,69 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
             }
         }
-        /* Call results consumed only by a CBR: leave in RAX and test there
+
+        
+        /* Sole-use frame LOAD → ADDO/SUBO/MULO operand: remat into ALU acc
+         * (overflow hot path loads a/b without home bounce). */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *ov = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (!ir_op_with_overflow(ov->op)) continue;
+            IRValue srcs[2] = { ov->a, ov->b };
+            for (int si = 0; si < 2; si++) {
+                IRValue sv = srcs[si];
+                if (sv < 0 || sv >= nvals_f || raw_uses[sv] != 1) continue;
+                if (!value_unique_def(fn, sv) || ssa_def[sv] < 0) continue;
+                int64_t imm = 0;
+                if (ssa_const_imm(fn, ssa_def, sv, &imm)) continue;
+                int li = ssa_def[sv];
+                if (skip_body[li] || fused_skip[li]) continue;
+                const IRInst *ld = &fn->insts.data[li];
+                int off = 0;
+                if ((ld->op != IR_LOAD && ld->op != IR_LOAD_PTR)
+                    || !fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &off, 0)
+                    || off == 0)
+                    continue;
+                fused_skip[li] = 1;
+                if (ld->op == IR_LOAD_PTR && ld->a >= 0 && ld->a < nvals_f
+                    && raw_uses[ld->a] == 1 && ssa_def[ld->a] >= 0)
+                    fused_skip[ssa_def[ld->a]] = 1;
+            }
+        }
+        /* Sole-use frame LOAD → shift/bitwise with imm: rematerialize into
+         * the acc and skip the LOAD (is_prime i>>3 / i&7).  ADD/SUB/MUL
+         * excluded — lea/rr paths may read the LOAD's GP home. */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *al = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (al->op != IR_SHR && al->op != IR_SHL && al->op != IR_BAND
+                && al->op != IR_BOR && al->op != IR_BXOR)
+                continue;
+            if (al->is_float) continue;
+            int64_t ia = 0, ib = 0;
+            int fa = ssa_const_imm(fn, ssa_def, al->a, &ia);
+            int fb = ssa_const_imm(fn, ssa_def, al->b, &ib);
+            if (fa == fb) continue;
+            /* Shift count in b must be the imm for remat-of-a path; if the
+             * load is the count (1<<load), isel uses %cl not remat. */
+            if ((al->op == IR_SHR || al->op == IR_SHL) && !fb) continue;
+            IRValue sv = fb ? al->a : al->b;
+            if (sv < 0 || sv >= nvals_f || raw_uses[sv] != 1) continue;
+            if (!value_unique_def(fn, sv) || ssa_def[sv] < 0) continue;
+            int li = ssa_def[sv];
+            if (skip_body[li] || fused_skip[li]) continue;
+            const IRInst *ld = &fn->insts.data[li];
+            int off = 0;
+            if ((ld->op != IR_LOAD && ld->op != IR_LOAD_PTR)
+                || !fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &off, 0)
+                || off == 0)
+                continue;
+            fused_skip[li] = 1;
+            if (ld->op == IR_LOAD_PTR && ld->a >= 0 && ld->a < nvals_f
+                && raw_uses[ld->a] == 1 && ssa_def[ld->a] >= 0)
+                fused_skip[ssa_def[ld->a]] = 1;
+        }
+/* Call results consumed only by a CBR: leave in RAX and test there
          * (sieve `if (is_prime(i))`) instead of rax→home→test. */
         char *call_cbr_rax = xmalloc(nvals_f ? nvals_f : 1);
         memset(call_cbr_rax, 0, nvals_f ? nvals_f : 1);
@@ -7345,7 +7449,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_ADDO:
             case IR_SUBO:
             case IR_MULO:
-                isel_ovf(&out->text, inst, fn, ssa_def, ra, dr,
+                isel_ovf(&out->text, inst, fn, ssa_def, ra, alloca_off, dr,
                          ovf_keep_flags[j], ovf_wrap_off[j], ovf_wrap_w[j]);
                 break;
 
@@ -7373,7 +7477,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_BAND:
             case IR_BOR:
             case IR_BXOR:
-                isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 0);
+                isel_arith(&out->text, inst, fn, ssa_def, ra, alloca_off, dr, 0);
                 if ((inst->op == IR_ADD || inst->op == IR_SUB)
                     && carry_hi_at[j] >= 0) {
                     /* CF still belongs to the low add/sub: finish_gp_dst
@@ -7421,7 +7525,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     spill_if_needed(&out->text, hi->dst,
                                     hi_dr >= 0 ? hi_dr : REG_RDX, ra);
                 } else {
-                    isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 1);
+                    isel_arith(&out->text, inst, fn, ssa_def, ra, alloca_off, dr, 1);
                 }
                 break;
 
@@ -7591,14 +7695,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_SHL:
-                isel_shift(&out->text, inst, fn, ssa_def, ra, dr, 4);
+                isel_shift(&out->text, inst, fn, ssa_def, ra, alloca_off, dr, 4);
                 break;
             case IR_SHR:
-                isel_shift(&out->text, inst, fn, ssa_def, ra, dr,
+                isel_shift(&out->text, inst, fn, ssa_def, ra, alloca_off, dr,
                            inst->is_unsigned ? 5 : 7);
                 break;
             case IR_ROL:
-                isel_shift(&out->text, inst, fn, ssa_def, ra, dr, 0);
+                isel_shift(&out->text, inst, fn, ssa_def, ra, alloca_off, dr, 0);
                 break;
 
             case IR_EQ:
