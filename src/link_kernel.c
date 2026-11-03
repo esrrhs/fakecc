@@ -9,7 +9,6 @@
 #include "fakecc/emit.h"
 
 #include <stdint.h>
-#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +33,7 @@ enum {
 };
 
 /* LLP64-safe: Windows unsigned long is 32-bit; ELF64 VMA needs 64 bits. */
-static const uint64_t KERNEL_VMA = UINT64_C(0xFFFFFFFF80000000);
+static const uint64_t KERNEL_VMA = 0xFFFFFFFF80000000ULL;
 
 static unsigned short rd16(const unsigned char *p) {
     return (unsigned short)(p[0] | (p[1] << 8));
@@ -53,9 +52,9 @@ static uint64_t rd64(const unsigned char *p) {
 }
 static int64_t rds64(const unsigned char *p) {
     uint64_t u = rd64(p);
-    if (u >= UINT64_C(0x8000000000000000)) {
-        return (int64_t)(u - UINT64_C(0x8000000000000000)) -
-               (int64_t)UINT64_C(0x8000000000000000);
+    if (u >= 0x8000000000000000ULL) {
+        return (int64_t)(u - 0x8000000000000000ULL) -
+               (int64_t)0x8000000000000000ULL;
     }
     return (int64_t)u;
 }
@@ -779,7 +778,7 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
         fprintf(stderr, "fakecc --kernel-multiboot: no _start symbol\n");
         return 1;
     }
-    if (entry > UINT64_C(0xFFFFFFFF)) {
+    if (entry > 0xFFFFFFFFULL) {
         fprintf(stderr, "fakecc --kernel-multiboot: entry outside low 4 GiB\n");
         return 1;
     }
@@ -840,7 +839,7 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
         uint64_t data_end = file_end - HDR_PAD;
         wr32(p + 0, PT_LOAD);
         wr32(p + 4, (unsigned int)high_off);
-        wr32(p + 8, (unsigned int)(text_vma & UINT64_C(0xFFFFFFFF)));
+        wr32(p + 8, (unsigned int)(text_vma & 0xFFFFFFFFULL));
         wr32(p + 12, text_lma);
         wr32(p + 16, (unsigned int)(data_end - (text_lma - KERNEL_LMA)));
         wr32(p + 20, (unsigned int)mem_lma);
@@ -860,8 +859,12 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
         return 1;
     }
     fprintf(stderr,
-            "[fakecc kernel-multiboot] wrote %s: entry 0x%" PRIx64 " text 0x%" PRIx64 " "
-            "file %" PRIu64 " bytes, mem end 0x%" PRIx64 "\n",
-            out_path, entry, text_vma, file_end, KERNEL_VMA + bss_end);
+            "[fakecc kernel-multiboot] wrote %s: entry 0x%llx text 0x%llx "
+            "file %llu bytes, mem end 0x%llx\n",
+            out_path,
+            (unsigned long long)entry,
+            (unsigned long long)text_vma,
+            (unsigned long long)file_end,
+            (unsigned long long)(KERNEL_VMA + bss_end));
     return 0;
 }
