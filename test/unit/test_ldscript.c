@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static const char *KERNEL_LD =
@@ -92,6 +93,31 @@ static const char *USER_LD =
     "        *(COMMON)\n"
     "    } :data\n"
     "}\n";
+
+
+static int is_exec_regular(const char *path) {
+    struct stat st;
+    if (!path || !*path) return 0;
+    if (stat(path, &st) != 0) return 0;
+    if (!S_ISREG(st.st_mode)) return 0;
+    return access(path, X_OK) == 0;
+}
+
+static const char *find_fakecc_bin(void) {
+    static const char *candidates[] = {
+        "/workspace/github/fakecc/build/fakecc",
+        "./build/fakecc",
+        "../fakecc",
+        "../../build/fakecc",
+        "./fakecc",
+        NULL
+    };
+    for (int i = 0; candidates[i]; i++) {
+        if (is_exec_regular(candidates[i]))
+            return candidates[i];
+    }
+    return NULL;
+}
 
 static int write_file(const char *path, const char *text) {
     FILE *f = fopen(path, "w");
@@ -237,27 +263,19 @@ static void test_T_kernel_multiboot_e2e(void) {
     }
 
     /* Prefer CLI -T when fakecc binary is available next to tests / in build. */
-    const char *fcc_candidates[] = {
-        "./fakecc",
-        "../fakecc",
-        "../../fakecc",
-        "/workspace/github/fakecc/build/fakecc",
-        NULL
-    };
-    const char *fcc = NULL;
-    for (int i = 0; fcc_candidates[i]; i++) {
-        if (access(fcc_candidates[i], X_OK) == 0) {
-            fcc = fcc_candidates[i];
-            break;
-        }
-    }
+    const char *fcc = find_fakecc_bin();
 
     if (fcc) {
         char *av[] = {
             (char *)fcc, "-nostdlib", "-T", (char *)script,
             (char *)boot_o, (char *)kern_o, "-o", (char *)out, NULL
         };
-        T_ASSERT(run_cmd(av));
+        int linked = run_cmd(av);
+        T_ASSERT(linked);
+        if (!linked) {
+            unlink(boot_o); unlink(kern_o); unlink(boot_asm); unlink(kern_asm); unlink(script);
+            return;
+        }
     } else {
         /* API path: configure from script then link_kernel_multiboot. */
         LdScriptInfo info;
@@ -312,20 +330,7 @@ static void test_T_user_image_base_e2e(void) {
     T_ASSERT(write_file(script, script6));
     T_ASSERT(write_file(src, "package main; int main(void) { return 0; }\n"));
 
-    const char *fcc_candidates[] = {
-        "./fakecc",
-        "../fakecc",
-        "../../fakecc",
-        "/workspace/github/fakecc/build/fakecc",
-        NULL
-    };
-    const char *fcc = NULL;
-    for (int i = 0; fcc_candidates[i]; i++) {
-        if (access(fcc_candidates[i], X_OK) == 0) {
-            fcc = fcc_candidates[i];
-            break;
-        }
-    }
+    const char *fcc = find_fakecc_bin();
 
     int linked = 0;
     if (fcc) {
@@ -335,6 +340,10 @@ static void test_T_user_image_base_e2e(void) {
         };
         linked = run_cmd(av);
         T_ASSERT(linked);
+        if (!linked) {
+            unlink(script); unlink(src);
+            return;
+        }
     }
 
     if (!linked) {
