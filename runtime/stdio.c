@@ -67,16 +67,18 @@ static int parse_fopen_mode(const char *mode, int *flags, int *writable) {
         *writable = plus;
         return 1;
     }
-    /* Linux x86_64: O_CREAT=0x40(64), O_TRUNC=0x200(512), O_APPEND=0x400(1024).
-     * macOS arm64 uses different values (O_CREAT=0x200, O_TRUNC=0x400, O_APPEND=0x08),
-     * but the runtime currently targets Linux syscall ABI. */
+    /* O_CREAT / O_TRUNC / O_APPEND differ across kernels; values come from
+     * stdlib_{linux,darwin,windows}.c via c_file_matches_target (fakeos N1). */
+    extern int __fakecc_o_creat;
+    extern int __fakecc_o_trunc;
+    extern int __fakecc_o_append;
     if (mode[0] == 'w') {
-        *flags = (plus ? 2 : 1) | 64 /* O_CREAT */ | 512 /* O_TRUNC */;
+        *flags = (plus ? 2 : 1) | __fakecc_o_creat | __fakecc_o_trunc;
         *writable = 1;
         return 1;
     }
     if (mode[0] == 'a') {
-        *flags = (plus ? 2 : 1) | 64 /* O_CREAT */ | 1024 /* O_APPEND */;
+        *flags = (plus ? 2 : 1) | __fakecc_o_creat | __fakecc_o_append;
         *writable = 1;
         return 1;
     }

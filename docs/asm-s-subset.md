@@ -14,6 +14,7 @@ assembler (`iasm`).
 | `.align` / `.p2align` / `.type` / `.size` | Ignored |
 | `.macro name args…` / `.endm` | Expanded; `\arg` and `\()` |
 | `.rept N` / `.endr` | Repeat body N times (stub tables) |
+| `.incbin "path"` | Embed file bytes in `.rodata` (S5) |
 | `#` `//` `;` comments | Stripped |
 
 ## Instructions (non-exhaustive)
@@ -63,6 +64,8 @@ RIP-relative data (`syscall_user_rsp(%rip)`).
 fakecc -c arch/x86_64/io.S -o io.o
 fakecc --kernel-multiboot -nostdlib boot.o io.o … -o fakeos.elf
 ```
+
+See also [embed-incbin.md](embed-incbin.md) (S5) and [env-and-flags.md](env-and-flags.md) (N1/N2).
 
 ## Related: `--target=` (Should S4)
 

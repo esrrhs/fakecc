@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int has_sym(const EmitModule *m, const char *name) {
     return emit_module_find_symbol((EmitModule *)m, name) >= 0;
@@ -118,11 +119,64 @@ static void test_rept_stubs(void) {
     emit_module_free(&em);
 }
 
+
+static void test_incbin_rodata(void) {
+    const char *blob = "/tmp/fakecc_incbin_blob.bin";
+    const char *asmf = "/tmp/fakecc_incbin.S";
+    {
+        FILE *f = fopen(blob, "wb");
+        T_ASSERT(f != NULL);
+        fwrite("HELLO", 1, 5, f);
+        fclose(f);
+    }
+    {
+        FILE *f = fopen(asmf, "w");
+        T_ASSERT(f != NULL);
+        fputs("    .section .rodata\n"
+              "    .globl foo_start\n"
+              "    .globl foo_end\n"
+              "    .align 8\n"
+              "foo_start:\n"
+              "    .incbin \"/tmp/fakecc_incbin_blob.bin\"\n"
+              "foo_end:\n", f);
+        fclose(f);
+    }
+    char *src = NULL;
+    {
+        FILE *f = fopen(asmf, "r");
+        T_ASSERT(f != NULL);
+        fseek(f, 0, SEEK_END);
+        long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        src = malloc((size_t)n + 1);
+        T_ASSERT(src != NULL);
+        T_ASSERT_EQ_INT((int)fread(src, 1, (size_t)n, f), (int)n);
+        src[n] = 0;
+        fclose(f);
+    }
+    EmitModule em;
+    emit_module_init(&em);
+    T_ASSERT_EQ_INT(assemble_s_file(src, asmf, &em), 0);
+    free(src);
+    T_ASSERT(em.rodata.len >= 5);
+    T_ASSERT(memcmp(em.rodata.data, "HELLO", 5) == 0);
+    T_ASSERT(has_sym(&em, "foo_start"));
+    T_ASSERT(has_sym(&em, "foo_end"));
+    int si = emit_module_find_symbol(&em, "foo_start");
+    int ei = emit_module_find_symbol(&em, "foo_end");
+    T_ASSERT(si >= 0 && ei >= 0);
+    T_ASSERT(em.syms[ei].value >= em.syms[si].value + 5);
+    emit_module_free(&em);
+    unlink(blob);
+    unlink(asmf);
+}
+
 int main(void) {
     target_set_current(target_x86_64_linux());
     test_assemble_io_subset();
     test_macro_usysc();
     test_priv_and_rip();
     test_rept_stubs();
+    test_incbin_rodata();
     return t_finalize();
 }

@@ -20,14 +20,25 @@ typedef struct {
 } Macro;
 
 typedef struct {
+    char *name;
+    size_t off;
+    int defined;
+} RodataLab;
+
+typedef struct {
     Macro *macros;
     int nmacros, cap;
     char **globals;
     int nglobals, gcap;
     char **externs;
     int nexterns, ecap;
-    char *text; /* expanded instruction stream */
+    char *text;
     size_t tlen, tcap;
+    int sect; /* 0=.text 1=.rodata */
+    EmitModule *out;
+    const char *src_dir;
+    RodataLab *rlabs;
+    int nrlab, rcap;
 } AsState;
 
 static void as_fail(const char *file, int line, const char *msg) {
@@ -138,7 +149,89 @@ static void free_state(AsState *st) {
     for (int i = 0; i < st->nexterns; i++) free(st->externs[i]);
     free(st->externs);
     free(st->text);
+    for (int i = 0; i < st->nrlab; i++) free(st->rlabs[i].name);
+    free(st->rlabs);
 }
+
+static void rodata_align(AsState *st, size_t a) {
+    if (!st->out || a <= 1) return;
+    while (st->out->rodata.len % a) {
+        char z = 0;
+        buffer_append(&st->out->rodata, &z, 1);
+    }
+}
+
+static void define_rodata_lab(AsState *st, const char *name) {
+    if (!st->out) return;
+    for (int i = 0; i < st->nrlab; i++) {
+        if (strcmp(st->rlabs[i].name, name) == 0) {
+            st->rlabs[i].off = st->out->rodata.len;
+            st->rlabs[i].defined = 1;
+            return;
+        }
+    }
+    if (st->nrlab >= st->rcap) {
+        int nc = st->rcap ? st->rcap * 2 : 8;
+        st->rlabs = realloc(st->rlabs, (size_t)nc * sizeof(RodataLab));
+        if (!st->rlabs) exit(1);
+        st->rcap = nc;
+    }
+    st->rlabs[st->nrlab].name = xdup(name);
+    st->rlabs[st->nrlab].off = st->out->rodata.len;
+    st->rlabs[st->nrlab].defined = 1;
+    st->nrlab++;
+}
+
+static char *join_path(const char *dir, const char *rel) {
+    if (!rel || !rel[0]) return xdup("");
+    if (rel[0] == '/') return xdup(rel);
+    if (!dir || !dir[0] || strcmp(dir, ".") == 0) return xdup(rel);
+    size_t nd = strlen(dir), nr = strlen(rel);
+    char *o = malloc(nd + nr + 2);
+    if (!o) exit(1);
+    memcpy(o, dir, nd);
+    o[nd] = '/';
+    memcpy(o + nd + 1, rel, nr + 1);
+    return o;
+}
+
+static int do_incbin(AsState *st, const char *path_tok, const char *file, int line) {
+    char pathbuf[512];
+    const char *s = skip_ws(path_tok);
+    if (*s == '"' || *s == '\'') {
+        char q = *s++;
+        size_t n = 0;
+        while (*s && *s != q && n + 1 < sizeof pathbuf) pathbuf[n++] = *s++;
+        pathbuf[n] = 0;
+    } else {
+        size_t n = 0;
+        while (*s && !isspace((unsigned char)*s) && n + 1 < sizeof pathbuf)
+            pathbuf[n++] = *s++;
+        pathbuf[n] = 0;
+    }
+    if (!pathbuf[0]) {
+        as_fail(file, line, ".incbin: empty path");
+        return 0;
+    }
+    char *full = join_path(st->src_dir, pathbuf);
+    FILE *fp = fopen(full, "rb");
+    if (!fp) fp = fopen(pathbuf, "rb");
+    if (!fp) {
+        fprintf(stderr, "%s:%d: .incbin: cannot open '%s' (tried '%s')\n",
+                file ? file : "<asm>", line, pathbuf, full);
+        free(full);
+        return 0;
+    }
+    free(full);
+    if (st->sect == 0) st->sect = 1;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, fp)) > 0)
+        buffer_append(&st->out->rodata, buf, n);
+    fclose(fp);
+    return 1;
+}
+
 
 
 static void ingest_line(AsState *st, const char *line) {
@@ -177,20 +270,87 @@ static void ingest_line(AsState *st, const char *line) {
         }
         return;
     }
-    if (starts(lp, ".text") || starts(lp, ".data") || starts(lp, ".bss") ||
-        starts(lp, ".section") || starts(lp, ".align") || starts(lp, ".p2align") ||
-        starts(lp, ".type") || starts(lp, ".size") || starts(lp, ".file") ||
+    if (starts(lp, ".text")) { st->sect = 0; return; }
+    if (starts(lp, ".data") || starts(lp, ".bss")) { st->sect = 1; return; }
+    if (starts(lp, ".section")) {
+        if (strstr(lp, ".rodata") || strstr(lp, ".data") || strstr(lp, ".bss"))
+            st->sect = 1;
+        else if (strstr(lp, ".text"))
+            st->sect = 0;
+        return;
+    }
+    if (starts(lp, ".align") || starts(lp, ".p2align")) {
+        int is_p2 = starts(lp, ".p2align");
+        lp = skip_ws(lp + (is_p2 ? 8 : 6));
+        long a = strtol(lp, NULL, 0);
+        if (is_p2) {
+            if (a < 0) a = 0;
+            if (a > 12) a = 12;
+            a = 1L << a;
+        }
+        if (a <= 0) a = 1;
+        if (st->sect == 1) rodata_align(st, (size_t)a);
+        return;
+    }
+    if (starts(lp, ".incbin")) {
+        if (!do_incbin(st, skip_ws(lp + 7), "<asm>", 0))
+            exit(1);
+        return;
+    }
+    if (starts(lp, ".type") || starts(lp, ".size") || starts(lp, ".file") ||
         starts(lp, ".ident") || starts(lp, ".code64") || starts(lp, ".intel_syntax") ||
         starts(lp, ".att_syntax") || starts(lp, ".set") || starts(lp, ".equ"))
         return;
+
+    /* label: in rodata section */
+    if (st->sect == 1) {
+        const char *q = lp;
+        if ((isalpha((unsigned char)*q) || *q == '_' || *q == '.')) {
+            const char *s = q;
+            while (*q && (isalnum((unsigned char)*q) || *q == '_' || *q == '.')) q++;
+            const char *r = skip_ws(q);
+            if (*r == ':') {
+                char id[128];
+                size_t n = (size_t)(q - s);
+                if (n >= sizeof id) n = sizeof id - 1;
+                memcpy(id, s, n); id[n] = 0;
+                define_rodata_lab(st, id);
+                r++;
+                r = skip_ws(r);
+                if (*r) ingest_line(st, r); /* rare: label+insn */
+                return;
+            }
+        }
+        /* ignore unknown rodata content besides .incbin/.align/labels */
+        return;
+    }
+
     append_text(st, lp);
 }
+
 
 int assemble_s_file(const char *src, const char *filename, EmitModule *out) {
 
     if (!src || !out) return -1;
     AsState st;
     memset(&st, 0, sizeof st);
+    st.out = out;
+    {
+        static char dirbuf[512];
+        dirbuf[0] = '.'; dirbuf[1] = 0;
+        if (filename) {
+            const char *slash = NULL;
+            for (const char *q = filename; *q; q++)
+                if (*q == '/') slash = q;
+            if (slash) {
+                size_t n = (size_t)(slash - filename);
+                if (n >= sizeof dirbuf) n = sizeof dirbuf - 1;
+                memcpy(dirbuf, filename, n);
+                dirbuf[n] = 0;
+            }
+        }
+        st.src_dir = dirbuf;
+    }
 
     /* Line-oriented parse with .macro / .rept nesting. */
     const char *p = src;
@@ -363,11 +523,14 @@ int assemble_s_file(const char *src, const char *filename, EmitModule *out) {
 
         /* Ignored / section switches — section content goes to .text for now
          * (S3 stubs are code-only). .bss/.data bytes via .zero/.quad still ok. */
-        if (starts(lp, ".text") || starts(lp, ".data") || starts(lp, ".bss") ||
-            starts(lp, ".section") || starts(lp, ".align") || starts(lp, ".p2align") ||
-            starts(lp, ".type") || starts(lp, ".size") || starts(lp, ".file") ||
-            starts(lp, ".ident") || starts(lp, ".code64") || starts(lp, ".intel_syntax") ||
-            starts(lp, ".att_syntax") || starts(lp, ".set") || starts(lp, ".equ")) {
+        if (starts(lp, ".incbin") || starts(lp, ".text") || starts(lp, ".data") ||
+            starts(lp, ".bss") || starts(lp, ".section") || starts(lp, ".align") ||
+            starts(lp, ".p2align") || starts(lp, ".type") || starts(lp, ".size") ||
+            starts(lp, ".file") || starts(lp, ".ident") || starts(lp, ".code64") ||
+            starts(lp, ".intel_syntax") || starts(lp, ".att_syntax") ||
+            starts(lp, ".set") || starts(lp, ".equ")) {
+            /* Section / align / incbin / ignored — go through ingest_line. */
+            ingest_line(&st, lp);
             free(line); lineno++; continue;
         }
 
@@ -421,7 +584,7 @@ int assemble_s_file(const char *src, const char *filename, EmitModule *out) {
             }
         }
 
-        append_text(&st, lp);
+        ingest_line(&st, lp);
         free(line);
         lineno++;
     }
@@ -435,6 +598,26 @@ int assemble_s_file(const char *src, const char *filename, EmitModule *out) {
     int rc = iasm_assemble_body(out, st.text ? st.text : "",
                                 (const char **)st.globals, st.nglobals,
                                 (const char **)st.externs, st.nexterns);
+    /* Register .rodata labels (S5 .incbin blobs) as STB_GLOBAL STT_OBJECT. */
+    for (int i = 0; i < st.nrlab; i++) {
+        if (!st.rlabs[i].defined) continue;
+        int is_global = 0;
+        for (int g = 0; g < st.nglobals; g++)
+            if (strcmp(st.globals[g], st.rlabs[i].name) == 0) {
+                is_global = 1; break;
+            }
+        uint8_t bind = is_global ? 1 : 0; /* STB_GLOBAL / LOCAL */
+        size_t off = st.rlabs[i].off;
+        size_t end = out->rodata.len;
+        for (int j = 0; j < st.nrlab; j++) {
+            if (!st.rlabs[j].defined) continue;
+            if (st.rlabs[j].off > off && st.rlabs[j].off < end)
+                end = st.rlabs[j].off;
+        }
+        size_t sz = end >= off ? end - off : 0;
+        emit_module_add_symbol(out, st.rlabs[i].name, bind, /*STT_OBJECT*/1,
+                               SECT_RODATA, off, sz);
+    }
     free_state(&st);
     return rc;
 }

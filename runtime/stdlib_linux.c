@@ -11,6 +11,12 @@ int __fakecc_host_windows = 0;
 long __fakecc_map_private_anon = 0x0022;                    /* MAP_PRIVATE|MAP_ANONYMOUS */
 long __fakecc_map_fixed_anon = 0x4032;                      /* + MAP_FIXED|MAP_NORESERVE */
 
+/* open(2) flags for fopen() — Linux asm-generic/fcntl.h.  Darwin
+ * values differ; see stdlib_darwin.c and runtime/stdio.c. */
+int __fakecc_o_creat = 0x40;    /* 0100 */
+int __fakecc_o_trunc = 0x200;   /* 01000 */
+int __fakecc_o_append = 0x400;  /* 02000 */
+
 /* SysV AMD64 va_list is __va_list_tag[1]: four fields, 24 bytes. */
 void __fakecc_va_copy(void *dst, void *src) {
     char *d = (char *)dst;

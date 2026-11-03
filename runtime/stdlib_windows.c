@@ -15,6 +15,12 @@ int __fakecc_host_windows = 1;
 long __fakecc_map_private_anon = 0x0022;
 long __fakecc_map_fixed_anon = 0x4032;
 
+/* fopen open flags: PE translator maps CreateFile; keep Linux bit
+ * pattern for shared stdio.c. */
+int __fakecc_o_creat = 0x40;
+int __fakecc_o_trunc = 0x200;
+int __fakecc_o_append = 0x400;
+
 /* Microsoft x64 va_list is a pointer (char *): 8 bytes. */
 void __fakecc_va_copy(void *dst, void *src) {
     *(void **)dst = *(void **)src;
