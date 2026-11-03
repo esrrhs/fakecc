@@ -1302,6 +1302,28 @@ static void emit_lea_rbp(Buffer *b, int dst, int off) {
     }
 }
 
+/* lea dst, disp(base) — 32-bit address math matching gcc -O0 `lea 3(%rax),%r8d`
+ * for i+k.  Uses 32-bit operand size (no REX.W) when width<=4 so the high
+ * half is zeroed like a 32-bit lea.  RSP/RBP need SIB/special forms; refuse
+ * those bases and let the caller fall back to add. */
+static int emit_lea_reg_disp(Buffer *b, int dst, int base, int32_t disp, int width) {
+    if ((base & 7) == 4 || (base & 7) == 5) return 0; /* rsp / rbp */
+    int w64 = alu_w64(width);
+    emit_rex_if(b, w64, dst, 0, base);
+    emit_byte(b, 0x8D);
+    if (disp == 0 && (base & 7) != 5) {
+        emit_modrm(b, 0, dst, base);
+    } else if (disp >= -128 && disp <= 127) {
+        emit_modrm(b, 1, dst, base);
+        emit_byte(b, (uint8_t)(disp & 0xFF));
+    } else {
+        emit_modrm(b, 2, dst, base);
+        emit_int32(b, disp);
+    }
+    return 1;
+}
+
+
 /* lea dst_reg, [rip + disp32]  →  REX.W 8D [ModRM: mod=00 reg=dst rm=5] disp32.
  * Returns the file offset of the rel32 slot (caller records for later patch). */
 static size_t emit_lea_rip(Buffer *b, int dst) {
@@ -2419,6 +2441,17 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
         else if (inst->op == IR_BXOR) { rr_op = 0x31; imm_ext = 6; }
     }
     if (fb) {
+        /* ADD r, imm → lea dst, imm(src) when homes differ (gcc -O0
+         * call-arg `i+k`).  Keeps src intact for a later use. */
+        if (!is_mul && inst->op == IR_ADD && imm_fits_i32(imm_b)) {
+            int sh = gp_home(ra, inst->a);
+            int dst = dr >= 0 ? dr : -1;
+            if (sh >= 0 && dst >= 0 && sh != dst
+                && emit_lea_reg_disp(b, dst, sh, (int32_t)imm_b, width)) {
+                spill_if_needed(b, inst->dst, dst, ra);
+                return;
+            }
+        }
         acc = pick_alu_acc(dr, -1);
         ensure_reg(b, inst->a, acc, ra);
         if (is_mul && !emit_mul_imm_strength(b, acc, imm_b, width))
@@ -2436,6 +2469,15 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
             emit_arith_imm_w(b, imm_ext, acc, enc, ew);
         }
     } else if (fa) {
+        if (!is_mul && inst->op == IR_ADD && imm_fits_i32(imm_a)) {
+            int sh = gp_home(ra, inst->b);
+            int dst = dr >= 0 ? dr : -1;
+            if (sh >= 0 && dst >= 0 && sh != dst
+                && emit_lea_reg_disp(b, dst, sh, (int32_t)imm_a, width)) {
+                spill_if_needed(b, inst->dst, dst, ra);
+                return;
+            }
+        }
         acc = pick_alu_acc(dr, -1);
         ensure_reg(b, inst->b, acc, ra);
         if (is_mul && !emit_mul_imm_strength(b, acc, imm_a, width))
@@ -2494,7 +2536,7 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
         if (!keep_flags) {
             ov = (ov_dr >= 0 && ov_dr != REG_RAX && ov_dr != REG_RDX && ov_dr != br)
                  ? ov_dr
-                 : ((br != REG_RCX) ? REG_RCX : REG_RBX);
+                 : ((br != REG_RCX) ? REG_RCX : REG_R11);
             emit_xor_rr(b, ov);
         }
         emit_rex_if(b, alu_w64(width), 0, 0, br);
@@ -2517,7 +2559,7 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
             ov = (ov_dr >= 0 && ov_dr != acc && ov_dr != br && ov_dr != REG_RAX)
                  ? ov_dr : REG_RDX;
             if (ov == acc || ov == br)
-                ov = (acc != REG_RCX && br != REG_RCX) ? REG_RCX : REG_RBX;
+                ov = (acc != REG_RCX && br != REG_RCX) ? REG_RCX : REG_R11;
             emit_xor_rr(b, ov);
         }
 
@@ -5661,16 +5703,34 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (di < 0 || skip_body[di] || fused_skip[di]) break;
                 const IRInst *d = &fn->insts.data[di];
                 if (d->op == IR_CONST && !d->is_float) {
-                    immv = d->imm;
+                    /* Prefer the value as stored: peel ZEXT/SEXT via
+                     * ssa_extended_const from the STORE operand so
+                     * `unsigned x = 1` becomes movl $1, mem. */
+                    if (!ssa_extended_const(fn, ssa_def, st->b, &immv))
+                        immv = d->imm;
+                    if (!imm_fits_i32(immv)) break;
+                    /* Truncate to store width so a sign-extended fill
+                     * does not claim a value that does not fit the slot. */
+                    if (st->width > 0 && st->width < 8) {
+                        int bits = st->width * 8;
+                        uint64_t mask = (bits == 64) ? ~0ULL : ((1ULL << bits) - 1);
+                        immv = (int64_t)((uint64_t)immv & mask);
+                        if (st->width == 4) immv = (int64_t)(int32_t)immv;
+                        else if (st->width == 2) immv = (int64_t)(int16_t)immv;
+                        else if (st->width == 1) immv = (int64_t)(int8_t)immv;
+                    }
                     if (!imm_fits_i32(immv)) break;
                     skip_chain[nskip++] = di;
                     found = 1;
                     break;
                 }
-                /* Follow COPY only.  ZEXT/SEXT/TRUNC change the stored bits;
-                 * using the raw CONST immediate writes the pre-cast value
-                 * (-O0 pinned locals). */
-                if (d->op == IR_COPY && d->a >= 0) {
+                /* COPY / ZEXT / SEXT / TRUNC: unsigned `x = 1` is often
+                 * CONST (wide) + TRUNC to the store width.  The stored
+                 * bits are the low st->width bytes of the constant, which
+                 * the truncate-to-store-width step below preserves. */
+                if ((d->op == IR_COPY || d->op == IR_ZEXT || d->op == IR_SEXT
+                     || d->op == IR_TRUNC)
+                    && d->a >= 0) {
                     skip_chain[nskip++] = di;
                     cur = d->a;
                     continue;
