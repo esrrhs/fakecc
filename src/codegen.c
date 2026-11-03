@@ -4045,6 +4045,9 @@ static int gep_const_only_gap(const IRFunction *fn, int lo, int hi) {
     return 1;
 }
 
+static int peel_sib_scale(const IRFunction *fn, const int *def, IRValue idx,
+                          IRValue *inner, int *scale2);
+
 static int fold_gep(const IRFunction *fn, const int *def,
                     const int *alloca_off, IRValue v,
                     IRValue *base_out, IRValue *idx_out, int *scale2_out,
@@ -4159,6 +4162,17 @@ static int fold_gep(const IRFunction *fn, const int *def,
             if (!is_frame) {
                 int bop = fn->insts.data[def[base]].op;
                 if (bop == IR_CONST || bop == IR_MUL) return 0;
+            }
+            /* Prefer symb(,%idx,scale) over computing MUL/SHL then
+             * symb(%reg): peel the stride multiply (and ZEXT/SEXT/COPY) the
+             * same way match_lea_local_gep does for LEA. */
+            {
+                IRValue peeled = idx;
+                int psc = 0;
+                if (idx >= 0 && peel_sib_scale(fn, def, idx, &peeled, &psc)) {
+                    idx = peeled;
+                    sc = psc;
+                }
             }
             *base_out = is_frame ? -1 : base;
             *idx_out = idx;
@@ -4280,7 +4294,14 @@ static int peel_sib_scale(const IRFunction *fn, const int *def, IRValue idx,
             *scale2 = sc;
             return 1;
         }
-        return 0;
+        /* Masked indexes (table[i & 7]) and other GP ALU results are valid
+         * SIB indexes.  Only refuse address producers / calls. */
+        if (x->op == IR_GADDR || x->op == IR_GADDR_TLS || x->op == IR_ADDR
+            || x->op == IR_FADDR || x->op == IR_CALL || x->op == IR_ALLOCA)
+            return 0;
+        *inner = cand;
+        *scale2 = sc;
+        return 1;
     }
     if (v >= 0 && v < fn->next_value_id && def[v] < 0) {
         *inner = cand;
