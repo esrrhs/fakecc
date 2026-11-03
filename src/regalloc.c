@@ -284,6 +284,37 @@ static int addr_fold_extras(const IRFunction *fn, const int *def, IRValue ptr,
         if (n < cap) extra[n++] = d->b;
         return ra_push_idx(fn, def, d->a, extra, n, cap);
     }
+    /* General pointer + scaled index (FAM / (*p).arr[i]): isel fold_gep
+     * turns these into disp(%base,%idx,scale).  Mark both live so they
+     * cannot share a color — otherwise ensure_reg copies the index twice. */
+    {
+        IRValue raw_idx = -1, base = -1;
+        if (!b_const && def_op_is(fn, def, d->b, IR_MUL) && ra_ok_index(fn, def, d->b)
+            && !a_const) {
+            base = d->a;
+            raw_idx = d->b;
+        } else if (!a_const && def_op_is(fn, def, d->a, IR_MUL)
+                   && ra_ok_index(fn, def, d->a) && !b_const) {
+            base = d->b;
+            raw_idx = d->a;
+        }
+        if (raw_idx >= 0 && base >= 0) {
+            for (int depth = 0; depth < 8; depth++) {
+                if (base < 0 || base >= fn->next_value_id || def[base] < 0)
+                    break;
+                const IRInst *bd = &fn->insts.data[def[base]];
+                if (bd->op != IR_ADD) break;
+                if (def_op_is(fn, def, bd->b, IR_CONST))
+                    base = bd->a;
+                else if (def_op_is(fn, def, bd->a, IR_CONST))
+                    base = bd->b;
+                else
+                    break;
+            }
+            if (base >= 0 && n < cap) extra[n++] = base;
+            return ra_push_idx(fn, def, raw_idx, extra, n, cap);
+        }
+    }
     return 0;
 }
 

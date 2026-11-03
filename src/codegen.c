@@ -1156,6 +1156,38 @@ static void emit_shr_imm8(Buffer *b, int dst, uint8_t imm) {
     emit_byte(b, imm);
 }
 
+/* sar $imm8, %dst  →  REX C1 /7 ib (64-bit). */
+static void emit_sar_imm8(Buffer *b, int dst, uint8_t imm) {
+    emit_rex_wrb(b, 1, 0, dst);
+    emit_byte(b, 0xC1);
+    emit_modrm(b, 3, 7, dst);
+    emit_byte(b, imm);
+}
+
+/* sar $imm8, %dst32  →  C1 /7 ib (no REX.W; optional REX.B). */
+static void emit_sar_imm8_32(Buffer *b, int dst, uint8_t imm) {
+    emit_rex_if(b, 0, 0, 0, dst);
+    emit_byte(b, 0xC1);
+    emit_modrm(b, 3, 7, dst);
+    emit_byte(b, imm);
+}
+
+/* shr $imm8, %dst32 */
+static void emit_shr_imm8_32(Buffer *b, int dst, uint8_t imm) {
+    emit_rex_if(b, 0, 0, 0, dst);
+    emit_byte(b, 0xC1);
+    emit_modrm(b, 3, 5, dst);
+    emit_byte(b, imm);
+}
+
+/* Floor-log2 of a positive power of two; -1 otherwise. */
+static int imm_pow2_log2(uint64_t u) {
+    if (u == 0 || (u & (u - 1)) != 0) return -1;
+    int k = 0;
+    while (u > 1) { u >>= 1; k++; }
+    return k;
+}
+
 /* and $imm32, %dst  →  REX 81 /4 id */
 static void emit_and_imm32(Buffer *b, int dst, int32_t imm) {
     emit_rex_wrb(b, 1, 0, dst);
@@ -4108,7 +4140,17 @@ static int fold_gep(const IRFunction *fn, const int *def,
                             is_frame = 1;
                             break;
                         }
-                        return 0;
+                        /* Const-offset peels do not consume the intermediate
+                         * ADD's register — only the final pointer base, which
+                         * mark_live stretches to the memop.  Allow a
+                         * non-consecutive const ADD so ptr->fam[i] becomes
+                         * disp(%base,%idx,scale) even when the stride MUL
+                         * sits between ADD(ptr,off) and ADD(base,mul). */
+                        int64_t probe;
+                        if (!(ssa_const_imm(fn, def, bd->b, &probe)
+                              || ssa_const_imm(fn, def, bd->a, &probe)))
+                            return 0;
+                        /* fall through and peel the const layer */
                     }
                     int64_t bc;
                     if (ssa_const_imm(fn, def, bd->b, &bc)) {
@@ -4321,11 +4363,20 @@ static int peel_sib_scale(const IRFunction *fn, const int *def, IRValue idx,
  * mov %rdi,%rax; mov 8(%rax).  Avoid RSP and the SIB index reg. */
 static int af_sib_base_reg(Buffer *b, IRValue af_base, int idx_r,
                            const RAResult *ra) {
-    int base_r = gp_home(ra, af_base);
+    int home = gp_home(ra, af_base);
+    int base_r = home;
     if (base_r < 0 || base_r == REG_RSP)
-        base_r = REG_RAX;
+        base_r = (idx_r == REG_RAX) ? REG_RCX : REG_RAX;
     if (idx_r >= 0 && idx_r == base_r)
-        base_r = (base_r == REG_RAX) ? REG_RCX : REG_RAX;
+        base_r = (idx_r == REG_RAX) ? REG_RCX : REG_RAX;
+    /* If RA reused the index's color for the base (fold made them co-live
+     * late), prefer the spill image over copying the index. */
+    if (home >= 0 && home == idx_r && ra
+        && af_base >= 0 && af_base < ra->num_values
+        && ra->spill_slot[af_base] >= 0) {
+        emit_load_spill(b, base_r, spill_offset(ra->spill_slot[af_base]));
+        return base_r;
+    }
     ensure_reg(b, af_base, base_r, ra);
     return base_r;
 }
@@ -6498,6 +6549,101 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_MOD: {
                 int width = inst->width > 0 ? inst->width : 8;
                 int w64 = alu_w64(width);
+                /* Strength-reduce div/mod by a positive power-of-two
+                 * constant (gcc -O0 does this for %256 etc.). */
+                int64_t div_imm = 0;
+                int k = -1;
+                /* Peel COPY/ZEXT/SEXT so unsigned x%(signed 256) still
+                 * matches — the literal is often a sign-extended IR_CONST. */
+                if ((ssa_const_imm(fn, ssa_def, inst->b, &div_imm)
+                     || ssa_extended_const(fn, ssa_def, inst->b, &div_imm))
+                    && div_imm > 0
+                    && (k = imm_pow2_log2((uint64_t)div_imm)) >= 0
+                    && k < (w64 ? 64 : 32)) {
+                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                    if (inst->op == IR_DIV) {
+                        if (inst->is_unsigned) {
+                            if (k == 0) {
+                                /* x / 1 */
+                            } else if (w64) {
+                                emit_shr_imm8(&out->text, REG_RAX, (uint8_t)k);
+                            } else {
+                                emit_shr_imm8_32(&out->text, REG_RAX, (uint8_t)k);
+                            }
+                        } else if (k == 0) {
+                            /* x / 1 */
+                        } else {
+                            /* signed toward-zero:
+                             *   bias = (x >> (w-1)) >>u (w-k)   // 0 or 2^k-1
+                             *   (x + bias) >>s k */
+                            emit_mov_rr(&out->text, REG_RDX, REG_RAX);
+                            if (w64) {
+                                emit_sar_imm8(&out->text, REG_RDX, 63);
+                                emit_shr_imm8(&out->text, REG_RDX,
+                                              (uint8_t)(64 - k));
+                                emit_add_rr(&out->text, REG_RAX, REG_RDX);
+                                emit_sar_imm8(&out->text, REG_RAX, (uint8_t)k);
+                            } else {
+                                emit_sar_imm8_32(&out->text, REG_RDX, 31);
+                                emit_shr_imm8_32(&out->text, REG_RDX,
+                                                 (uint8_t)(32 - k));
+                                emit_add_rr(&out->text, REG_RAX, REG_RDX);
+                                emit_sar_imm8_32(&out->text, REG_RAX, (uint8_t)k);
+                            }
+                        }
+                        mask_after_alu(&out->text, REG_RAX, width, inst->is_unsigned);
+                        if (dr >= 0 && dr != REG_RAX)
+                            emit_mov_rr(&out->text, dr, REG_RAX);
+                        spill_if_needed(&out->text, inst->dst,
+                                        dr >= 0 ? dr : REG_RAX, ra);
+                    } else {
+                        /* MOD */
+                        uint64_t mask = (k == 64) ? ~0ULL : ((1ULL << k) - 1);
+                        if (inst->is_unsigned) {
+                            if (k == 0) {
+                                emit_xor_rr(&out->text, REG_RAX);
+                            } else if (mask <= 0xffffffffULL) {
+                                emit_and_imm32(&out->text, REG_RAX, (int32_t)mask);
+                            } else {
+                                emit_mov_imm64(&out->text, REG_RCX, (int64_t)mask);
+                                emit_and_rr(&out->text, REG_RAX, REG_RCX);
+                            }
+                        } else if (k == 0) {
+                            emit_xor_rr(&out->text, REG_RAX);
+                        } else {
+                            /* gcc -O0 signed a%(2^k):
+                             *   t = a >> (w-1); t >>= (w-k);  (logical)
+                             *   a += t; a &= mask; a -= t; */
+                            emit_mov_rr(&out->text, REG_RDX, REG_RAX);
+                            if (w64) {
+                                emit_sar_imm8(&out->text, REG_RDX, 63);
+                                emit_shr_imm8(&out->text, REG_RDX,
+                                              (uint8_t)(64 - k));
+                            } else {
+                                emit_sar_imm8_32(&out->text, REG_RDX, 31);
+                                emit_shr_imm8_32(&out->text, REG_RDX,
+                                                 (uint8_t)(32 - k));
+                            }
+                            emit_add_rr(&out->text, REG_RAX, REG_RDX);
+                            if (mask <= 0xffffffffULL)
+                                emit_and_imm32(&out->text, REG_RAX, (int32_t)mask);
+                            else {
+                                emit_mov_imm64(&out->text, REG_RCX, (int64_t)mask);
+                                emit_and_rr(&out->text, REG_RAX, REG_RCX);
+                            }
+                            /* sub %rdx, %rax */
+                            emit_rex_wrb(&out->text, 1, REG_RDX, REG_RAX);
+                            emit_byte(&out->text, 0x29);
+                            emit_modrm(&out->text, 3, REG_RDX, REG_RAX);
+                        }
+                        mask_after_alu(&out->text, REG_RAX, width, inst->is_unsigned);
+                        if (dr >= 0 && dr != REG_RAX)
+                            emit_mov_rr(&out->text, dr, REG_RAX);
+                        spill_if_needed(&out->text, inst->dst,
+                                        dr >= 0 ? dr : REG_RAX, ra);
+                    }
+                    break;
+                }
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 if (inst->is_unsigned) {
