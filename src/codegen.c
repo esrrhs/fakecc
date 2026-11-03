@@ -6979,6 +6979,44 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
             if (!blocked) call_cbr_rax[cb->a] = 1;
         }
+        /* When VADD/VBXOR emit will fold all three pointers to [rbp+off],
+         * drop sole-use src pointer SSAs from needed[] so ADDR leas go away.
+         * Require dst foldable too — otherwise ensure_reg would miss the lea. */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *v = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (v->op != IR_VADD && v->op != IR_VSUB && v->op != IR_VMUL
+                && v->op != IR_VDIV && v->op != IR_VBAND && v->op != IR_VBOR
+                && v->op != IR_VBXOR)
+                continue;
+            if (v->width != 16) continue;
+            int elem_sz = (int)v->imm;
+            if (v->op == IR_VDIV
+                || (v->op == IR_VMUL && !v->is_float
+                    && (elem_sz == 1 || elem_sz >= 8)))
+                continue;
+            int oa = 0, ob = 0, od = 0;
+            if (!fold_ptr_off(fn, ssa_def, alloca_off, v->a, &oa, 0) || oa == 0)
+                continue;
+            if (!fold_ptr_off(fn, ssa_def, alloca_off, v->b, &ob, 0) || ob == 0)
+                continue;
+            int fd = 0;
+            for (size_t k = 0; k < uj; k++) {
+                const IRInst *ad = &fn->insts.data[k];
+                if (ad->op == IR_ADDR && ad->dst == v->dst
+                    && ad->a >= 0 && ad->a < fn->next_value_id
+                    && alloca_off[ad->a] != 0) {
+                    od = alloca_off[ad->a];
+                    fd = 1;
+                    break;
+                }
+            }
+            if (!fd || od == 0) continue;
+            if (v->a >= 0 && v->a < nvals_f && raw_uses[v->a] == 1)
+                needed[v->a] = 0;
+            if (v->b >= 0 && v->b < nvals_f && raw_uses[v->b] == 1)
+                needed[v->b] = 0;
+        }
         /* Call result sole-use STORE to frame: movl %eax, off (fptr). */
         int *call_store_off = xmalloc((size_t)nvals_f * sizeof(int));
         int *call_store_w = xmalloc((size_t)nvals_f * sizeof(int));
@@ -6996,10 +7034,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (fn->insts.data[ci].op != IR_CALL) continue;
             if (value_is_float_class(fn, st->b) || value_is_ld(fn, st->b))
                 continue;
-            /* Indirect calls only (fptr).  Named calls often feed a ternary
-             * join temp whose home differs from the STORE we fold; fusing
-             * then skips the home spill and the join reloads garbage
-             * (gcc_torture_20121108_1).  Intrinsics also bypass call_store. */
+            /* Indirect calls only (fptr).  Named-call STORE_PTR fold can
+             * disagree with the ternary join home (gcc_torture_20121108_1). */
             if (fn->insts.data[ci].call_name != NULL)
                 continue;
             /* ADDR/CONST/DBG between CALL and STORE are fine: they do not
@@ -7036,7 +7072,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             } else if (st->op == IR_STORE_PTR
                        && fold_ptr_off(fn, ssa_def, alloca_off, st->a, &off, 0))
                 ok = 1;
-            if (!ok) continue;
+            if (!ok || off == 0) continue;
             call_store_off[st->b] = off;
             call_store_w[st->b] = st->width > 0 ? st->width : 4;
             fused_skip[uj] = 1;
