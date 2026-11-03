@@ -4036,30 +4036,47 @@ static Stmt parse_stmt_impl(Parser *p) {
      * file exposed only as a struct tag (`struct obj` in link_kernel.c), an
      * expression continuation (`obj = …`, `obj->…`, …) must stay an
      * expression statement.  Without this, self-host fails compiling
-     * sema/ir locals named `obj`.  `T *x` / `T x` / `T(x)` remain decls. */
+     * sema/ir locals named `obj`.  `T *x` / `T x` / `T(x)` remain decls.
+     *
+     * Do not apply that exception to a qualified `pkg.Type` typedef: the DOT
+     * after the package name is part of the type, not `obj.field`.  Treating
+     * it as an expression made `runtime.FILE *f` / `runtime.thread_t th` fail
+     * with "no exported symbol" / "expected ';'". */
     int as_decl_stmt = 0;
     if (k == TK_KW_TYPEDEF) {
         as_decl_stmt = 1;
     } else if (is_type_start(p, p->pos)) {
         as_decl_stmt = 1;
         if (k == TK_IDENT && p->pos + 1 < p->tokens->len) {
-            switch (p->tokens->data[p->pos + 1].kind) {
-            case TK_ASSIGN: case TK_EQ: case TK_NE:
-            case TK_ARROW: case TK_DOT:
-            case TK_INC: case TK_DEC:
-            case TK_PLUS_EQ: case TK_MINUS_EQ: case TK_STAR_EQ:
-            case TK_SLASH_EQ: case TK_PERCENT_EQ:
-            case TK_AMP_EQ: case TK_BITOR_EQ: case TK_XOR_EQ:
-            case TK_SHL_EQ: case TK_SHR_EQ:
-            case TK_LBRACKET: case TK_COMMA: case TK_SEMICOLON:
-            case TK_QUESTION: case TK_ANDAND: case TK_OROR:
-            case TK_LT: case TK_LE: case TK_GT: case TK_GE:
-            case TK_PLUS: case TK_MINUS: case TK_SLASH: case TK_PERCENT:
-            case TK_AMP: case TK_BITOR: case TK_XOR: case TK_SHL: case TK_SHR:
-                as_decl_stmt = 0;
-                break;
-            default:
-                break;
+            int qualified_pkg_type = 0;
+            const char *ident = p->tokens->data[p->pos].text;
+            if (p->tokens->data[p->pos + 1].kind == TK_DOT
+                && p->pos + 2 < p->tokens->len
+                && p->tokens->data[p->pos + 2].kind == TK_IDENT
+                && ident && tu_has_import(p->tu, ident) && p->pkg_ctx) {
+                Package *pkg = pkg_find(p->pkg_ctx, ident);
+                if (pkg && pkg_find_typedef(pkg, p->tokens->data[p->pos + 2].text))
+                    qualified_pkg_type = 1;
+            }
+            if (!qualified_pkg_type) {
+                switch (p->tokens->data[p->pos + 1].kind) {
+                case TK_ASSIGN: case TK_EQ: case TK_NE:
+                case TK_ARROW: case TK_DOT:
+                case TK_INC: case TK_DEC:
+                case TK_PLUS_EQ: case TK_MINUS_EQ: case TK_STAR_EQ:
+                case TK_SLASH_EQ: case TK_PERCENT_EQ:
+                case TK_AMP_EQ: case TK_BITOR_EQ: case TK_XOR_EQ:
+                case TK_SHL_EQ: case TK_SHR_EQ:
+                case TK_LBRACKET: case TK_COMMA: case TK_SEMICOLON:
+                case TK_QUESTION: case TK_ANDAND: case TK_OROR:
+                case TK_LT: case TK_LE: case TK_GT: case TK_GE:
+                case TK_PLUS: case TK_MINUS: case TK_SLASH: case TK_PERCENT:
+                case TK_AMP: case TK_BITOR: case TK_XOR: case TK_SHL: case TK_SHR:
+                    as_decl_stmt = 0;
+                    break;
+                default:
+                    break;
+                }
             }
         }
     }

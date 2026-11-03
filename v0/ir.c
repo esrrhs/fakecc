@@ -5249,10 +5249,12 @@ static IRValue lower_index_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     long long esz = type_size(e->type);
     long long ic = 0;
     if (esz > 0 && fold_const_int(e->u.idx.index, &ic)) {
-        long long byte = ic * esz;
-        if (byte == 0) return base;
-        if (byte == (long long)(int)byte)
-            return emit_add_const(fn, base, (int)byte, e->loc);
+        long long byte;
+        if (!__builtin_mul_overflow(ic, esz, &byte)) {
+            if (byte == 0) return base;
+            if (byte == (long long)(int)byte)
+                return emit_add_const(fn, base, (int)byte, e->loc);
+        }
     }
     {
         IRValue idx = lower_expr(fn, st, e->u.idx.index);
@@ -8158,6 +8160,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (e->u.call.callee->kind == EX_VAR && (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_alloca") == 0 ||
                                                 runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_alloca_with_align") == 0 ||
                                                 runtime.strcmp(e->u.call.callee->u.var.name, "alloca") == 0)) {
+            if (e->u.call.args.len < 1) return -1;
             IRValue sz = lower_expr(fn, st, e->u.call.args.data[0]);
             IRValue al = -1;
             if (runtime.strcmp(e->u.call.callee->u.var.name, "__builtin_alloca_with_align") == 0
