@@ -4661,6 +4661,25 @@ static int pure_addr_op(int op) {
     return op == IR_ADD || op == IR_MUL || op == IR_SEXT || op == IR_ZEXT;
 }
 
+/* COPY of ADDR/GADDR used only as a folded store/load pointer (compound
+ * literal field init).  Not a general COPY DCE — only address materialization. */
+static int is_foldable_addr_copy(const IRFunction *fn, const int *def,
+                                const IRInst *u) {
+    if (!u || u->op != IR_COPY || u->a < 0 || u->a >= fn->next_value_id)
+        return 0;
+    IRValue cur = u->a;
+    for (int depth = 0; depth < 4 && cur >= 0 && cur < fn->next_value_id;
+         depth++) {
+        if (def[cur] < 0) return 0;
+        const IRInst *d = &fn->insts.data[def[cur]];
+        if (d->op == IR_ADDR || d->op == IR_GADDR || d->op == IR_GADDR_TLS)
+            return 1;
+        if (d->op == IR_COPY) { cur = d->a; continue; }
+        return 0;
+    }
+    return 0;
+}
+
 /* Local-abs GEPs rematerialize into R_X86_64_32S, so load+store of the same
  * address (bitfield RMW) can both fold even when the ADD has multiple uses
  * and is not adjacent to every memop.  Other GEPs still need adjacent
@@ -4904,6 +4923,9 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
      * load or store. */
     if (pure_addr_op(inst->op) && inst->dst >= 0 && inst->dst < nv
         && uses_left && uses_left[inst->dst] == 0)
+        return;
+    if (is_foldable_addr_copy(fn, def, inst) && inst->dst >= 0
+        && inst->dst < nv && uses_left && uses_left[inst->dst] == 0)
         return;
     if (inst->op == IR_ADD) {
         IRValue li = -1;
@@ -5560,14 +5582,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     continue;
                 }
             }
-            if (!pure_addr_op(u->op) || u->dst < 0 || u->dst >= nvals_f
-                || uses_left[u->dst] != 0)
+            if (pure_addr_op(u->op) && u->dst >= 0 && u->dst < nvals_f
+                && uses_left[u->dst] == 0) {
+                if (u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+                    uses_left[u->a]--;
+                if (u->op != IR_SEXT && u->op != IR_ZEXT
+                    && u->b >= 0 && u->b < nvals_f && uses_left[u->b] > 0)
+                    uses_left[u->b]--;
                 continue;
-            if (u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+            }
+            /* Compound-literal ADDR → COPY → folded field stores: drop the
+             * COPY's hold on the ADDR so lea of &r/&tmp is skipped (init). */
+            if (is_foldable_addr_copy(fn, ssa_def, u)
+                && u->dst >= 0 && u->dst < nvals_f && uses_left[u->dst] == 0
+                && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
                 uses_left[u->a]--;
-            if (u->op != IR_SEXT && u->op != IR_ZEXT && u->op != IR_COPY
-                && u->b >= 0 && u->b < nvals_f && uses_left[u->b] > 0)
-                uses_left[u->b]--;
         }
         /* Single root-marking pass: fills both the "must have a register"
          * set and last-use counts, taking addressing-mode folds into account
@@ -6592,6 +6621,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (inst->dst >= 0 && inst->dst < fn->next_value_id && !needed[inst->dst]) {
                     if (inst->op == IR_ADDR
                         && fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0))
+                        continue;
+                    /* ADDR→COPY for compound-literal field stores only. */
+                    if (is_foldable_addr_copy(fn, ssa_def, inst))
                         continue;
                     if (inst->op == IR_CONST && !inst->is_float && !value_is_ld(fn, inst->dst))
                         continue;
