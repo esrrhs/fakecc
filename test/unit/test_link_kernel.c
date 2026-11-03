@@ -6,13 +6,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include <io.h>
+#include <process.h>
+#ifndef unlink
+#define unlink _unlink
+#endif
+#endif
 
 /* Craft two ELF64 ET_REL objects via nasm (boot + high), link with
  * link_kernel_multiboot, and check Multiboot ELF32 shape (fakeos S1+S2). */
 
 static int run_cmd(char *const argv[]) {
+#ifdef _WIN32
+    if (!argv || !argv[0]) return 0;
+    intptr_t rc = _spawnvp(_P_WAIT, argv[0], (const char *const *)argv);
+    return rc == 0;
+#else
     pid_t pid = fork();
     if (pid == 0) {
         execvp(argv[0], argv);
@@ -21,6 +34,7 @@ static int run_cmd(char *const argv[]) {
     int st = 0;
     waitpid(pid, &st, 0);
     return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+#endif
 }
 
 static int write_file(const char *path, const char *text) {

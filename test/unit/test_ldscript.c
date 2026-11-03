@@ -7,9 +7,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/wait.h>
 #include <unistd.h>
+#else
+#include <io.h>
+#include <process.h>
+#ifndef unlink
+#define unlink _unlink
+#endif
+#ifndef access
+#define access _access
+#endif
+#ifndef X_OK
+#define X_OK 1
+#endif
+#endif
 
 static const char *KERNEL_LD =
     "OUTPUT_FORMAT(elf64-x86-64)\n"
@@ -128,6 +142,11 @@ static int write_file(const char *path, const char *text) {
 }
 
 static int run_cmd(char *const argv[]) {
+#ifdef _WIN32
+    if (!argv || !argv[0]) return 0;
+    intptr_t rc = _spawnvp(_P_WAIT, argv[0], (const char *const *)argv);
+    return rc == 0;
+#else
     pid_t pid = fork();
     if (pid == 0) {
         execvp(argv[0], argv);
@@ -136,6 +155,7 @@ static int run_cmd(char *const argv[]) {
     int st = 0;
     waitpid(pid, &st, 0);
     return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+#endif
 }
 
 static uint16_t rd16(const unsigned char *p) {

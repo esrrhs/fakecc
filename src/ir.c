@@ -4835,10 +4835,14 @@ static IRValue lower_index_addr(IRFunction *fn, IRSymTable *st, const Expr *e) {
     /* Only fold constant indices when the element size is a known positive
      * constant.  VLA rows (esz <= 0) must go through lower_sizeof_type. */
     if (esz > 0 && fold_const_int(e->u.idx.index, &ic)) {
-        long long byte = ic * esz;
-        if (byte == 0) return base;
-        if (byte == (long long)(int)byte)
-            return emit_add_const(fn, base, (int)byte, e->loc);
+        long long byte;
+        /* Avoid signed overflow UB (UBSan) on huge constant indices; fall
+         * through to a runtime MUL instead of folding. */
+        if (!__builtin_mul_overflow(ic, esz, &byte)) {
+            if (byte == 0) return base;
+            if (byte == (long long)(int)byte)
+                return emit_add_const(fn, base, (int)byte, e->loc);
+        }
     }
     {
         IRValue idx = lower_expr(fn, st, e->u.idx.index);
@@ -7997,6 +8001,8 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         if (e->u.call.callee->kind == EX_VAR && (strcmp(e->u.call.callee->u.var.name, "__builtin_alloca") == 0 ||
                                                 strcmp(e->u.call.callee->u.var.name, "__builtin_alloca_with_align") == 0 ||
                                                 strcmp(e->u.call.callee->u.var.name, "alloca") == 0)) {
+            /* Fuzz / incomplete ASTs may omit the size; do not deref args[0]. */
+            if (e->u.call.args.len < 1) return -1;
             IRValue sz = lower_expr(fn, st, e->u.call.args.data[0]);
             /* Second argument is an alignment in bits.  -1 keeps the
              * historical 16-byte bump used by plain alloca. */
