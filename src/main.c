@@ -705,6 +705,15 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "fakecc: unsupported -mcmodel=%s (use small or kernel)\n", cm);
                 return 1;
             }
+        } else if (strncmp(argv[i], "--image-base=", 13) == 0) {
+            const char *s = argv[i] + 13;
+            char *end = NULL;
+            unsigned long long v = strtoull(s, &end, 0);
+            if (!s[0] || (end && *end) || v == 0) {
+                fprintf(stderr, "fakecc: bad --image-base=%s\n", s);
+                return 1;
+            }
+            link_set_image_base((uint64_t)v);
         } else if (strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {

@@ -91,3 +91,22 @@ itself; use GNU ld with `boot/linker.ld`, or fakeos `ldfake`, until
 
 - fakeos `docs/fakecc-support-requests.md` §2.1 **M4**, §2.2 **S1/S2**
 - fakeos `boot/linker.ld`, `user/ldfake.c`
+
+## Should S1 (in progress): dual PT_LOAD / fixed VMA
+
+fakeos wants two layouts after `fakecc -c` objects exist:
+
+| Scene | Script | Base / PHDRs |
+|-------|--------|--------------|
+| User | `user/user.ld` | `USER_VMA = 0x400000`; text=`PT_LOAD RX`, data=`PT_LOAD RW` |
+| Kernel | `boot/linker.ld` | Low `.boot` at LMA `0x100000` + high `.text`/… at `KERNEL_VMA` |
+
+**User path (started):** fakecc’s static linker already uses image base
+`0x400000` (= `USER_VMA`) with dual `PT_LOAD` (RX then RW). Override with
+`--image-base=ADDR` / `link_set_image_base()`.
+
+**Kernel path (remaining):** dual-segment higher-half (identity LMA for
+`.boot`, VMA = `KERNEL_VMA + LMA` for the rest, `_kernel_*` boundary
+symbols, `ENTRY(_start)`) still comes from GNU ld + `boot/linker.ld` or
+fakeos `ldfake`. A native fakecc mode or `-T` script subset is future S1
+work; S2 covers Multiboot / ELF32 boot image emit.

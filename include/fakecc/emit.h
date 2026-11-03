@@ -459,6 +459,11 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
  * Equivalent to emit_link(&m, 1, path, NULL, 0, 0, NULL, 0, 0, 0). */
 void emit_elf(const EmitModule *m, const char *path);
 
+/* Static ELF image base (fakeos S1). Default 0x400000 = USER_VMA.
+ * Kernel dual PT_LOAD / KERNEL_VMA layout is still external ld / ldfake. */
+void link_set_image_base(uint64_t base);
+uint64_t link_image_base(void);
+
 /* ELF relocation type constants (SysV AMD64 ABI). */
 #define R_X86_64_64        1  /* absolute 64-bit (pointer fixups in .data) */
 #define R_X86_64_PC32      2
