@@ -1866,18 +1866,6 @@ static void emit_sse_store_sib(Buffer *b, int base, int index, int scale2,
     emit_modrm_sib_disp(b, src, base, index, scale2, off);
 }
 
-/* lea dst, (base,index,1) — gcc -O0 `lea (%rax,%rdx,1),%ecx` for x+y into a
- * third home.  Index must not be RSP (SIB encoding). */
-static int emit_lea_base_index(Buffer *b, int dst, int base, int index,
-                               int width) {
-    if ((index & 7) == 4) return 0; /* rsp not a valid index */
-    int w64 = alu_w64(width);
-    emit_rex_if(b, w64, dst, index, base);
-    emit_byte(b, 0x8D);
-    emit_modrm_sib_disp(b, dst, base, index, 0, 0);
-    return 1;
-}
-
 
 /* movss/sd xmm, symb(,%index,scale) — R_X86_64_32S like emit_load_abs32. */
 static size_t emit_sse_load_abs32(Buffer *b, int dst, int index, int scale2,
@@ -2504,17 +2492,6 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
             emit_arith_imm_w(b, imm_ext, acc, enc, ew);
         }
     } else {
-        /* ADD x,y → lea dst, (x,y,1) when dst is a third home (sret/init). */
-        if (!is_mul && inst->op == IR_ADD) {
-            int ah = gp_home(ra, inst->a);
-            int bh = gp_home(ra, inst->b);
-            int dst = dr >= 0 ? dr : -1;
-            if (ah >= 0 && bh >= 0 && dst >= 0 && dst != ah && dst != bh
-                && emit_lea_base_index(b, dst, ah, bh, width)) {
-                spill_if_needed(b, inst->dst, dst, ra);
-                return;
-            }
-        }
         int bhome = gp_home(ra, inst->b);
         acc = pick_alu_acc(dr, bhome);
         ensure_reg(b, inst->a, acc, ra);
