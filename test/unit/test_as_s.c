@@ -149,7 +149,7 @@ static void test_incbin_rodata(void) {
         fclose(f);
     }
     {
-        FILE *f = fopen(asmf, "w");
+        FILE *f = fopen(asmf, "wb");
         T_ASSERT(f != NULL);
         fprintf(f,
                 "    .section .rodata\n"
@@ -164,7 +164,7 @@ static void test_incbin_rodata(void) {
     }
     char *src = NULL;
     {
-        FILE *f = fopen(asmf, "r");
+        FILE *f = fopen(asmf, "rb");
         T_ASSERT(f != NULL);
         fseek(f, 0, SEEK_END);
         long n = ftell(f);

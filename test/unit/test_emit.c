@@ -267,7 +267,11 @@ static int elf_has_rela_type(const unsigned char *b, size_t n, uint32_t want) {
 }
 
 static void test_et_rel_standard_sections(void) {
+#ifdef _WIN32
+    const char *out = win_tmp("fakecc_m4_sections.o");
+#else
     const char *out = "/tmp/fakecc_m4_sections.o";
+#endif
     compile_to_obj(
         "package main;\n"
         "int g = 1;\n"
@@ -289,7 +293,11 @@ static void test_et_rel_standard_sections(void) {
 }
 
 static void test_et_rel_reloc_set_m4(void) {
+#ifdef _WIN32
+    const char *out = win_tmp("fakecc_m4_relocs.o");
+#else
     const char *out = "/tmp/fakecc_m4_relocs.o";
+#endif
     /* Exercise PC32 / PLT32 / GOTPCREL / 64 (and typically 32S for locals). */
     compile_to_obj(
         "package main;\n"
@@ -324,7 +332,11 @@ static void test_et_rel_reloc_set_m4(void) {
     int sym = emit_module_add_undefined(&em, "stub_sym");
     emit_module_add_reloc(&em, 0, R_X86_64_32, sym, 0);
     emit_module_add_reloc(&em, 0, R_X86_64_32S, sym, 0);
+#ifdef _WIN32
+    const char *out2 = win_tmp("fakecc_m4_reloc32.o");
+#else
     const char *out2 = "/tmp/fakecc_m4_reloc32.o";
+#endif
     emit_set_object_mode(1);
     emit_obj(&em, out2);
     emit_set_object_mode(0);
