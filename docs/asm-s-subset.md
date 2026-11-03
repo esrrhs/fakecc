@@ -20,10 +20,14 @@ assembler (`iasm`).
 ## Instructions (non-exhaustive)
 
 `mov`/`movb`/`movw`/`movl`/`movq`, `lea`, `push`/`pop`, `add`/`sub`/`xor`/
-`and`/`or`/`cmp`/`test`/`xchg`, `jmp`/`call`/`jcc`, `ret`/`retq`,
+`and`/`or`/`cmp`/`test`/`xchg`, `jmp`/`call`/`jcc` (incl. indirect `call *%reg` /
+`jmp *%reg`), `ret`/`retq`,
 `in`/`inb`/`inw`/`inl`, `out`/`outb`/`outw`/`outl`,
-`cli`/`sti`/`hlt`/`pause`/`nop`/`syscall`/`sysretq`/`iretq`,
+`cli`/`sti`/`hlt`/`pause`/`nop`/`ud2`/`syscall`/`sysretq`/`iretq`,
+`pushfq`/`popfq`/`pushf`/`popf`,
 `lgdt`/`lidt`/`ltr`/`rdmsr`/`wrmsr`/`invlpg`,
+`movdqa` `%xmmN` ↔ `disp(%reg)` (and `%xmm`↔`%xmm`) for sysentry/desc XMM
+save/restore,
 RIP-relative `sym(%rip)` for `lea`/`mov`.
 
 Local labels and forward `jmp`/`call` work within one file; externals get
@@ -32,8 +36,11 @@ Local labels and forward `jmp`/`call` work within one file; externals get
 ## Priority migrate (fakeos)
 
 1. **io / usys / crt0** — see `docs/examples/io.S`, `usys.S`, `crt0.S`
-2. switch.asm
-3. sysentry / desc (naked + XMM — also fine as C + M1/M2)
+2. **switch.asm** — **example-ready**: `docs/examples/switch.S` (`fakecc -c`)
+3. **sysentry / desc** — need `movdqa` (now in iasm); see
+   `docs/examples/sysentry_xmm.S`. Full ports still want `.data`/`.quad`
+   conduit symbols, ISR `.macro`/`.rept` tables, and remaining privileged ops
+   (lgdt/lidt/ltr/rdmsr/wrmsr/invlpg already claimed).
 4. boot.asm (32-bit — out of scope for this subset)
 
 ## C + M1/M2 alternative (no `.S`)
@@ -62,6 +69,7 @@ RIP-relative data (`syscall_user_rsp(%rip)`).
 
 ```text
 fakecc -c arch/x86_64/io.S -o io.o
+fakecc -c arch/x86_64/switch.S -o switch.o
 fakecc --kernel-multiboot -nostdlib boot.o io.o … -o fakeos.elf
 ```
 

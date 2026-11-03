@@ -60,6 +60,25 @@ static int parse_reg_name(const char *s, int *width_out) {
     return -1;
 }
 
+/* XMM0..XMM15 — used by movdqa (sysentry/desc save/restore). */
+static int parse_xmm_name(const char *s, const char **end_out) {
+    if (!((s[0] == 'x' || s[0] == 'X') &&
+          (s[1] == 'm' || s[1] == 'M') &&
+          (s[2] == 'm' || s[2] == 'M')))
+        return -1;
+    s += 3;
+    if (!isdigit((unsigned char)*s)) return -1;
+    int n = 0;
+    while (isdigit((unsigned char)*s)) {
+        n = n * 10 + (*s - '0');
+        s++;
+    }
+    if (n < 0 || n > 15) return -1;
+    if (isalnum((unsigned char)*s) || *s == '_') return -1;
+    if (end_out) *end_out = s;
+    return n;
+}
+
 /* Skip whitespace. */
 static const char *skip_ws(const char *p) {
     while (*p && isspace((unsigned char)*p) && *p != '\n') p++;
@@ -308,11 +327,14 @@ static void emit_mov_mr(Buffer *b, int base, int64_t disp, int src, int w) {
 }
 
 /* Parse a single operand token into kind/reg/imm/sym. Consumes from *pp.
- * kind 0=reg 1=imm 2=mem(reg[+disp in *imm]) 3=symbol 4=sym(%rip). */
+ * kind 0=reg 1=imm 2=mem(reg[+disp in *imm]) 3=symbol 4=sym(%rip) 5=xmm. */
 static int parse_operand(const char **pp, int *kind, int *reg, int64_t *imm,
                          char **sym, int *width) {
     const char *p = skip_ws(*pp);
     *kind = -1; *reg = 0; *imm = 0; *sym = NULL; *width = 8;
+
+    /* AT&T indirection star: call/jmp *%rax, *0(%rdi), *sym(%rip) */
+    if (*p == '*') p = skip_ws(p + 1);
 
     /* Peek: disp(%reg) or (%reg) */
     {
@@ -357,6 +379,13 @@ not_mem:
     }
     if (*p == '%') {
         p++;
+        const char *xend = NULL;
+        int xr = parse_xmm_name(p, &xend);
+        if (xr >= 0) {
+            *kind = 5; *reg = xr; *width = 16;
+            *pp = xend;
+            return 1;
+        }
         int w = 8;
         int r = parse_reg_name(p, &w);
         if (r < 0) return 0;
@@ -860,6 +889,29 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
             rex(b, 0, 0, 0, r1); eb(b, 0x0F); eb(b, 0x01);
             if ((r1 & 7) == 4) { modrm(b, 0, 7, 4); eb(b, 0x24); }
             else modrm(b, 0, 7, r1);
+            handled = 1;
+        }
+    } else if (strcmp(mn, "movdqa") == 0) {
+        /* AT&T movdqa %xmmN, disp(%reg)  -> 66 0F 7F /r (store)
+         *       movdqa disp(%reg), %xmmN -> 66 0F 6F /r (load)
+         *       movdqa %xmmA, %xmmB      -> 66 0F 6F /r (xmm<-xmm) */
+        if (k1 == 5 && k2 == 2) {
+            eb(b, 0x66);
+            rex(b, 0, r1, 0, r2);
+            eb(b, 0x0F); eb(b, 0x7F);
+            modrm_mem(b, r1, r2, imm2);
+            handled = 1;
+        } else if (k1 == 2 && k2 == 5) {
+            eb(b, 0x66);
+            rex(b, 0, r2, 0, r1);
+            eb(b, 0x0F); eb(b, 0x6F);
+            modrm_mem(b, r2, r1, imm1);
+            handled = 1;
+        } else if (k1 == 5 && k2 == 5) {
+            eb(b, 0x66);
+            rex(b, 0, r2, 0, r1);
+            eb(b, 0x0F); eb(b, 0x6F);
+            modrm(b, 3, r2, r1);
             handled = 1;
         }
     }
