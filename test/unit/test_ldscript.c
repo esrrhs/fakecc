@@ -25,6 +25,22 @@
 #endif
 #endif
 
+#ifdef _WIN32
+/* Host-writable temp path (MSYS /tmp is not a native Win32 path). */
+static const char *test_tmp(const char *name) {
+    static char buf[8][260];
+    static int slot;
+    char *p = buf[slot++ & 7];
+    const char *t = getenv("TEMP");
+    if (!t || !t[0]) t = ".";
+    snprintf(p, 260, "%s\\%s", t, name);
+    return p;
+}
+#define TMP_PATH(name) test_tmp(name)
+#else
+#define TMP_PATH(name) ("/tmp/" name)
+#endif
+
 static const char *KERNEL_LD =
     "OUTPUT_FORMAT(elf64-x86-64)\n"
     "ENTRY(_start)\n"
@@ -245,12 +261,12 @@ static void test_parse_fakeos_files_if_present(void) {
 
 /* -T kernel script → Multiboot ELF32 via fakecc CLI (or API configure + link). */
 static void test_T_kernel_multiboot_e2e(void) {
-    const char *boot_asm = "/tmp/fakecc_T_k_boot.asm";
-    const char *kern_asm = "/tmp/fakecc_T_k_kern.asm";
-    const char *boot_o = "/tmp/fakecc_T_k_boot.o";
-    const char *kern_o = "/tmp/fakecc_T_k_kern.o";
-    const char *script = "/tmp/fakecc_T_k_linker.ld";
-    const char *out = "/tmp/fakecc_T_k_out.elf";
+    const char *boot_asm = TMP_PATH("fakecc_T_k_boot.asm");
+    const char *kern_asm = TMP_PATH("fakecc_T_k_kern.asm");
+    const char *boot_o = TMP_PATH("fakecc_T_k_boot.o");
+    const char *kern_o = TMP_PATH("fakecc_T_k_kern.o");
+    const char *script = TMP_PATH("fakecc_T_k_linker.ld");
+    const char *out = TMP_PATH("fakecc_T_k_out.elf");
 
     T_ASSERT(write_file(script, KERNEL_LD));
     T_ASSERT(write_file(boot_asm,
@@ -334,9 +350,9 @@ static void test_T_user_image_base_e2e(void) {
     printf("  SKIP test_T_user_image_base_e2e (linux x86_64 only)\n");
     return;
 #else
-    const char *script = "/tmp/fakecc_T_u_user.ld";
-    const char *src = "/tmp/fakecc_T_u_main.c";
-    const char *out = "/tmp/fakecc_T_u_out.elf";
+    const char *script = TMP_PATH("fakecc_T_u_user.ld");
+    const char *src = TMP_PATH("fakecc_T_u_main.c");
+    const char *out = TMP_PATH("fakecc_T_u_out.elf");
     const char *script6 =
         "OUTPUT_FORMAT(elf64-x86-64)\n"
         "ENTRY(_start)\n"

@@ -17,6 +17,22 @@
 #endif
 #endif
 
+#ifdef _WIN32
+/* Host-writable temp path (MSYS /tmp is not a native Win32 path). */
+static const char *test_tmp(const char *name) {
+    static char buf[8][260];
+    static int slot;
+    char *p = buf[slot++ & 7];
+    const char *t = getenv("TEMP");
+    if (!t || !t[0]) t = ".";
+    snprintf(p, 260, "%s\\%s", t, name);
+    return p;
+}
+#define TMP_PATH(name) test_tmp(name)
+#else
+#define TMP_PATH(name) ("/tmp/" name)
+#endif
+
 /* Craft two ELF64 ET_REL objects via nasm (boot + high), link with
  * link_kernel_multiboot, and check Multiboot ELF32 shape (fakeos S1+S2). */
 
@@ -68,11 +84,11 @@ static unsigned char *slurp(const char *path, size_t *n_out) {
 }
 
 static void test_kernel_multiboot_shape(void) {
-    const char *boot_asm = "/tmp/fakecc_kmb_boot.asm";
-    const char *kern_asm = "/tmp/fakecc_kmb_kern.asm";
-    const char *boot_o = "/tmp/fakecc_kmb_boot.o";
-    const char *kern_o = "/tmp/fakecc_kmb_kern.o";
-    const char *out = "/tmp/fakecc_kmb_out.elf";
+    const char *boot_asm = TMP_PATH("fakecc_kmb_boot.asm");
+    const char *kern_asm = TMP_PATH("fakecc_kmb_kern.asm");
+    const char *boot_o = TMP_PATH("fakecc_kmb_boot.o");
+    const char *kern_o = TMP_PATH("fakecc_kmb_kern.o");
+    const char *out = TMP_PATH("fakecc_kmb_out.elf");
 
     /* Multiboot header in .multiboot; _start in .boot.text (low LMA). */
     T_ASSERT(write_file(boot_asm,

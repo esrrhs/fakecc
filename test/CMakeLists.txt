@@ -140,7 +140,7 @@ target_link_libraries(test_die_at PRIVATE fakecc_core test_framework)
 add_test(NAME test_die_at COMMAND test_die_at)
 
 if(WIN32)
-    foreach(t test_parser test_sema test_emit test_link test_link_kernel test_ldscript test_as_s test_pkg test_die_at)
+    foreach(t test_parser test_sema test_emit test_link test_pkg test_die_at)
         target_link_options(${t} PRIVATE -Wl,--wrap=exit -Wl,--wrap=abort)
     endforeach()
 endif()

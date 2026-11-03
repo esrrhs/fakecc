@@ -7,7 +7,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <io.h>
+#ifndef unlink
+#define unlink _unlink
+#endif
+#endif
 
 static int has_sym(const EmitModule *m, const char *name) {
     return emit_module_find_symbol((EmitModule *)m, name) >= 0;
@@ -121,8 +128,20 @@ static void test_rept_stubs(void) {
 
 
 static void test_incbin_rodata(void) {
+#ifdef _WIN32
+    char blob_buf[260], asmf_buf[260];
+    {
+        const char *t = getenv("TEMP");
+        if (!t || !t[0]) t = ".";
+        snprintf(blob_buf, sizeof blob_buf, "%s\\fakecc_incbin_blob.bin", t);
+        snprintf(asmf_buf, sizeof asmf_buf, "%s\\fakecc_incbin.S", t);
+    }
+    const char *blob = blob_buf;
+    const char *asmf = asmf_buf;
+#else
     const char *blob = "/tmp/fakecc_incbin_blob.bin";
     const char *asmf = "/tmp/fakecc_incbin.S";
+#endif
     {
         FILE *f = fopen(blob, "wb");
         T_ASSERT(f != NULL);
@@ -132,13 +151,15 @@ static void test_incbin_rodata(void) {
     {
         FILE *f = fopen(asmf, "w");
         T_ASSERT(f != NULL);
-        fputs("    .section .rodata\n"
-              "    .globl foo_start\n"
-              "    .globl foo_end\n"
-              "    .align 8\n"
-              "foo_start:\n"
-              "    .incbin \"/tmp/fakecc_incbin_blob.bin\"\n"
-              "foo_end:\n", f);
+        fprintf(f,
+                "    .section .rodata\n"
+                "    .globl foo_start\n"
+                "    .globl foo_end\n"
+                "    .align 8\n"
+                "foo_start:\n"
+                "    .incbin \"%s\"\n"
+                "foo_end:\n",
+                blob);
         fclose(f);
     }
     char *src = NULL;
