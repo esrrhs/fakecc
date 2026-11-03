@@ -77,9 +77,11 @@ GNU ld + `boot/linker.ld` place `.text` at `KERNEL_VMA+…`:
   negative 2 GiB (sign-extended 32-bit displacements).
 - `R_X86_64_64` carries full absolute addresses where needed.
 
-fakecc does **not** yet perform the dual PT_LOAD / higher-half layout
-itself; use GNU ld with `boot/linker.ld`, or fakeos `ldfake`, until
-**Should S1** lands. The `.o` files from `fakecc -c` are the stable input.
+fakecc can perform the dual PT_LOAD / higher-half layout via
+`--kernel-multiboot` or `-T boot/linker.ld` (subset parser; see
+[`ld-script-subset.md`](ld-script-subset.md)). GNU ld / fakeos `ldfake`
+remain valid alternatives. The `.o` files from `fakecc -c` are the stable
+input.
 
 ## Verification
 
@@ -96,25 +98,31 @@ itself; use GNU ld with `boot/linker.ld`, or fakeos `ldfake`, until
 
 | Scene | Script / CLI | Base / PHDRs |
 |-------|--------------|--------------|
-| User | default link / `--image-base=` | `USER_VMA = 0x400000`; text=`PT_LOAD RX`, data=`PT_LOAD RW` |
-| Kernel | `fakecc --kernel-multiboot` | Low `.boot`/`.multiboot` at LMA `0x100000` + high `.text`/… at `KERNEL_VMA + LMA`; exports `_kernel_*` at link time; `ENTRY(_start)` |
+| User | `-T user/user.ld` / `--image-base=` / default | `USER_VMA = 0x400000`; text=`PT_LOAD RX`, data=`PT_LOAD RW` |
+| Kernel | `-T boot/linker.ld` / `--kernel-multiboot` | Low `.boot`/`.multiboot` at LMA `0x100000` + high `.text`/… at `KERNEL_VMA + LMA`; exports `_kernel_*` at link time; `ENTRY(_start)` |
 
 **User path:** static linker image base `0x400000` (= `USER_VMA`); override with
-`--image-base=ADDR` / `link_set_image_base()`.
+`--image-base=ADDR`, `link_set_image_base()`, or `-T` / `--script=` on a user-shaped
+script (`USER_VMA` / `PHDRS`).
 
 **Kernel path (S1+S2):** `link_kernel_multiboot()` (host port of fakeos
 `user/ldfake.c`) reads ELF64 `ET_REL` inputs, places sections per
 `boot/linker.ld`, resolves `64`/`PC32`/`PLT32`/`GOTPCREL`/`32`/`32S`, and
 writes a **phdr-only Multiboot ELF32** image (ELFCLASS32, `EM_386`, two
 `PT_LOAD`s, Multiboot magic at file offset `0x1000`). No host `objcopy
--O elf32-i386` required.
+-O elf32-i386` required. Passing `-T boot/linker.ld` parses the script subset
+and enables this backend (same constants).
 
 ```text
+fakecc -T boot/linker.ld -nostdlib boot.o kmain.o … -o fakeos.elf
 fakecc --kernel-multiboot -nostdlib boot.o kmain.o … -o fakeos.elf
+fakecc -T user/user.ld hello.c -o hello.elf
 ```
 
-Verification: `test_link_kernel`; fakeos `scripts/test_qemu.py` structural
-checks (ELF32 + MB1 magic + dual PHDRs).
+Script grammar limits: [`ld-script-subset.md`](ld-script-subset.md).
+
+Verification: `test_link_kernel`, `test_ldscript`; fakeos `scripts/test_qemu.py`
+structural checks (ELF32 + MB1 magic + dual PHDRs).
 
 ## Debugging (`-g`)
 

@@ -3,6 +3,7 @@
 #include "fakecc/emit.h"
 #include "fakecc/iasm.h"
 #include "fakecc/ir.h"
+#include "fakecc/ldscript.h"
 #include "fakecc/lexer.h"
 #include "fakecc/macho.h"
 #include "fakecc/opt.h"
@@ -106,6 +107,7 @@ static void usage(void) {
     fprintf(stderr,
             "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mcmodel=small|kernel]\n"
             "              [--image-base=ADDR] [--kernel-multiboot]\n"
+            "              [-T script|--script=path]\n"
             "              [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
             "              [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input.c|.S|.o...> -o <output>\n"
@@ -119,6 +121,10 @@ static void usage(void) {
             "  -mcmodel=kernel x86_64 kernel / higher-half (see docs/elf-et-rel-higher-half.md)\n"
             "  --image-base=A  static ELF link base (default 0x400000 = USER_VMA; S1)\n"
 "  --kernel-multiboot  fakeos S1+S2: dual-segment higher-half + Multiboot ELF32\n"
+            "  -T script / --script=path\n"
+            "                  fakeos S1: subset GNU ld script (boot/linker.ld or\n"
+            "                  user/user.ld); configures --kernel-multiboot /\n"
+            "                  --image-base from parsed constants\n"
             "  -mno-avx        pass 32-byte vectors in memory (gcc -mno-avx)\n"
             "  -mavx           default: 32-byte vectors in one YMM\n"
             "  -mavx512f       pass 64-byte vectors in one ZMM (gcc -mavx512f)\n"
@@ -621,6 +627,7 @@ int main(int argc, char **argv) {
     int nodefaultlibs = 0;
     int nostdlib = 0;
     int kernel_multiboot = 0;
+    const char *ld_script = NULL;
     int want_debug = 0;
     int opt_level = 1;
     const char *output_path = NULL;
@@ -733,6 +740,18 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--kernel-multiboot") == 0) {
             kernel_multiboot = 1;
             nostdlib = 1;
+        } else if (strcmp(argv[i], "-T") == 0 || strcmp(argv[i], "--script") == 0) {
+            if (i + 1 >= argc) usage();
+            ld_script = argv[++i];
+        } else if (strncmp(argv[i], "--script=", 9) == 0) {
+            ld_script = argv[i] + 9;
+            if (!ld_script[0]) {
+                fprintf(stderr, "fakecc: empty --script=\n");
+                return 1;
+            }
+        } else if (argv[i][0] == '-' && argv[i][1] == 'T' && argv[i][2] != '\0') {
+            /* GNU ld style -Tpath */
+            ld_script = argv[i] + 2;
         } else if (strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
@@ -820,6 +839,19 @@ int main(int argc, char **argv) {
     }
 
     if (ninputs == 0 || output_path == NULL) usage();
+
+    if (ld_script) {
+        LdScriptInfo ldi;
+        if (ldscript_parse_file(ld_script, &ldi) != 0)
+            return 1;
+        int from_script_kmb = 0;
+        if (ldscript_configure_link(&ldi, &from_script_kmb) != 0)
+            return 1;
+        if (from_script_kmb) {
+            kernel_multiboot = 1;
+            nostdlib = 1;
+        }
+    }
 
     for (int i = 0; i < ninputs; i++) {
         if (ends_with(inputs[i], ".cpp") || ends_with(inputs[i], ".cc")

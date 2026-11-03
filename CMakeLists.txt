@@ -77,6 +77,7 @@ add_library(fakecc_core
     src/emit.c
     src/link.c
     src/link_kernel.c
+    src/ldscript.c
     src/pe.c
     src/coff.c
     src/arcoff.c

@@ -460,7 +460,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
 void emit_elf(const EmitModule *m, const char *path);
 
 /* Static ELF image base (fakeos S1). Default 0x400000 = USER_VMA.
- * Kernel dual PT_LOAD / KERNEL_VMA layout is still external ld / ldfake. */
+ * Also set via -T user/user.ld (ldscript_configure_link). */
 void link_set_image_base(uint64_t base);
 uint64_t link_image_base(void);
 
