@@ -2767,11 +2767,27 @@ typedef struct {
 
 /* Compute which callee-saved registers this function actually uses.
  * Sets used_bit for each of REG_RBX / REG_R12 / REG_R13 / REG_RSI / REG_RDI (0 or 1). */
-static void collect_callee_saved(const RAResult *ra, int used[5]) {
+/* IR_ALLOCA never touches its GP home (frame via alloca_off).  IR_ADDR is
+ * kept off CS colors by RA, so counting either forced dead push/pop
+ * (init/switch/chacha). */
+static void collect_callee_saved(const RAResult *ra, const IRFunction *fn,
+                                 int used[5]) {
     used[0] = used[1] = used[2] = used[3] = used[4] = 0;
     if (!ra) return;
     int is_win = (target_current()->os == TOS_WINDOWS);
+    char *skip = NULL;
+    if (fn && ra->num_values > 0) {
+        skip = xmalloc((size_t)ra->num_values);
+        memset(skip, 0, (size_t)ra->num_values);
+        for (size_t j = 0; j < fn->insts.len; j++) {
+            const IRInst *in = &fn->insts.data[j];
+            if ((in->op == IR_ALLOCA || in->op == IR_ADDR)
+                && in->dst >= 0 && in->dst < ra->num_values)
+                skip[in->dst] = 1;
+        }
+    }
     for (int v = 0; v < ra->num_values; v++) {
+        if (skip && skip[v]) continue;
         int r = ra->reg[v];
         if (r == REG_RBX) used[0] = 1;
         else if (r == REG_R12) used[1] = 1;
@@ -2779,6 +2795,7 @@ static void collect_callee_saved(const RAResult *ra, int used[5]) {
         else if (is_win && r == REG_RSI) used[3] = 1;
         else if (is_win && r == REG_RDI) used[4] = 1;
     }
+    free(skip);
 }
 
 /* mov [base+off], %reg  →  REX.W 89 [mod=01/10 reg=src rm=base] disp. */
@@ -5086,7 +5103,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 
         /* ---- Prologue ---- */
         int cs_used[5];
-        collect_callee_saved(ra, cs_used);
+        collect_callee_saved(ra, fn, cs_used);
         int cs_count = cs_used[0] + cs_used[1] + cs_used[2] + cs_used[3] + cs_used[4];
         curr_cs_count = cs_count;
         int cs_save_area = 8 * cs_count;  /* bytes occupied by callee-saved reg pushes */

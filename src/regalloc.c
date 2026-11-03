@@ -719,6 +719,22 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
     for (int v = 0; v < nv; v++) forbid_mask[v] = 0;
 
     int *ssa_def = ra_build_defs(fn);
+    /* ADDR/ALLOCA never need a callee-saved home. */
+    if (!float_class && cls->nregs > 0) {
+        uint32_t all = cls->nregs >= 32 ? 0xffffffffu
+                                        : (1u << cls->nregs) - 1u;
+        uint32_t cs_only = all & ~(uint32_t)cls->caller_saved;
+        if (cs_only) {
+            for (size_t j = 0; j < fn->insts.len; j++) {
+                const IRInst *in = &fn->insts.data[j];
+                if ((in->op == IR_ALLOCA || in->op == IR_ADDR)
+                    && in->dst >= 0 && in->dst < nv
+                    && value_in_class(fn, in->dst, float_class,
+                                      cls->exclude_16byte_ld))
+                    forbid_mask[in->dst] |= cs_only;
+            }
+        }
+    }
 
     BitSet *use_b = xmalloc(cfg->num * sizeof(BitSet));
     BitSet *def_b = xmalloc(cfg->num * sizeof(BitSet));
