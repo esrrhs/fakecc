@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -116,6 +117,7 @@ void a64_lsl_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_lsr_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_asr_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_mul(A64Asm *a, int rd, int rn, int rm, int is64);
+void a64_umulh(A64Asm *a, int rd, int rn, int rm);
 void a64_msub(A64Asm *a, int rd, int rn, int rm, int ra, int is64);
 void a64_udiv(A64Asm *a, int rd, int rn, int rm, int is64);
 void a64_sdiv(A64Asm *a, int rd, int rn, int rm, int is64);
@@ -192,7 +194,6 @@ void a64_str_d(A64Asm *a, int rt, int rn, int off);
 void a64_ldr_d(A64Asm *a, int rt, int rn, int off);
 void a64_str_s(A64Asm *a, int rt, int rn, int off);
 void a64_ldr_s(A64Asm *a, int rt, int rn, int off);
-
 typedef struct FILE FILE;
 typedef long fpos_t;
 void a64_init(A64Asm *a) {
@@ -488,6 +489,9 @@ void a64_mul(A64Asm *a, int rd, int rn, int rm, int is64) {
     uint32_t w = (is64 ? 0x80000000u : 0) | 0x1B000000u
                | (((rm) & 31) << 16) | (31u << 10) | (((rn) & 31) << 5) | ((rd) & 31);
     a64_word(a, w);
+}
+void a64_umulh(A64Asm *a, int rd, int rn, int rm) {
+    a64_word(a, 0x9BC07C00u | (((rm) & 31) << 16) | (((rn) & 31) << 5) | ((rd) & 31));
 }
 void a64_msub(A64Asm *a, int rd, int rn, int rm, int ra, int is64) {
     uint32_t w = (is64 ? 0x80000000u : 0) | 0x1B000000u | (1u << 15)

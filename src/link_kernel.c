@@ -189,7 +189,7 @@ static int read_obj(const char *path) {
     if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return 0; }
     flen = ftell(fp);
     if (flen < 0) { fclose(fp); return 0; }
-    rewind(fp);
+    if (fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return 0; }
     if (arena_used + (unsigned long)flen > OBJ_ARENA) {
         fprintf(stderr, "fakecc --kernel-multiboot: object arena full\n");
         fclose(fp);

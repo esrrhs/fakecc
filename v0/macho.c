@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -50,7 +51,6 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
-
 struct EmitModule;
 struct MachoDebug {
     Buffer abbrev;
@@ -120,16 +120,6 @@ struct A64Asm {
 };typedef struct A64Asm A64Asm;
 void a64_init(A64Asm *a);
 void a64_free(A64Asm *a);
-struct HookRef { int prio; size_t mod; size_t slot; uint32_t sym; };
-typedef struct HookRef HookRef;
-struct Adj { uint16_t sh; size_t off; int defined; };
-typedef struct Adj Adj;
-struct Comm { char *name; size_t size, align, off; };
-typedef struct Comm Comm;
-struct GotEnt { char *name; int32_t addend; int filled; };
-typedef struct GotEnt GotEnt;
-struct TlvEnt { uint16_t sh; size_t off; int filled; };
-typedef struct TlvEnt TlvEnt;
 static inline void a64_set_base(A64Asm *a, uint32_t off) { a->base_off = off; }
 static inline void a64_set_wide_cond(A64Asm *a, int on) { a->wide_cond = !!on; }
 int a64_new_label(A64Asm *a);
@@ -160,6 +150,7 @@ void a64_lsl_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_lsr_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_asr_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_mul(A64Asm *a, int rd, int rn, int rm, int is64);
+void a64_umulh(A64Asm *a, int rd, int rn, int rm);
 void a64_msub(A64Asm *a, int rd, int rn, int rm, int ra, int is64);
 void a64_udiv(A64Asm *a, int rd, int rn, int rm, int is64);
 void a64_sdiv(A64Asm *a, int rd, int rn, int rm, int is64);
@@ -253,6 +244,28 @@ struct EmitSymbol {
     size_t size;
     uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
+struct EmitComdat {
+    char *sect_name;
+    uint8_t selection;
+    char *symbol;
+    char *assoc_name;
+    uint8_t keep;
+};typedef struct EmitComdat EmitComdat;
+struct EmitSpan {
+    uint16_t kind;
+    size_t off;
+    size_t len;
+    int comdat;
+};typedef struct EmitSpan EmitSpan;
+struct EmitWinUnwind {
+    size_t begin;
+    size_t end;
+    size_t after_push_rbp;
+    size_t after_set_fp;
+    size_t after_prolog;
+    uint32_t stack_alloc;
+    int8_t pushed[8];
+};typedef struct EmitWinUnwind EmitWinUnwind;
 struct EmitReloc {
     size_t offset;
     uint32_t type;
@@ -380,6 +393,8 @@ struct EmitModule {
     Buffer fini_array;
     size_t fini_array_align;
     int *fini_prio;
+    Buffer tls_callbacks;
+    size_t tls_callbacks_align;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -405,6 +420,24 @@ struct EmitModule {
     DebugVar *dbg_globals;
     size_t num_dbg_globals;
     size_t cap_dbg_globals;
+    Buffer pdata;
+    Buffer xdata;
+    Buffer drectve;
+    EmitComdat *comdats;
+    size_t num_comdats;
+    size_t cap_comdats;
+    EmitSpan *spans;
+    size_t num_spans;
+    size_t cap_spans;
+    EmitReloc *pdata_relocs;
+    size_t num_pdata_relocs;
+    size_t cap_pdata_relocs;
+    EmitReloc *xdata_relocs;
+    size_t num_xdata_relocs;
+    size_t cap_xdata_relocs;
+    EmitWinUnwind *win_unwinds;
+    size_t num_win_unwinds;
+    size_t cap_win_unwinds;
 };typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
@@ -421,6 +454,16 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
 void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
 void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+void emit_module_add_win_unwind(EmitModule *m, const EmitWinUnwind *u);
+void emit_module_add_comdat(EmitModule *m, const char *sect_name,
+                            uint8_t selection, const char *symbol,
+                            const char *assoc_name);
+void emit_module_add_span(EmitModule *m, uint16_t kind, size_t off,
+                          size_t len, int comdat);
+void emit_module_add_pdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
+void emit_module_add_xdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
 int emit_is_darwin_import(const char *name);
 struct EmitAuxLib {
     char *install_name;
@@ -446,6 +489,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
+void link_set_image_base(uint64_t base);
+uint64_t link_image_base(void);
+int link_kernel_multiboot(const char **obj_paths, size_t npaths,
+                          const char *out_path);
 DebugTypeTag ir_type_tag(int type_kind, int is_bool);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
@@ -473,13 +520,13 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
                                    const DebugCallSite *cs);
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
-
 typedef int IRValue;
 enum IROpcode {
     IR_CONST,
     IR_ADD,
     IR_SUB,
     IR_MUL,
+    IR_UMULH,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -522,6 +569,7 @@ enum IROpcode {
     IR_LABEL,
     IR_BR,
     IR_CBR,
+    IR_BR_TABLE,
     IR_PARAM,
     IR_CALL,
     IR_RETURN,
@@ -540,6 +588,7 @@ enum IROpcode {
     IR_STACK_RESTORE,
     IR_LONGJMP,
     IR_DBG_VALUE,
+    IR_ASM,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -553,6 +602,7 @@ struct IRInst {
     char *call_name;
     IRValue *call_args;
     int call_nargs;
+    int call_is_variadic;
     IRValue call_callee;
     int width;
     int is_unsigned;
@@ -565,6 +615,8 @@ struct IRInst {
     int *call_arg_nbytes;
     int alloca_bytes;
     int is_volatile;
+    char **asm_constraints;
+    char *asm_clobbers;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -636,6 +688,7 @@ struct IRFunction {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
     int has_dyn_alloca;
     int needs_apply_args;
     int needs_apply;
@@ -905,6 +958,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -1093,7 +1147,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -1120,6 +1179,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -1135,6 +1204,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -1179,6 +1258,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -1352,7 +1432,6 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
-
 enum A64GpReg {
     A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
     A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,
@@ -1506,6 +1585,16 @@ typedef struct __attribute__((packed)) {
     uint32_t dataoff;
     uint32_t datasize;
 } linkedit_data_command;
+struct HookRef { int prio; size_t mod; size_t slot; uint32_t sym; };
+typedef struct HookRef HookRef;
+struct Adj { uint16_t sh; size_t off; int defined; };
+typedef struct Adj Adj;
+struct Comm { char *name; size_t size, align, off; };
+typedef struct Comm Comm;
+struct GotEnt { char *name; int32_t addend; int filled; };
+typedef struct GotEnt GotEnt;
+struct TlvEnt { uint16_t sh; size_t off; int filled; };
+typedef struct TlvEnt TlvEnt;
 static uint32_t align8(uint32_t n) { return (n + 7u) & ~7u; }
 static void put_u16(uint8_t *p, uint16_t v) { runtime.memcpy(p, &v, 2); }
 static void put_u32(uint8_t *p, uint32_t v) { runtime.memcpy(p, &v, 4); }
@@ -4116,7 +4205,8 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
             runtime.memcpy(out.text.data + dtor_at[i], &w, 4);
         }
         MachoDebug dbg;
-        int have_dbg = 0;
+        runtime.memset(&dbg, 0, sizeof(dbg));
+        int have_dbg = 0, built_dbg = 0;
         for (size_t i = 0; i < n && !have_dbg; i++)
             have_dbg = macho_module_has_debug(mods[i]);
         if (rc == 0 && have_dbg) {
@@ -4180,12 +4270,13 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
             macho_debug_build(&dm, 0x100000000ull + macho_text_offset(),
                               sec_vaddr, &dbg);
             emit_module_free(&dm);
+            built_dbg = 1;
         }
         if (rc == 0)
             rc = macho_write_exec(&out, macho_text_offset(), path,
                                   skip_libsystem,
-                                  have_dbg ? &dbg : ((void*)0));
-        if (have_dbg) macho_debug_free(&dbg);
+                                  built_dbg ? &dbg : ((void*)0));
+        if (built_dbg) macho_debug_free(&dbg);
     }
     for (size_t i = 0; i < n; i++) runtime.free(adj[i]);
     runtime.free(adj);

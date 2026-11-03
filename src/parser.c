@@ -4030,8 +4030,40 @@ static Stmt parse_stmt_impl(Parser *p) {
     }
     /* `typedef` at block scope is parsed as a decl-stmt whose init is NULL;
      * sema registers the alias.  A leading typedef-name identifier is treated
-     * as a type start (declaration), matching C's "lexer hack" resolution. */
-    if (k == TK_KW_TYPEDEF || is_type_start(p, p->pos)) {
+     * as a type start (declaration), matching C's "lexer hack" resolution.
+     *
+     * Exception: when the type-start is a bare IDENT that a sibling package
+     * file exposed only as a struct tag (`struct obj` in link_kernel.c), an
+     * expression continuation (`obj = …`, `obj->…`, …) must stay an
+     * expression statement.  Without this, self-host fails compiling
+     * sema/ir locals named `obj`.  `T *x` / `T x` / `T(x)` remain decls. */
+    int as_decl_stmt = 0;
+    if (k == TK_KW_TYPEDEF) {
+        as_decl_stmt = 1;
+    } else if (is_type_start(p, p->pos)) {
+        as_decl_stmt = 1;
+        if (k == TK_IDENT && p->pos + 1 < p->tokens->len) {
+            switch (p->tokens->data[p->pos + 1].kind) {
+            case TK_ASSIGN: case TK_EQ: case TK_NE:
+            case TK_ARROW: case TK_DOT:
+            case TK_INC: case TK_DEC:
+            case TK_PLUS_EQ: case TK_MINUS_EQ: case TK_STAR_EQ:
+            case TK_SLASH_EQ: case TK_PERCENT_EQ:
+            case TK_AMP_EQ: case TK_BITOR_EQ: case TK_XOR_EQ:
+            case TK_SHL_EQ: case TK_SHR_EQ:
+            case TK_LBRACKET: case TK_COMMA: case TK_SEMICOLON:
+            case TK_QUESTION: case TK_ANDAND: case TK_OROR:
+            case TK_LT: case TK_LE: case TK_GT: case TK_GE:
+            case TK_PLUS: case TK_MINUS: case TK_SLASH: case TK_PERCENT:
+            case TK_AMP: case TK_BITOR: case TK_XOR: case TK_SHL: case TK_SHR:
+                as_decl_stmt = 0;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    if (as_decl_stmt) {
         /* decl-stmt: [typedef] type IDENT [ "[" N "]" ]* ["=" expr] ";" */
         if (k == TK_KW_TYPEDEF) {
             return parse_typedef_stmt(p);

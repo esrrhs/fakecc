@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -56,6 +57,7 @@ enum IROpcode {
     IR_ADD,
     IR_SUB,
     IR_MUL,
+    IR_UMULH,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -98,6 +100,7 @@ enum IROpcode {
     IR_LABEL,
     IR_BR,
     IR_CBR,
+    IR_BR_TABLE,
     IR_PARAM,
     IR_CALL,
     IR_RETURN,
@@ -116,6 +119,7 @@ enum IROpcode {
     IR_STACK_RESTORE,
     IR_LONGJMP,
     IR_DBG_VALUE,
+    IR_ASM,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -129,6 +133,7 @@ struct IRInst {
     char *call_name;
     IRValue *call_args;
     int call_nargs;
+    int call_is_variadic;
     IRValue call_callee;
     int width;
     int is_unsigned;
@@ -141,6 +146,8 @@ struct IRInst {
     int *call_arg_nbytes;
     int alloca_bytes;
     int is_volatile;
+    char **asm_constraints;
+    char *asm_clobbers;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -212,6 +219,7 @@ struct IRFunction {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
     int has_dyn_alloca;
     int needs_apply_args;
     int needs_apply;
@@ -481,6 +489,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -669,7 +678,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -696,6 +710,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -711,6 +735,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -755,6 +789,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -945,8 +980,9 @@ static int inst_has_side_effect(const IRInst *inst) {
     if (inst->is_volatile) return 1;
     IROpcode op = inst->op;
     return op == IR_RETURN || op == IR_STORE || op == IR_STORE_PTR ||
-           op == IR_BR || op == IR_CBR || op == IR_LABEL ||
-           op == IR_ALLOCA || op == IR_CALL || op == IR_PARAM ||
+           op == IR_BR || op == IR_CBR || op == IR_BR_TABLE ||
+           op == IR_JMP_PTR || op == IR_LABEL ||
+           op == IR_ALLOCA || op == IR_CALL || op == IR_ASM || op == IR_PARAM ||
            op == IR_VADD || op == IR_VSUB || op == IR_VMUL || op == IR_VDIV ||
            op == IR_VBAND || op == IR_VBOR || op == IR_VBXOR;
 }
@@ -1054,11 +1090,16 @@ int scalar_dce(IRFunction *fn) {
         if (inst->a >= 0 && inst->a < fn->next_value_id) used[inst->a] = 1;
         if (inst->op != IR_CBR && inst->op != IR_CALL &&
             inst->b >= 0 && inst->b < fn->next_value_id) used[inst->b] = 1;
+        if ((inst->op == IR_VADD || inst->op == IR_VSUB || inst->op == IR_VMUL
+             || inst->op == IR_VDIV || inst->op == IR_VBAND || inst->op == IR_VBOR
+             || inst->op == IR_VBXOR)
+            && inst->dst >= 0 && inst->dst < fn->next_value_id)
+            used[inst->dst] = 1;
         if (inst->op == IR_RETURN) {
             if (inst->c >= 0 && inst->c < fn->next_value_id) used[inst->c] = 1;
             if (inst->d >= 0 && inst->d < fn->next_value_id) used[inst->d] = 1;
         }
-        if (inst->op == IR_CALL) {
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
             for (int k = 0; k < inst->call_nargs; k++) {
                 int v = inst->call_args[k];
                 if (v >= 0 && v < fn->next_value_id) used[v] = 1;
@@ -1149,7 +1190,7 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->c >= max_vid) max_vid = inst->c + 1;
             if (inst->d >= max_vid) max_vid = inst->d + 1;
         }
-        if (inst->op == IR_CALL) {
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
             if (inst->call_callee >= max_vid) max_vid = inst->call_callee + 1;
             for (int k = 0; k < inst->call_nargs; k++) {
                 if (k < 1024 && inst->call_args[k] >= max_vid)
@@ -1177,8 +1218,9 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->d >= 0 && inst->d < max_vid && map[inst->d] == -1)
                 map[inst->d] = next++;
         }
-        if (inst->op == IR_CALL) {
-            if (inst->call_callee >= 0 && inst->call_callee < max_vid && map[inst->call_callee] == -1)
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
+            if (inst->op == IR_CALL && inst->call_callee >= 0
+                && inst->call_callee < max_vid && map[inst->call_callee] == -1)
                 map[inst->call_callee] = next++;
             for (int k = 0; k < inst->call_nargs; k++) {
                 if (k >= 1024) break;
@@ -1202,8 +1244,9 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->c >= 0 && inst->c < max_vid) inst->c = map[inst->c];
             if (inst->d >= 0 && inst->d < max_vid) inst->d = map[inst->d];
         }
-        if (inst->op == IR_CALL) {
-            if (inst->call_callee >= 0 && inst->call_callee < max_vid)
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
+            if (inst->op == IR_CALL && inst->call_callee >= 0
+                && inst->call_callee < max_vid)
                 inst->call_callee = map[inst->call_callee];
             for (int k = 0; k < inst->call_nargs; k++) {
                 if (k >= 1024) break;

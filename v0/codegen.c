@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -67,6 +68,28 @@ struct EmitSymbol {
     size_t size;
     uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
+struct EmitComdat {
+    char *sect_name;
+    uint8_t selection;
+    char *symbol;
+    char *assoc_name;
+    uint8_t keep;
+};typedef struct EmitComdat EmitComdat;
+struct EmitSpan {
+    uint16_t kind;
+    size_t off;
+    size_t len;
+    int comdat;
+};typedef struct EmitSpan EmitSpan;
+struct EmitWinUnwind {
+    size_t begin;
+    size_t end;
+    size_t after_push_rbp;
+    size_t after_set_fp;
+    size_t after_prolog;
+    uint32_t stack_alloc;
+    int8_t pushed[8];
+};typedef struct EmitWinUnwind EmitWinUnwind;
 struct EmitReloc {
     size_t offset;
     uint32_t type;
@@ -194,6 +217,8 @@ struct EmitModule {
     Buffer fini_array;
     size_t fini_array_align;
     int *fini_prio;
+    Buffer tls_callbacks;
+    size_t tls_callbacks_align;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -219,6 +244,24 @@ struct EmitModule {
     DebugVar *dbg_globals;
     size_t num_dbg_globals;
     size_t cap_dbg_globals;
+    Buffer pdata;
+    Buffer xdata;
+    Buffer drectve;
+    EmitComdat *comdats;
+    size_t num_comdats;
+    size_t cap_comdats;
+    EmitSpan *spans;
+    size_t num_spans;
+    size_t cap_spans;
+    EmitReloc *pdata_relocs;
+    size_t num_pdata_relocs;
+    size_t cap_pdata_relocs;
+    EmitReloc *xdata_relocs;
+    size_t num_xdata_relocs;
+    size_t cap_xdata_relocs;
+    EmitWinUnwind *win_unwinds;
+    size_t num_win_unwinds;
+    size_t cap_win_unwinds;
 };typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
@@ -235,6 +278,16 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
 void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
 void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+void emit_module_add_win_unwind(EmitModule *m, const EmitWinUnwind *u);
+void emit_module_add_comdat(EmitModule *m, const char *sect_name,
+                            uint8_t selection, const char *symbol,
+                            const char *assoc_name);
+void emit_module_add_span(EmitModule *m, uint16_t kind, size_t off,
+                          size_t len, int comdat);
+void emit_module_add_pdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
+void emit_module_add_xdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
 int emit_is_darwin_import(const char *name);
 struct EmitAuxLib {
     char *install_name;
@@ -260,12 +313,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
+void link_set_image_base(uint64_t base);
+uint64_t link_image_base(void);
+int link_kernel_multiboot(const char **obj_paths, size_t npaths,
+                          const char *out_path);
 typedef int IRValue;
 enum IROpcode {
     IR_CONST,
     IR_ADD,
     IR_SUB,
     IR_MUL,
+    IR_UMULH,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -308,6 +366,7 @@ enum IROpcode {
     IR_LABEL,
     IR_BR,
     IR_CBR,
+    IR_BR_TABLE,
     IR_PARAM,
     IR_CALL,
     IR_RETURN,
@@ -326,6 +385,7 @@ enum IROpcode {
     IR_STACK_RESTORE,
     IR_LONGJMP,
     IR_DBG_VALUE,
+    IR_ASM,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -339,6 +399,7 @@ struct IRInst {
     char *call_name;
     IRValue *call_args;
     int call_nargs;
+    int call_is_variadic;
     IRValue call_callee;
     int width;
     int is_unsigned;
@@ -351,6 +412,8 @@ struct IRInst {
     int *call_arg_nbytes;
     int alloca_bytes;
     int is_volatile;
+    char **asm_constraints;
+    char *asm_clobbers;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -422,6 +485,7 @@ struct IRFunction {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
     int has_dyn_alloca;
     int needs_apply_args;
     int needs_apply;
@@ -691,6 +755,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -879,7 +944,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -906,6 +976,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -921,6 +1001,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -965,6 +1055,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -1088,8 +1179,9 @@ void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
+void codegen_set_code_model(int kernel);
+int codegen_code_model_is_kernel(void);
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug);
-
 DebugTypeTag ir_type_tag(int type_kind, int is_bool);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
@@ -1177,11 +1269,13 @@ enum TargetOS {
     TOS_UNKNOWN = 0,
     TOS_LINUX = 1,
     TOS_MACOS = 2,
+    TOS_WINDOWS = 3,
 };typedef enum TargetOS TargetOS;
 enum TargetObjFmt {
     TARGET_OBJFMT_UNKNOWN = 0,
     TARGET_OBJFMT_ELF = 1,
     TARGET_OBJFMT_MACHO = 2,
+    TARGET_OBJFMT_PE = 3,
 };typedef enum TargetObjFmt TargetObjFmt;
 struct TargetDesc {
     TargetArch arch;
@@ -1199,9 +1293,25 @@ const TargetDesc *target_default(void);
 const TargetDesc *target_parse(const char *triple);
 const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
+const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
 typedef struct FILE FILE;
 typedef long fpos_t;
+struct IAsmOperand {
+    int kind;
+    int reg;
+    int64_t imm;
+    int width;
+    char *sym;
+};typedef struct IAsmOperand IAsmOperand;
+int iasm_emit_x86(Buffer *text, EmitModule *out,
+                  const char *template,
+                  const IAsmOperand *ops, int nops,
+                  const char *file, int line, int col);
+int iasm_assemble_body(EmitModule *out, const char *body,
+                       const char **globals, int nglobals,
+                       const char **externs, int nexterns);
+int assemble_s_file(const char *src, const char *filename, EmitModule *out);
 static void emit_byte(Buffer *b, uint8_t val) {
     buffer_append(b, (const char *)&val, 1);
 }
@@ -1213,6 +1323,13 @@ static void emit_modrm(Buffer *b, int mod, int reg, int rm) {
 }
 static void emit_modrm_disp(Buffer *b, int reg_field, int base, int off);
 static void emit_modrm_indirect(Buffer *b, int reg_field, int base);
+static int g_code_model_kernel = 0;
+void codegen_set_code_model(int kernel) {
+    g_code_model_kernel = kernel ? 1 : 0;
+}
+int codegen_code_model_is_kernel(void) {
+    return g_code_model_kernel;
+}
 static void ensure_reg(Buffer *b, int v, int dst_reg, const RAResult *ra);
 static void emit_rex_wrb(Buffer *b, int w, int r_reg, int rm_reg) {
     int R = (r_reg >> 3) & 1;
@@ -1405,6 +1522,23 @@ static void emit_mov_fs0_reg(Buffer *b, int dst) {
     emit_byte(b, 0x25);
     emit_int32(b, 0);
 }
+static void emit_mov_gs58_reg(Buffer *b, int dst) {
+    emit_byte(b, 0x65);
+    emit_rex_wrb(b, 1, dst, 0);
+    emit_byte(b, 0x8B);
+    emit_modrm(b, 0, dst & 7, 4);
+    emit_byte(b, 0x25);
+    emit_int32(b, 0x58);
+}
+static size_t emit_load_rip32(Buffer *b, int dst) {
+    if (dst >= 8)
+        emit_byte(b, 0x44);
+    emit_byte(b, 0x8B);
+    emit_modrm(b, 0, dst & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
 static size_t emit_add_rip(Buffer *b, int dst) {
     emit_rex_wrb(b, 1, dst, 0 );
     emit_byte(b, 0x03);
@@ -1536,6 +1670,14 @@ static void emit_sse_arith(Buffer *b, int op, int dst, int src, int is_float) {
     emit_byte(b, 0x0F);
     emit_byte(b, op);
     emit_modrm(b, 3, dst & 7, src & 7);
+}
+static void emit_sse_arith_disp(Buffer *b, int op, int dst, int base, int off,
+                                int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_wrb(b, 0, dst, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, op);
+    emit_modrm_disp(b, dst, base, off);
 }
 static void emit_sse_ucomi(Buffer *b, int a, int b_xmm, int is_float) {
     if (!is_float) emit_byte(b, 0x66);
@@ -1701,6 +1843,22 @@ static size_t emit_jcc_rel32(Buffer *b, uint8_t cc_opcode) {
     emit_int32(b, 0);
     return patch;
 }
+static int emit_jmp_short_to(Buffer *b, size_t target) {
+    size_t after = b->len + 2;
+    int64_t rel = (int64_t)target - (int64_t)after;
+    if (rel < -128 || rel > 127) return 0;
+    emit_byte(b, 0xEB);
+    emit_byte(b, (uint8_t)rel);
+    return 1;
+}
+static int emit_jcc_short_to(Buffer *b, uint8_t cc_opcode, size_t target) {
+    size_t after = b->len + 2;
+    int64_t rel = (int64_t)target - (int64_t)after;
+    if (rel < -128 || rel > 127) return 0;
+    emit_byte(b, (uint8_t)(0x70 | (cc_opcode & 0x0F)));
+    emit_byte(b, (uint8_t)rel);
+    return 1;
+}
 static void emit_push_r(Buffer *b, int r) {
     if (r >= 8) emit_byte(b, 0x41);
     emit_byte(b, (uint8_t)(0x50 | (r & 7)));
@@ -1836,6 +1994,9 @@ static void emit_ld_from_gp_int(Buffer *b, int src, int dst, const int *ld_off,
 static const int SYSV_ARG_REGS[6] = {
     REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9
 };
+static const int WIN64_ARG_REGS[4] = {
+    REG_RCX, REG_RDX, REG_R8, REG_R9
+};
 static int curr_cs_count = 0;
 static const IRFunction *curr_fn = ((void*)0);
 static int curr_xmm_spill = 16;
@@ -1885,6 +2046,48 @@ static size_t emit_load_rip(Buffer *b, int dst) {
     emit_rex_wrb(b, 1, dst, 0 );
     emit_byte(b, 0x8B);
     emit_modrm(b, 0, dst & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static size_t emit_load_rip_w(Buffer *b, int dst, int width, int is_unsigned) {
+    if (width == 1) {
+        emit_rex_wrb(b, 1, dst, 0);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB6 : 0xBE);
+    } else if (width == 2) {
+        emit_rex_wrb(b, 1, dst, 0);
+        emit_byte(b, 0x0F);
+        emit_byte(b, is_unsigned ? 0xB7 : 0xBF);
+    } else if (width == 4) {
+        emit_rex_if(b, 0, dst, 0, 0);
+        emit_byte(b, 0x8B);
+    } else {
+        emit_rex_wrb(b, 1, dst, 0);
+        emit_byte(b, 0x8B);
+    }
+    emit_modrm(b, 0, dst & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static size_t emit_store_rip_w(Buffer *b, int src, int width) {
+    if (width == 1) {
+        uint8_t rex = 0x40 | ((src & 8) >> 1);
+        emit_byte(b, rex);
+        emit_byte(b, 0x88);
+    } else if (width == 2) {
+        emit_byte(b, 0x66);
+        emit_rex_if(b, 0, src, 0, 0);
+        emit_byte(b, 0x89);
+    } else if (width == 4) {
+        emit_rex_if(b, 0, src, 0, 0);
+        emit_byte(b, 0x89);
+    } else {
+        emit_rex_wrb(b, 1, src, 0);
+        emit_byte(b, 0x89);
+    }
+    emit_modrm(b, 0, src & 7, 5);
     size_t patch = b->len;
     emit_int32(b, 0);
     return patch;
@@ -2064,6 +2267,99 @@ static void emit_store_disp(Buffer *b, int base, int src, int off, int width) {
         break;
     }
 }
+static void emit_arith_imm32_disp(Buffer *b, int ext, int base, int32_t imm,
+                                  int off) {
+    if (base >= 8) emit_byte(b, 0x41);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_modrm_disp(b, ext, base, off);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_modrm_disp(b, ext, base, off);
+        emit_int32(b, imm);
+    }
+}
+static void emit_arith_r32_disp(Buffer *b, int op, int base, int src, int off) {
+    if (src >= 8 || base >= 8) emit_rex_wrb(b, 0, src, base);
+    emit_byte(b, (uint8_t)op);
+    emit_modrm_disp(b, src, base, off);
+}
+static size_t emit_store_imm_rip(Buffer *b, int32_t imm, int width) {
+    size_t patch;
+    if (width == 1) {
+        emit_byte(b, 0xC6);
+        emit_modrm(b, 0, 0, 5);
+        patch = b->len;
+        emit_int32(b, 0);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0xC7);
+        emit_modrm(b, 0, 0, 5);
+        patch = b->len;
+        emit_int32(b, 0);
+        emit_int32(b, imm);
+    }
+    return patch;
+}
+static size_t emit_arith_imm32_rip(Buffer *b, int ext, int32_t imm) {
+    size_t patch;
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_modrm(b, 0, ext, 5);
+        patch = b->len;
+        emit_int32(b, 0);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_modrm(b, 0, ext, 5);
+        patch = b->len;
+        emit_int32(b, 0);
+        emit_int32(b, imm);
+    }
+    return patch;
+}
+static size_t emit_arith_r32_rip(Buffer *b, int op, int src) {
+    emit_rex_if(b, 0, src, 0, 0);
+    emit_byte(b, (uint8_t)op);
+    emit_modrm(b, 0, src & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static void emit_store_imm_disp(Buffer *b, int base, int32_t imm, int off,
+                                int width) {
+    switch (width) {
+    case 1: {
+        if (base >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0xC6);
+        emit_modrm_disp(b, 0, base, off);
+        emit_byte(b, (uint8_t)imm);
+        break;
+    }
+    case 2:
+        emit_byte(b, 0x66);
+        if (base >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0xC7);
+        emit_modrm_disp(b, 0, base, off);
+        emit_byte(b, (uint8_t)imm);
+        emit_byte(b, (uint8_t)(imm >> 8));
+        break;
+    case 4:
+        if (base >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0xC7);
+        emit_modrm_disp(b, 0, base, off);
+        emit_int32(b, imm);
+        break;
+    case 8:
+    default:
+        emit_rex_wrb(b, 1, 0, base);
+        emit_byte(b, 0xC7);
+        emit_modrm_disp(b, 0, base, off);
+        emit_int32(b, imm);
+        break;
+    }
+}
 static void emit_sse_load_disp(Buffer *b, int dst, int base, int off, int is_float) {
     emit_byte(b, is_float ? 0xF3 : 0xF2);
     emit_rex_wrb(b, 0, dst, base);
@@ -2194,6 +2490,230 @@ static void emit_store_sib(Buffer *b, int base, int index, int scale2,
         break;
     }
 }
+static void emit_sse_load_sib(Buffer *b, int dst, int base, int index, int scale2,
+                              int off, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_if(b, 0, dst, index, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x10);
+    emit_modrm_sib_disp(b, dst, base, index, scale2, off);
+}
+static void emit_sse_store_sib(Buffer *b, int base, int index, int scale2,
+                               int off, int src, int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    emit_rex_if(b, 0, src, index, base);
+    emit_byte(b, 0x0F);
+    emit_byte(b, 0x11);
+    emit_modrm_sib_disp(b, src, base, index, scale2, off);
+}
+static size_t emit_sse_load_abs32(Buffer *b, int dst, int index, int scale2,
+                                  int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        emit_rex_if(b, 0, dst, 0, index);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0x10);
+        emit_modrm(b, 2, dst & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        emit_rex_if(b, 0, dst, idx, 0);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0x10);
+        emit_modrm(b, 0, dst & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static size_t emit_sse_store_abs32(Buffer *b, int src, int index, int scale2,
+                                   int is_float) {
+    emit_byte(b, is_float ? 0xF3 : 0xF2);
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        emit_rex_if(b, 0, src, 0, index);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0x11);
+        emit_modrm(b, 2, src & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        emit_rex_if(b, 0, src, idx, 0);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0x11);
+        emit_modrm(b, 0, src & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static size_t emit_lea_abs32(Buffer *b, int dst, int index, int scale2) {
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        emit_rex_if(b, 1, dst, 0, index);
+        emit_byte(b, 0x8D);
+        emit_modrm(b, 2, dst & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        emit_rex_if(b, 1, dst, idx, 0);
+        emit_byte(b, 0x8D);
+        emit_modrm(b, 0, dst & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static size_t emit_load_abs32(Buffer *b, int dst, int index, int scale2,
+                              int width, int is_unsigned) {
+    int op_w = (width == 1 || width == 2) ? (is_unsigned ? 0 : 1)
+                                          : (width >= 8 ? 1 : 0);
+    uint8_t op = 0x8B;
+    if (width == 1) op = is_unsigned ? 0xB6 : 0xBE;
+    else if (width == 2) op = is_unsigned ? 0xB7 : 0xBF;
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        if (width == 1 || width == 2) {
+            emit_rex_if(b, op_w, dst, 0, index);
+            emit_byte(b, 0x0F);
+            emit_byte(b, op);
+        } else {
+            emit_rex_if(b, op_w, dst, 0, index);
+            emit_byte(b, op);
+        }
+        emit_modrm(b, 2, dst & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        if (width == 1 || width == 2) {
+            emit_rex_if(b, op_w, dst, idx, 0);
+            emit_byte(b, 0x0F);
+            emit_byte(b, op);
+        } else {
+            emit_rex_if(b, op_w, dst, idx, 0);
+            emit_byte(b, op);
+        }
+        emit_modrm(b, 0, dst & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static size_t emit_store_imm_abs32(Buffer *b, int32_t imm, int index,
+                                   int scale2, int width) {
+    if (width != 1 && width != 4) width = 4;
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        if (width == 1) {
+            if (index >= 8) emit_byte(b, 0x41);
+            emit_byte(b, 0xC6);
+            emit_modrm(b, 2, 0, index & 7);
+            size_t patch = b->len;
+            emit_int32(b, 0);
+            emit_byte(b, (uint8_t)imm);
+            return patch;
+        }
+        if (index >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0xC7);
+        emit_modrm(b, 2, 0, index & 7);
+        size_t patch = b->len;
+        emit_int32(b, 0);
+        emit_int32(b, imm);
+        return patch;
+    }
+    int idx = index < 0 ? 4 : index;
+    int sc = index < 0 ? 0 : (scale2 & 3);
+    if (width == 1) {
+        if (idx >= 8) emit_byte(b, 0x42);
+        emit_byte(b, 0xC6);
+        emit_modrm(b, 0, 0, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+        size_t patch = b->len;
+        emit_int32(b, 0);
+        emit_byte(b, (uint8_t)imm);
+        return patch;
+    }
+    if (idx >= 8) emit_byte(b, 0x42);
+    emit_byte(b, 0xC7);
+    emit_modrm(b, 0, 0, 4);
+    emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    emit_int32(b, imm);
+    return patch;
+}
+static size_t emit_store_abs32(Buffer *b, int src, int index, int scale2,
+                               int width) {
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        switch (width) {
+        case 1: {
+            uint8_t rex = 0x40 | ((src & 8) >> 1) | ((index & 8) >> 3);
+            emit_byte(b, rex);
+            emit_byte(b, 0x88);
+            emit_modrm(b, 2, src & 7, index & 7);
+            break;
+        }
+        case 2:
+            emit_byte(b, 0x66);
+            emit_rex_if(b, 0, src, 0, index);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 2, src & 7, index & 7);
+            break;
+        case 4:
+            emit_rex_if(b, 0, src, 0, index);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 2, src & 7, index & 7);
+            break;
+        case 8:
+        default:
+            emit_rex_if(b, 1, src, 0, index);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 2, src & 7, index & 7);
+            break;
+        }
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        switch (width) {
+        case 1: {
+            uint8_t rex = 0x40 | ((src & 8) >> 1) | ((idx & 8) >> 2);
+            emit_byte(b, rex);
+            emit_byte(b, 0x88);
+            emit_modrm(b, 0, src & 7, 4);
+            emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+            break;
+        }
+        case 2:
+            emit_byte(b, 0x66);
+            emit_rex_if(b, 0, src, idx, 0);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 0, src & 7, 4);
+            emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+            break;
+        case 4:
+            emit_rex_if(b, 0, src, idx, 0);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 0, src & 7, 4);
+            emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+            break;
+        case 8:
+        default:
+            emit_rex_if(b, 1, src, idx, 0);
+            emit_byte(b, 0x89);
+            emit_modrm(b, 0, src & 7, 4);
+            emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+            break;
+        }
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static void emit_movsxd_disp(Buffer *b, int dst, int base, int off) {
+    emit_rex_wrb(b, 1, dst, base);
+    emit_byte(b, 0x63);
+    emit_modrm_disp(b, dst, base, off);
+}
 static void emit_movsx_rr(Buffer *b, int dst, int src, int src_w) {
     if (src_w == 4) {
         emit_rex_wrb(b, 1, dst, src);
@@ -2304,6 +2824,10 @@ static int vec_nslots(int vec_bytes, int is_ld) {
     if (vec_bytes >= 16) return 2;
     return 1;
 }
+static int win64_stack_slots(int is_float, int vecb) {
+    if (is_float && vecb >= 16) return vec_nslots(vecb, 0);
+    return 1;
+}
 static void stack_idx_align(int *idx, int align) {
     if (align < 16 || !idx) return;
     int slots = align / 8;
@@ -2382,6 +2906,20 @@ static int gp_home(const RAResult *ra, IRValue v) {
     int r = ra->reg[v];
     return (r >= 0 && r < 16) ? r : -1;
 }
+static int ensure_index(Buffer *b, IRValue v, const RAResult *ra) {
+    int home = gp_home(ra, v);
+    if (home >= 0 && home != REG_RSP)
+        return home;
+    ensure_reg(b, v, REG_RCX, ra);
+    return REG_RCX;
+}
+static int ensure_ptr(Buffer *b, IRValue v, const RAResult *ra) {
+    int home = gp_home(ra, v);
+    if (home >= 0 && home < 8 && home != REG_RSP && home != REG_RBP)
+        return home;
+    ensure_reg(b, v, REG_RCX, ra);
+    return REG_RCX;
+}
 static int pick_alu_acc(int dr, int avoid) {
     if (dr >= 0 && dr != REG_RCX && dr != avoid)
         return dr;
@@ -2396,13 +2934,37 @@ static void finish_gp_dst(Buffer *b, int acc, int dr, int dst, const RAResult *r
 }
 static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_t *imm);
 static int imm_fits_i32(int64_t imm);
+static int imm_fits_bitwise_u32(int64_t imm);
+static int emit_mul_imm_strength(Buffer *b, int acc, int64_t imm, int width) {
+    int sh;
+    if (imm == 2) sh = 1;
+    else if (imm == 4) sh = 2;
+    else if (imm == 8) sh = 3;
+    else if (imm == 3 || imm == 5 || imm == 9) {
+        int sc = (imm == 3) ? 1 : (imm == 5) ? 2 : 3;
+        if ((acc & 7) == 4) return 0;
+        emit_rex_if(b, alu_w64(width), acc, acc, acc);
+        emit_byte(b, 0x8D);
+        emit_modrm_sib_disp(b, acc, acc, acc, sc, 0);
+        return 1;
+    } else
+        return 0;
+    emit_shift_imm_w(b, 4, acc, sh, width);
+    return 1;
+}
 static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
                        const int *def, const RAResult *ra, int dr, int is_mul) {
     int width = inst->width > 0 ? inst->width : 8;
     int64_t imm_a = 0, imm_b = 0;
-    int fb = ssa_const_imm(fn, def, inst->b, &imm_b) && imm_fits_i32(imm_b);
+    int bitwise = !is_mul && (inst->op == IR_BAND || inst->op == IR_BOR
+                              || inst->op == IR_BXOR);
+    int fb = ssa_const_imm(fn, def, inst->b, &imm_b)
+             && (imm_fits_i32(imm_b)
+                 || (bitwise && imm_fits_bitwise_u32(imm_b)));
     int fa = !is_mul && inst->op != IR_SUB &&
-             ssa_const_imm(fn, def, inst->a, &imm_a) && imm_fits_i32(imm_a);
+             ssa_const_imm(fn, def, inst->a, &imm_a)
+             && (imm_fits_i32(imm_a)
+                 || (bitwise && imm_fits_bitwise_u32(imm_a)));
     if (is_mul)
         fa = ssa_const_imm(fn, def, inst->a, &imm_a) && imm_fits_i32(imm_a);
     int acc;
@@ -2417,20 +2979,39 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
     if (fb) {
         acc = pick_alu_acc(dr, -1);
         ensure_reg(b, inst->a, acc, ra);
-        if (is_mul) emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
-        else emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_b, width);
+        if (is_mul && !emit_mul_imm_strength(b, acc, imm_b, width))
+            emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
+        else if (!is_mul) {
+            int ew = width;
+            int32_t enc = (int32_t)imm_b;
+            if (bitwise && !imm_fits_i32(imm_b) && imm_fits_bitwise_u32(imm_b)) {
+                ew = 4;
+                enc = (int32_t)(uint32_t)imm_b;
+            }
+            emit_arith_imm_w(b, imm_ext, acc, enc, ew);
+        }
     } else if (fa) {
         acc = pick_alu_acc(dr, -1);
         ensure_reg(b, inst->b, acc, ra);
-        if (is_mul) emit_imul_imm_w(b, acc, (int32_t)imm_a, width);
-        else emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_a, width);
+        if (is_mul && !emit_mul_imm_strength(b, acc, imm_a, width))
+            emit_imul_imm_w(b, acc, (int32_t)imm_a, width);
+        else if (!is_mul) {
+            int ew = width;
+            int32_t enc = (int32_t)imm_a;
+            if (bitwise && !imm_fits_i32(imm_a) && imm_fits_bitwise_u32(imm_a)) {
+                ew = 4;
+                enc = (int32_t)(uint32_t)imm_a;
+            }
+            emit_arith_imm_w(b, imm_ext, acc, enc, ew);
+        }
     } else {
         int bhome = gp_home(ra, inst->b);
         acc = pick_alu_acc(dr, bhome);
         ensure_reg(b, inst->a, acc, ra);
-        ensure_reg(b, inst->b, REG_RCX, ra);
-        if (is_mul) emit_imul_rr_w(b, acc, REG_RCX, width);
-        else emit_arith_rr_w(b, rr_op, acc, REG_RCX, width);
+        int br = bhome >= 0 ? bhome : REG_RCX;
+        if (bhome < 0) ensure_reg(b, inst->b, br, ra);
+        if (is_mul) emit_imul_rr_w(b, acc, br, width);
+        else emit_arith_rr_w(b, rr_op, acc, br, width);
     }
     finish_gp_dst(b, acc, dr, inst->dst, ra, width, inst->is_unsigned);
 }
@@ -2506,6 +3087,14 @@ static void spill_if_needed_xmm(Buffer *b, int v, int src_xmm,
                          nbytes);
 }
 static void emit_float_const(Buffer *b, int xmm_dst, int64_t bits) {
+    if (bits == 0) {
+        emit_byte(b, 0x66);
+        emit_rex_wrb(b, 0, xmm_dst, xmm_dst);
+        emit_byte(b, 0x0F);
+        emit_byte(b, 0xEF);
+        emit_modrm(b, 3, xmm_dst & 7, xmm_dst & 7);
+        return;
+    }
     emit_rex_w(b);
     emit_byte(b, 0xB8);
     for (int i = 0; i < 8; i++)
@@ -2554,14 +3143,17 @@ struct DbgObs {
     int value;
     size_t pc;
 };typedef struct DbgObs DbgObs;
-static void collect_callee_saved(const RAResult *ra, int used[3]) {
-    used[0] = used[1] = used[2] = 0;
+static void collect_callee_saved(const RAResult *ra, int used[5]) {
+    used[0] = used[1] = used[2] = used[3] = used[4] = 0;
     if (!ra) return;
+    int is_win = (target_current()->os == TOS_WINDOWS);
     for (int v = 0; v < ra->num_values; v++) {
         int r = ra->reg[v];
         if (r == REG_RBX) used[0] = 1;
         else if (r == REG_R12) used[1] = 1;
         else if (r == REG_R13) used[2] = 1;
+        else if (is_win && r == REG_RSI) used[3] = 1;
+        else if (is_win && r == REG_RDI) used[4] = 1;
     }
 }
 static void emit_store_base_off(Buffer *b, int base, int reg, int off) {
@@ -2638,7 +3230,7 @@ static void emit_load_base_off32(Buffer *b, int dst, int base, int off) {
         emit_int32(b, off);
     }
 }
-static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int has_dyn_alloca);
+static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[5], int has_dyn_alloca);
 static void emit_sse_movaps_base_off(Buffer *b, int xmm, int base, int off, int store) {
     emit_rex_wrb(b, 0, xmm, base);
     emit_byte(b, 0x0F);
@@ -2664,8 +3256,8 @@ static void emit_fill_apply_args(Buffer *b, int base) {
     emit_store_rsp_off(b, REG_R9, base + 56);
     for (int x = 0; x < 8; x++)
         emit_sse_store_rsp_off(b, x, base + 64 + 16 * x);
-    emit_lea_rbp(b, REG_RCX, 16);
-    emit_store_rsp_off(b, REG_RCX, base + 0);
+    emit_lea_rbp(b, REG_R11, 16);
+    emit_store_rsp_off(b, REG_R11, base + 0);
 }
 static void emit_builtin_apply_args(Buffer *b, const IRInst *inst, const RAResult *ra,
                                     int dr, int apply_args_rbp_off) {
@@ -2719,7 +3311,7 @@ static void emit_builtin_apply(Buffer *b, const IRInst *inst, const RAResult *ra
         spill_if_needed(b, inst->dst, REG_RAX, ra);
 }
 static void emit_builtin_return(Buffer *b, const IRInst *inst, const RAResult *ra,
-                                int stack_size, const int cs_used[3], int has_dyn_alloca) {
+                                int stack_size, const int cs_used[5], int has_dyn_alloca) {
     ensure_reg(b, inst->call_args[0], REG_R10, ra);
     emit_load_base_off(b, REG_RAX, REG_R10, 0);
     emit_load_base_off(b, REG_RDX, REG_R10, 8);
@@ -2729,35 +3321,131 @@ static void emit_builtin_return(Buffer *b, const IRInst *inst, const RAResult *r
     emit_sse_movaps_base_off(b, 1, REG_R10, 48, 0);
     emit_epilogue(b, stack_size, cs_used, has_dyn_alloca);
 }
+static int va_field_base(int ap_reg, int ap_frame_off) {
+    return ap_frame_off ? REG_RBP : ap_reg;
+}
+static int va_field_off(int ap_frame_off, int field) {
+    return ap_frame_off ? ap_frame_off + field : field;
+}
 static void emit_va_start(Buffer *b, const IRInst *inst, const RAResult *ra,
                           int gp_offset, int fp_offset, int overflow_off,
-                          int reg_save_rbp_off) {
-    int ap = inst->call_args[0];
-    ensure_reg(b, ap, REG_RAX, ra);
+                          int reg_save_rbp_off, int ap_frame_off) {
     int ap_reg = REG_RAX;
-    emit_mov_imm(b, REG_RCX, gp_offset);
-    emit_store_base_off32(b, ap_reg, REG_RCX, 0);
-    emit_mov_imm(b, REG_RCX, fp_offset);
-    emit_store_base_off32(b, ap_reg, REG_RCX, 4);
+    if (target_current()->os == TOS_WINDOWS) {
+        if (!ap_frame_off) {
+            int ap = inst->call_args[0];
+            ensure_reg(b, ap, REG_RAX, ra);
+        }
+        int base = va_field_base(ap_reg, ap_frame_off);
+        int off = va_field_off(ap_frame_off, 0);
+        emit_lea_rbp(b, REG_RCX, overflow_off);
+        emit_store_base_off(b, base, REG_RCX, off);
+        return;
+    }
+    if (!ap_frame_off) {
+        int ap = inst->call_args[0];
+        ensure_reg(b, ap, REG_RAX, ra);
+    }
+    int base = va_field_base(ap_reg, ap_frame_off);
+    if (ap_frame_off) {
+        emit_store_imm_disp(b, REG_RBP, gp_offset,
+                            va_field_off(ap_frame_off, 0), 4);
+        emit_store_imm_disp(b, REG_RBP, fp_offset,
+                            va_field_off(ap_frame_off, 4), 4);
+    } else {
+        emit_mov_imm(b, REG_RCX, gp_offset);
+        emit_store_base_off32(b, base, REG_RCX, 0);
+        emit_mov_imm(b, REG_RCX, fp_offset);
+        emit_store_base_off32(b, base, REG_RCX, 4);
+    }
     emit_lea_rbp(b, REG_RCX, overflow_off);
-    emit_store_base_off(b, ap_reg, REG_RCX, 8);
+    emit_store_base_off(b, base, REG_RCX, va_field_off(ap_frame_off, 8));
     emit_lea_rbp(b, REG_RCX, reg_save_rbp_off);
-    emit_store_base_off(b, ap_reg, REG_RCX, 16);
+    emit_store_base_off(b, base, REG_RCX, va_field_off(ap_frame_off, 16));
 }
 static void emit_load_gp_viabase(Buffer *b, int dst, int base, int index) {
     emit_add_rr(b, base, index);
     emit_load_base_off(b, dst, base, 0);
 }
+static void emit_copy_bytes(Buffer *b, int dst_ptr, int src_ptr, int nbytes) {
+    int off = 0;
+    while (off + 8 <= nbytes) {
+        emit_load_base_off(b, REG_RAX, src_ptr, off);
+        emit_store_base_off(b, dst_ptr, REG_RAX, off);
+        off += 8;
+    }
+    if (off + 4 <= nbytes) {
+        emit_load_disp(b, REG_RAX, src_ptr, off, 4, 1);
+        emit_store_disp(b, dst_ptr, REG_RAX, off, 4);
+        off += 4;
+    }
+    if (off + 2 <= nbytes) {
+        emit_load_disp(b, REG_RAX, src_ptr, off, 2, 1);
+        emit_store_disp(b, dst_ptr, REG_RAX, off, 2);
+        off += 2;
+    }
+    if (off < nbytes) {
+        emit_load_disp(b, REG_RAX, src_ptr, off, 1, 1);
+        emit_store_disp(b, dst_ptr, REG_RAX, off, 1);
+        off += 1;
+    }
+}
 static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                         const RAResult *ra, const RAResult *ra_xmm,
-                        int gp_spill_area, const int *ld_off) {
-    int ap = inst->call_args[0];
-    ensure_reg(b, ap, REG_RAX, ra);
+                        int gp_spill_area, const int *ld_off, int ap_frame_off) {
     int ap_reg = REG_RAX;
+    if (!ap_frame_off)
+        ensure_reg(b, inst->call_args[0], REG_RAX, ra);
+    int base = va_field_base(ap_reg, ap_frame_off);
     int dst = inst->dst;
     int is_float = inst->is_float;
+    if (target_current()->os == TOS_WINDOWS) {
+        int ap_base = va_field_base(ap_reg, ap_frame_off);
+        int ap_off = va_field_off(ap_frame_off, 0);
+        emit_load_base_off(b, REG_RDX, ap_base, ap_off);
+        emit_mov_rr(b, REG_R11, REG_RDX);
+        emit_add_imm32(b, REG_R11, 8);
+        emit_store_base_off(b, ap_base, REG_R11, ap_off);
+        if (inst->imm > 0 && inst->call_nargs >= 2 && inst->call_args[1] >= 0) {
+            int nbytes = (int)inst->imm;
+            int destv = inst->call_args[1];
+            ensure_reg(b, destv, REG_R10, ra);
+            if (nbytes == 1 || nbytes == 2 || nbytes == 4 || nbytes == 8) {
+                emit_copy_bytes(b, REG_R10, REG_RDX, nbytes);
+            } else {
+                emit_load_base_off(b, REG_R11, REG_RDX, 0);
+                emit_copy_bytes(b, REG_R10, REG_R11, nbytes);
+            }
+            if (dst >= 0) {
+                int dr = (ra && dst < ra->num_values) ? ra->reg[dst] : -1;
+                if (dr >= 0) {
+                    if (dr != REG_R10) emit_mov_rr(b, dr, REG_R10);
+                } else {
+                    spill_if_needed(b, dst, REG_R10, ra);
+                }
+            }
+        } else if (is_float) {
+            int dr = (ra_xmm && dst >= 0 && dst < ra_xmm->num_values) ? ra_xmm->reg[dst] : -1;
+            int target_xmm = (dr >= 0) ? dr : 0;
+            int w = inst->width ? inst->width : 8;
+            emit_sse_load_disp(b, target_xmm, REG_RDX, 0, w == 4);
+            if (dr < 0 && dst >= 0) {
+                spill_if_needed_xmm(b, dst, target_xmm, ra_xmm, gp_spill_area);
+            }
+        } else {
+            int dr = (ra && dst >= 0 && dst < ra->num_values) ? ra->reg[dst] : -1;
+            int target_gp = (dr >= 0) ? dr : REG_RAX;
+            int w = inst->width ? inst->width : 8;
+            emit_load_disp(b, target_gp, REG_RDX, 0, w, inst->is_unsigned);
+            if (dr < 0 && dst >= 0) {
+                spill_if_needed(b, dst, target_gp, ra);
+            }
+        }
+        return;
+    }
     if (dst >= 0 && value_is_ld(fn, dst)) {
-        emit_load_base_off(b, REG_R11, ap_reg, 8);
+        emit_load_base_off(b, REG_R11, base,
+                           va_field_off(ap_frame_off, 8));
         emit_add_imm32(b, REG_R11, 15);
         emit_rex_wrb(b, 1, 0, REG_R11);
         emit_byte(b, 0x83);
@@ -2768,7 +3456,8 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         emit_load_base_off(b, REG_RDX, REG_R11, 8);
         emit_store_spill(b, REG_RDX, ld_off[dst] + 8);
         emit_add_imm32(b, REG_R11, 16);
-        emit_store_base_off(b, ap_reg, REG_R11, 8);
+        emit_store_base_off(b, base, REG_R11,
+                            va_field_off(ap_frame_off, 8));
         return;
     }
     if (!is_float && inst->imm > 0 && inst->call_nargs >= 2
@@ -2785,7 +3474,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         else if (inst->align16) ov_align = 16;
         if (!inst->force_stack && (inst->float_imm & 0x10)
             && (nbytes == 32 || nbytes == 64)) {
-            emit_load_base_off(b, REG_R11, ap_reg, 8);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 8));
             emit_add_imm32(b, REG_R11, ov_align - 1);
             emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
             if (nbytes == 64 && host_has_avx512f()) {
@@ -2800,7 +3489,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                 }
             }
             emit_add_imm32(b, REG_R11, nbytes);
-            emit_store_base_off(b, ap_reg, REG_R11, 8);
+            emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, 8));
             if (dst >= 0) {
                 if (ra && dst < ra->num_values && ra->reg[dst] >= 0
                     && ra->reg[dst] < 16) {
@@ -2813,25 +3502,25 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             return;
         }
         if (!inst->force_stack && (inst->float_imm & 0x10) && nbytes == 16) {
-            emit_load_base_off32(b, REG_RCX, ap_reg, 4);
+            emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, 4));
             emit_cmp_imm32(b, REG_RCX, 176 - 16);
             size_t jae_ov = emit_jcc_rel32(b, 0x87);
-            emit_load_base_off(b, REG_R11, ap_reg, 16);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 16));
             emit_add_rr(b, REG_R11, REG_RCX);
             emit_movups_load_disp(b, 0, REG_R11, 0);
             emit_movups_store_disp(b, REG_RSI, 0, 0);
             emit_add_imm32(b, REG_RCX, 16);
-            emit_store_base_off32(b, ap_reg, REG_RCX, 4);
+            emit_store_base_off32(b, base, REG_RCX, va_field_off(ap_frame_off, 4));
             size_t jmp_end = emit_jmp_rel32(b);
             size_t ov_off = b->len;
             patch_rel32(b, jae_ov, ov_off);
-            emit_load_base_off(b, REG_R11, ap_reg, 8);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 8));
             emit_add_imm32(b, REG_R11, 15);
             emit_and_imm32(b, REG_R11, (int32_t)-16);
             emit_movups_load_disp(b, 0, REG_R11, 0);
             emit_movups_store_disp(b, REG_RSI, 0, 0);
             emit_add_imm32(b, REG_R11, 16);
-            emit_store_base_off(b, ap_reg, REG_R11, 8);
+            emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, 8));
             patch_rel32(b, jmp_end, b->len);
             if (dst >= 0) {
                 if (ra && dst < ra->num_values && ra->reg[dst] >= 0
@@ -2852,31 +3541,31 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         if (!inst->force_stack && n8 <= 2) {
             size_t jae_gp = 0, jae_fp = 0;
             if (num_gp > 0) {
-                emit_load_base_off32(b, REG_RCX, ap_reg, 0);
+                emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, 0));
                 emit_cmp_imm32(b, REG_RCX, 48 - 8 * num_gp);
                 jae_gp = emit_jcc_rel32(b, 0x87);
             }
             if (num_fp > 0) {
-                emit_load_base_off32(b, REG_RCX, ap_reg, 4);
+                emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, 4));
                 emit_cmp_imm32(b, REG_RCX, 176 - 16 * num_fp);
                 jae_fp = emit_jcc_rel32(b, 0x87);
             }
             for (int i = 0; i < n8; i++) {
                 int is_sse = (inst->float_imm >> i) & 1;
                 int off_field = is_sse ? 4 : 0;
-                emit_load_base_off32(b, REG_RCX, ap_reg, off_field);
-                emit_load_base_off(b, REG_R11, ap_reg, 16);
+                emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, off_field));
+                emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 16));
                 emit_add_rr(b, REG_R11, REG_RCX);
                 emit_load_base_off(b, REG_RDX, REG_R11, 0);
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
                 emit_add_imm32(b, REG_RCX, is_sse ? 16 : 8);
-                emit_store_base_off32(b, ap_reg, REG_RCX, off_field);
+                emit_store_base_off32(b, base, REG_RCX, va_field_off(ap_frame_off, off_field));
             }
             size_t jmp_end = emit_jmp_rel32(b);
             size_t ov_off = b->len;
             if (num_gp > 0) patch_rel32(b, jae_gp, ov_off);
             if (num_fp > 0) patch_rel32(b, jae_fp, ov_off);
-            emit_load_base_off(b, REG_R11, ap_reg, 8);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 8));
             if (ov_align >= 16) {
                 emit_add_imm32(b, REG_R11, ov_align - 1);
                 emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
@@ -2886,10 +3575,10 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
             }
             emit_add_imm32(b, REG_R11, ov_step);
-            emit_store_base_off(b, ap_reg, REG_R11, 8);
+            emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, 8));
             patch_rel32(b, jmp_end, b->len);
         } else {
-            emit_load_base_off(b, REG_R11, ap_reg, 8);
+            emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 8));
             if (ov_align >= 16) {
                 emit_add_imm32(b, REG_R11, ov_align - 1);
                 emit_and_imm32(b, REG_R11, (int32_t)-ov_align);
@@ -2899,7 +3588,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
                 emit_store_base_off(b, REG_RSI, REG_RDX, i * 8);
             }
             emit_add_imm32(b, REG_R11, ov_step);
-            emit_store_base_off(b, ap_reg, REG_R11, 8);
+            emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, 8));
         }
         if (dst >= 0) {
             if (ra && dst < ra->num_values && ra->reg[dst] >= 0
@@ -2913,21 +3602,20 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         return;
     }
     if (!is_float) {
-        emit_load_base_off32(b, REG_RCX, ap_reg, 0);
+        emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, 0));
         emit_cmp_imm32(b, REG_RCX, 48);
         size_t jae_ov = emit_jcc_rel32(b, 0x83);
-        emit_load_base_off(b, REG_R11, ap_reg, 16);
+        emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 16));
         emit_load_gp_viabase(b, REG_RDX, REG_R11, REG_RCX);
-        emit_load_base_off32(b, REG_RCX, ap_reg, 0);
         emit_add_imm32(b, REG_RCX, 8);
-        emit_store_base_off32(b, ap_reg, REG_RCX, 0);
+        emit_store_base_off32(b, base, REG_RCX, va_field_off(ap_frame_off, 0));
         size_t jmp_end = emit_jmp_rel32(b);
         size_t ov_off = b->len;
         patch_rel32(b, jae_ov, ov_off);
-        emit_load_base_off(b, REG_R11, ap_reg, 8);
+        emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 8));
         emit_load_base_off(b, REG_RDX, REG_R11, 0);
         emit_add_imm32(b, REG_R11, 8);
-        emit_store_base_off(b, ap_reg, REG_R11, 8);
+        emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, 8));
         patch_rel32(b, jmp_end, b->len);
         if (dst >= 0) {
             if (ra && dst < ra->num_values && ra->reg[dst] >= 0
@@ -2940,20 +3628,19 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
         }
     } else {
         int w16 = dst >= 0 && value_is_xmm16(fn, dst);
-        emit_load_base_off32(b, REG_RCX, ap_reg, 4);
+        emit_load_base_off32(b, REG_RCX, base, va_field_off(ap_frame_off, 4));
         emit_cmp_imm32(b, REG_RCX, 176);
         size_t jae_ov = emit_jcc_rel32(b, 0x83);
-        emit_load_base_off(b, REG_R11, ap_reg, 16);
+        emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 16));
         emit_add_rr(b, REG_R11, REG_RCX);
         if (w16) emit_movups_load_disp(b, 0, REG_R11, 0);
         else emit_sse_load_base_off(b, 0, REG_R11, 0);
-        emit_load_base_off32(b, REG_RCX, ap_reg, 4);
         emit_add_imm32(b, REG_RCX, 16);
-        emit_store_base_off32(b, ap_reg, REG_RCX, 4);
+        emit_store_base_off32(b, base, REG_RCX, va_field_off(ap_frame_off, 4));
         size_t jmp_end = emit_jmp_rel32(b);
         size_t ov_off = b->len;
         patch_rel32(b, jae_ov, ov_off);
-        emit_load_base_off(b, REG_R11, ap_reg, 8);
+        emit_load_base_off(b, REG_R11, base, va_field_off(ap_frame_off, 8));
         if (w16) {
             emit_add_imm32(b, REG_R11, 15);
             emit_and_imm32(b, REG_R11, (int32_t)-16);
@@ -2963,7 +3650,7 @@ static void emit_va_arg(Buffer *b, const IRFunction *fn, const IRInst *inst,
             emit_sse_load_base_off(b, 0, REG_R11, 0);
             emit_add_imm32(b, REG_R11, 8);
         }
-        emit_store_base_off(b, ap_reg, REG_R11, 8);
+        emit_store_base_off(b, base, REG_R11, va_field_off(ap_frame_off, 8));
         patch_rel32(b, jmp_end, b->len);
         if (dst >= 0) {
             if (ra_xmm && dst < ra_xmm->num_values && ra_xmm->reg[dst] >= 0
@@ -3204,9 +3891,10 @@ DebugTypeTag ir_type_tag(int type_kind, int is_bool) {
     default: return DBG_TY_INT;
     }
 }
-static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int has_dyn_alloca) {
+static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[5], int has_dyn_alloca) {
     if (has_dyn_alloca) {
-        int cs_count = (cs_used[0]?1:0) + (cs_used[1]?1:0) + (cs_used[2]?1:0);
+        int cs_count = (cs_used[0]?1:0) + (cs_used[1]?1:0) + (cs_used[2]?1:0)
+                     + (cs_used[3]?1:0) + (cs_used[4]?1:0);
         int cs_bytes = cs_count * 8;
         if (cs_bytes > 0) {
             emit_byte(b, 0x48);
@@ -3218,9 +3906,11 @@ static void emit_epilogue(Buffer *b, int stack_size, const int cs_used[3], int h
             emit_byte(b, 0x89);
             emit_byte(b, 0xEC);
         }
-    } else {
+    } else if (stack_size != 0) {
         emit_add_rsp_imm32(b, stack_size);
     }
+    if (cs_used[4]) emit_pop_r(b, REG_RDI);
+    if (cs_used[3]) emit_pop_r(b, REG_RSI);
     if (cs_used[2]) emit_pop_r(b, REG_R13);
     if (cs_used[1]) emit_pop_r(b, REG_R12);
     if (cs_used[0]) emit_pop_r(b, REG_RBX);
@@ -3242,12 +3932,36 @@ static int alloca_dyn_align(const IRFunction *fn, const int *def, IRValue slot) 
     const IRInst *al = &fn->insts.data[def[slot]];
     return al->op == IR_ALLOCA && al->imm >= 32;
 }
+static int *g_def_count;
+static int g_def_count_n;
+static int value_unique_def(const IRFunction *fn, IRValue v);
+static void codegen_set_def_count(const IRFunction *fn) {
+    int n = fn ? fn->next_value_id : 0;
+    runtime.free(g_def_count);
+    g_def_count = ((void*)0);
+    g_def_count_n = 0;
+    if (n <= 0) return;
+    g_def_count = xmalloc((size_t)n * sizeof(int));
+    runtime.memset(g_def_count, 0, (size_t)n * sizeof(int));
+    g_def_count_n = n;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        int d = fn->insts.data[i].dst;
+        if (d >= 0 && d < n) g_def_count[d]++;
+    }
+}
+static void codegen_clear_def_count(void) {
+    runtime.free(g_def_count);
+    g_def_count = ((void*)0);
+    g_def_count_n = 0;
+}
 static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_off,
                         IRValue v, int *out_off, int depth) {
     if (depth > 8 || v < 0 || v >= fn->next_value_id || !def || !alloca_off) return 0;
     int di = def[v];
     if (di < 0) return 0;
     const IRInst *d = &fn->insts.data[di];
+    if (d->op == IR_COPY && value_unique_def(fn, v))
+        return fold_ptr_off(fn, def, alloca_off, d->a, out_off, depth + 1);
     if (d->op == IR_ADDR && d->a >= 0 && d->a < fn->next_value_id && alloca_off[d->a] != 0) {
         if (alloca_dyn_align(fn, def, d->a)) return 0;
         *out_off = alloca_off[d->a];
@@ -3280,6 +3994,45 @@ static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_
     if (d->op != IR_CONST || d->is_float) return 0;
     *imm = d->imm;
     return 1;
+}
+static int ssa_extended_const(const IRFunction *fn, const int *def,
+                              IRValue v, int64_t *imm) {
+    for (int depth = 0; depth < 8; depth++) {
+        if (!fn || !def || v < 0 || v >= fn->next_value_id || def[v] < 0)
+            return 0;
+        const IRInst *d = &fn->insts.data[def[v]];
+        if (d->op == IR_CONST && !d->is_float) {
+            *imm = d->imm;
+            return 1;
+        }
+        if (d->op == IR_COPY) {
+            v = d->a;
+            continue;
+        }
+        if (d->op != IR_SEXT && d->op != IR_ZEXT) return 0;
+        IRValue src = d->a;
+        int64_t raw;
+        if (!ssa_extended_const(fn, def, src, &raw)) return 0;
+        int sw = (fn->value_width && src >= 0 && src < fn->next_value_id)
+                 ? fn->value_width[src] : 0;
+        if (sw <= 0) sw = (int)d->imm;
+        if (sw <= 0 || sw > 8) return 0;
+        if (sw >= 8) {
+            *imm = raw;
+            return 1;
+        }
+        int bits = sw * 8;
+        uint64_t mask = (1ull << bits) - 1;
+        uint64_t low = (uint64_t)raw & mask;
+        if (d->op == IR_SEXT && (low & (1ull << (bits - 1))))
+            low |= ~mask;
+        *imm = (int64_t)low;
+        return 1;
+    }
+    return 0;
+}
+static int imm_fits_bitwise_u32(int64_t imm) {
+    return (uint64_t)imm <= 0xffffffffu;
 }
 static int imm_fits_i32(int64_t imm) {
     return imm == (int64_t)(int32_t)imm;
@@ -3342,17 +4095,103 @@ int64_t cb;
     }
     return 0;
 }
+static const char *peel_gaddr_name(const IRFunction *fn, const int *def,
+                                   IRValue v) {
+    for (int depth = 0; depth < 4; depth++) {
+        if (v < 0 || v >= fn->next_value_id || def[v] < 0) return ((void*)0);
+        const IRInst *d = &fn->insts.data[def[v]];
+        if (d->op == IR_COPY) {
+            v = d->a;
+            continue;
+        }
+        if (d->op == IR_GADDR) return d->call_name;
+        return ((void*)0);
+    }
+    return ((void*)0);
+}
+static int value_unique_def(const IRFunction *fn, IRValue v) {
+    if (!fn || v < 0 || v >= fn->next_value_id) return 0;
+    if (g_def_count && v < g_def_count_n)
+        return g_def_count[v] == 1;
+    int n = 0;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        if (fn->insts.data[i].dst == v && ++n > 1) return 0;
+    }
+    return n == 1;
+}
+static const char *peel_gaddr_name_unique(const IRFunction *fn, const int *def,
+                                          IRValue v) {
+    if (!value_unique_def(fn, v)) return ((void*)0);
+    IRValue cur = v;
+    for (int depth = 0; depth < 4; depth++) {
+        if (cur < 0 || cur >= fn->next_value_id || def[cur] < 0) return ((void*)0);
+        if (!value_unique_def(fn, cur)) return ((void*)0);
+        const IRInst *d = &fn->insts.data[def[cur]];
+        if (d->op == IR_COPY) {
+            cur = d->a;
+            continue;
+        }
+        if (d->op == IR_GADDR) return d->call_name;
+        return ((void*)0);
+    }
+    return ((void*)0);
+}
+static int gaddr_is_local_abs(const IRModule *ir, const char *name) {
+    if (!ir || !name) return 0;
+    if (target_current()->objfmt == TARGET_OBJFMT_PE)
+        return 0;
+    for (size_t i = 0; i < ir->globals.len; i++) {
+        const IRGlobal *g = &ir->globals.data[i];
+        if (g->name && runtime.strcmp(g->name, name) == 0)
+            return !g->is_tls;
+    }
+    return 0;
+}
+static int looks_like_addr_base(const IRFunction *fn, const int *def,
+                                const int *alloca_off, IRValue v) {
+    int depth = 0;
+    while (v >= 0 && v < fn->next_value_id && depth++ < 8) {
+        if (def[v] < 0) return 1;
+        const IRInst *d = &fn->insts.data[def[v]];
+        int op = d->op;
+        if (op == IR_COPY) {
+            v = d->a;
+            continue;
+        }
+        if (op == IR_GADDR || op == IR_ADDR || op == IR_GADDR_TLS
+            || op == IR_FADDR || op == IR_ADD)
+            return 1;
+        int off = 0;
+        if (fold_ptr_off(fn, def, alloca_off, v, &off, 0)) return 1;
+        if (op == IR_LOAD_PTR || op == IR_LOAD || op == IR_CALL
+            || op == IR_PARAM)
+            return 1;
+        return 0;
+    }
+    return 0;
+}
+static int gep_const_only_gap(const IRFunction *fn, int lo, int hi) {
+    int k;
+    if (lo < 0 || hi < 0 || lo >= hi) return lo == hi;
+    for (k = lo + 1; k < hi; k++) {
+        if (fn->insts.data[k].op != IR_CONST)
+            return 0;
+    }
+    return 1;
+}
 static int fold_gep(const IRFunction *fn, const int *def,
                     const int *alloca_off, IRValue v,
                     IRValue *base_out, IRValue *idx_out, int *scale2_out,
                     int *disp_out) {
+    if (v < 0 || v >= fn->next_value_id || !def) return 0;
     IRValue cur = v;
     int disp = 0;
     int expect = def[v];
     for (int depth = 0; depth < 8; depth++) {
         if (cur < 0 || cur >= fn->next_value_id || def[cur] < 0) return 0;
         int cp = def[cur];
-        if (cp != expect) return 0;
+        if (cp != expect && !gep_const_only_gap(fn, cp, expect))
+            return 0;
         const IRInst *d = &fn->insts.data[cp];
         if (d->op != IR_ADD) return 0;
         IRValue raw_idx = -1, other = -1;
@@ -3376,7 +4215,7 @@ static int fold_gep(const IRFunction *fn, const int *def,
                     int bp = def[base];
                     const IRInst *bd = &fn->insts.data[bp];
                     if (bd->op != IR_ADD) break;
-                    if (bp != bexpect) {
+                    if (bp != bexpect && !gep_const_only_gap(fn, bp, bexpect)) {
                         if (fold_ptr_off(fn, def, alloca_off, base,
                                          &boff, 0)) {
                             is_frame = 1;
@@ -3411,6 +4250,23 @@ static int fold_gep(const IRFunction *fn, const int *def,
             if (ssa_const_imm(fn, def, raw_idx, &ci)) {
                 total += ci << sc;
                 idx = -1;
+            } else if (def[raw_idx] >= 0) {
+                const IRInst *md = &fn->insts.data[def[raw_idx]];
+                int64_t iv = 0, factor = 0;
+                int ok = 0;
+                if (md->op == IR_MUL
+                    && ssa_const_imm(fn, def, md->b, &factor)
+                    && ssa_extended_const(fn, def, md->a, &iv))
+                    ok = 1;
+                else if (md->op == IR_MUL
+                         && ssa_const_imm(fn, def, md->a, &factor)
+                         && ssa_extended_const(fn, def, md->b, &iv))
+                    ok = 1;
+                if (ok && factor > 0
+                    && iv <= 9223372036854775807 / factor && iv >= (-9223372036854775807-1) / factor) {
+                    total += iv * factor;
+                    idx = -1;
+                }
             }
             if (!imm_fits_i32(total)) return 0;
             if (!is_frame) {
@@ -3429,8 +4285,43 @@ static int fold_gep(const IRFunction *fn, const int *def,
             inner = d->a;
         else if (ssa_const_imm(fn, def, d->a, &c))
             inner = d->b;
-        else
-            return 0;
+        else {
+            IRValue idx_v = -1, base_v = -1;
+            if (isel_ok_index(fn, def, d->a)
+                && looks_like_addr_base(fn, def, alloca_off, d->b)) {
+                idx_v = d->a;
+                base_v = d->b;
+            } else if (isel_ok_index(fn, def, d->b)
+                       && looks_like_addr_base(fn, def, alloca_off, d->a)) {
+                idx_v = d->b;
+                base_v = d->a;
+            } else {
+                return 0;
+            }
+            int is_frame = 0, boff = 0;
+            if (fold_ptr_off(fn, def, alloca_off, base_v, &boff, 0))
+                is_frame = 1;
+            int64_t total = (int64_t)disp + boff;
+            IRValue idx = idx_v;
+            int64_t ci;
+            if (ssa_extended_const(fn, def, idx_v, &ci)) {
+                total += ci;
+                idx = -1;
+            }
+            if (!imm_fits_i32(total)) return 0;
+            if (!is_frame) {
+                if (base_v < 0 || base_v >= fn->next_value_id
+                    || def[base_v] < 0)
+                    return 0;
+                int bop = fn->insts.data[def[base_v]].op;
+                if (bop == IR_CONST || bop == IR_MUL) return 0;
+            }
+            *base_out = is_frame ? -1 : base_v;
+            *idx_out = idx;
+            *scale2_out = 0;
+            *disp_out = (int)total;
+            return 1;
+        }
         int off = 0;
         if (inner >= 0 && inner < fn->next_value_id
             && fold_ptr_off(fn, def, alloca_off, inner, &off, 0)) {
@@ -3444,14 +4335,63 @@ static int fold_gep(const IRFunction *fn, const int *def,
         }
         if (inner < 0 || inner >= fn->next_value_id || def[inner] < 0)
             return 0;
-        if (def[inner] != cp - 1) return 0;
+        if (def[inner] != cp - 1
+            && !gep_const_only_gap(fn, def[inner], cp - 1))
+            return 0;
         disp += (int)c;
         cur = inner;
-        expect = cp - 1;
+        expect = def[inner];
     }
     return 0;
 }
 enum { AF_NONE = 0, AF_RBP_IDX = 1, AF_SIB = 2 };
+static int peel_sib_scale(const IRFunction *fn, const int *def, IRValue idx,
+                          IRValue *inner, int *scale2) {
+    if (idx < 0 || idx >= fn->next_value_id || def[idx] < 0) return 0;
+    const IRInst *d = &fn->insts.data[def[idx]];
+    if (d->op != IR_MUL) return 0;
+int64_t ca;
+int64_t cb;
+    int sc;
+    IRValue cand = -1;
+    if (ssa_const_imm(fn, def, d->b, &cb) && (sc = sib_scale_log2(cb)) >= 0)
+        cand = d->a;
+    else if (ssa_const_imm(fn, def, d->a, &ca) && (sc = sib_scale_log2(ca)) >= 0)
+        cand = d->b;
+    else
+        return 0;
+    IRValue v = cand;
+    for (int depth = 0; depth < 8 && v >= 0 && v < fn->next_value_id
+         && def[v] >= 0; depth++) {
+        const IRInst *x = &fn->insts.data[def[v]];
+        int64_t imm;
+        if (x->op == IR_COPY || x->op == IR_SEXT || x->op == IR_ZEXT) {
+            v = x->a;
+            continue;
+        }
+        if ((x->op == IR_ADD || x->op == IR_SUB)
+            && (ssa_const_imm(fn, def, x->b, &imm)
+                || (x->op == IR_ADD && ssa_const_imm(fn, def, x->a, &imm)))) {
+            if (ssa_const_imm(fn, def, x->b, &imm))
+                v = x->a;
+            else
+                v = x->b;
+            continue;
+        }
+        if (x->op == IR_LOAD || x->op == IR_LOAD_PTR || x->op == IR_PARAM) {
+            *inner = cand;
+            *scale2 = sc;
+            return 1;
+        }
+        return 0;
+    }
+    if (v >= 0 && v < fn->next_value_id && def[v] < 0) {
+        *inner = cand;
+        *scale2 = sc;
+        return 1;
+    }
+    return 0;
+}
 static int classify_ptr_addr(const IRFunction *fn, const int *def,
                              const int *alloca_off, IRValue v,
                              IRValue *base_out, IRValue *idx_out,
@@ -3487,16 +4427,17 @@ static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
                          const int *def) {
     IRValue v = which ? inst->b : inst->a;
     int64_t imm;
-    if (!ssa_const_imm(fn, def, v, &imm) || !imm_fits_i32(imm)) return 0;
+    if (!ssa_const_imm(fn, def, v, &imm)) return 0;
     switch (inst->op) {
-    case IR_ADD:
     case IR_BAND:
     case IR_BOR:
     case IR_BXOR:
+        return imm_fits_i32(imm) || imm_fits_bitwise_u32(imm);
+    case IR_ADD:
     case IR_MUL:
-        return 1;
+        return imm_fits_i32(imm);
     case IR_SUB:
-        return which == 1;
+        return which == 1 && imm_fits_i32(imm);
     case IR_SHL:
     case IR_SHR:
     case IR_ROL:
@@ -3507,7 +4448,7 @@ static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
     case IR_LE:
     case IR_GT:
     case IR_GE:
-        return which == 1;
+        return which == 1 && imm_fits_i32(imm);
     default:
         return 0;
     }
@@ -3518,21 +4459,170 @@ static void mark_reg(char *needed, int *uses, int nv, IRValue v) {
         uses[v]++;
     }
 }
+static void mark_live_index(char *needed, int *uses, int nv,
+                            const IRFunction *fn, const int *def, IRValue v,
+                            int depth) {
+    if (depth > 12 || v < 0 || v >= nv) return;
+    mark_reg(needed, uses, nv, v);
+    if (def[v] < 0) return;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op == IR_COPY || d->op == IR_SEXT || d->op == IR_ZEXT) {
+        mark_live_index(needed, uses, nv, fn, def, d->a, depth + 1);
+        return;
+    }
+    if (d->op == IR_ADD || d->op == IR_MUL || d->op == IR_SUB) {
+        mark_live_index(needed, uses, nv, fn, def, d->a, depth + 1);
+        mark_live_index(needed, uses, nv, fn, def, d->b, depth + 1);
+    }
+}
+static int match_lea_local_gep(const IRModule *ir, const IRFunction *fn,
+                               const int *def, const IRInst *add,
+                               IRValue *idx_out, int *scale2_out,
+                               const char **name_out) {
+    if (!ir || !add || add->op != IR_ADD) return 0;
+    IRValue base = -1, idx = -1;
+    int sc = 0;
+    if (gep_scaled_index(fn, def, add->a, &idx, &sc))
+        base = add->b;
+    else if (gep_scaled_index(fn, def, add->b, &idx, &sc))
+        base = add->a;
+    else if (isel_ok_index(fn, def, add->a)
+             && peel_gaddr_name(fn, def, add->b)) {
+        base = add->b;
+        idx = add->a;
+        sc = 0;
+    } else if (isel_ok_index(fn, def, add->b)
+               && peel_gaddr_name(fn, def, add->a)) {
+        base = add->a;
+        idx = add->b;
+        sc = 0;
+    } else {
+        return 0;
+    }
+    const char *gn = peel_gaddr_name(fn, def, base);
+    if (!gn || !gaddr_is_local_abs(ir, gn)) return 0;
+    IRValue inner = idx;
+    int psc = 0;
+    if (peel_sib_scale(fn, def, idx, &inner, &psc)) {
+        *idx_out = inner;
+        *scale2_out = psc;
+    } else {
+        *idx_out = idx;
+        *scale2_out = sc;
+    }
+    *name_out = gn;
+    return 1;
+}
 static void mark_inst_uses_needed(const IRInst *inst, char *needed,
                                 int *uses, int nv) {
     if (inst->op == IR_LABEL || inst->op == IR_BR || inst->op == IR_DBG_VALUE) return;
     if (inst->op == IR_ADDR) return;
     mark_reg(needed, uses, nv, inst->a);
-    if (inst->op != IR_CBR && inst->op != IR_CALL)
+    if (inst->op != IR_CBR && inst->op != IR_CALL && inst->op != IR_ASM)
         mark_reg(needed, uses, nv, inst->b);
-    if (inst->op == IR_CALL) {
-        if (inst->call_callee >= 0) mark_reg(needed, uses, nv, inst->call_callee);
+    if (inst->op == IR_CALL || inst->op == IR_ASM) {
+        if (inst->op == IR_CALL && inst->call_callee >= 0)
+            mark_reg(needed, uses, nv, inst->call_callee);
         for (int k = 0; k < inst->call_nargs; k++)
             mark_reg(needed, uses, nv, inst->call_args[k]);
     }
 }
+static int mark_va_builtin(const IRFunction *fn, const int *def,
+                           const int *alloca_off, const IRInst *inst,
+                           char *needed, int *uses, int nv) {
+    if (!inst->call_name) return 0;
+    int is_start = runtime.strcmp(inst->call_name, "va_start") == 0;
+    int is_arg = runtime.strcmp(inst->call_name, "va_arg") == 0;
+    int is_end = runtime.strcmp(inst->call_name, "va_end") == 0;
+    if (!is_start && !is_arg && !is_end) return 0;
+    int ap_off = 0;
+    if (inst->call_nargs >= 1
+        && fold_ptr_off(fn, def, alloca_off, inst->call_args[0], &ap_off, 0)
+        && ap_off != 0) {
+        if (is_arg) {
+            for (int k = 1; k < inst->call_nargs; k++)
+                mark_reg(needed, uses, nv, inst->call_args[k]);
+        }
+        return 1;
+    }
+    return 0;
+}
+static int pure_addr_op(int op) {
+    return op == IR_ADD || op == IR_MUL || op == IR_SEXT || op == IR_ZEXT;
+}
+static int local_abs_af(const IRModule *ir, const IRFunction *fn,
+                        const int *def, const int *alloca_off, IRValue v,
+                        IRValue *base_out, IRValue *idx_out, int *sc_out,
+                        int *disp_out) {
+    IRValue base = -1, idx = -1;
+    int sc = 0, disp = 0;
+    if (classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc, &disp)
+        != AF_SIB)
+        return 0;
+    {
+        const char *gn = peel_gaddr_name(fn, def, base);
+        if (!(gn && gaddr_is_local_abs(ir, gn))) return 0;
+    }
+    if (base_out) *base_out = base;
+    if (idx_out) *idx_out = idx;
+    if (sc_out) *sc_out = sc;
+    if (disp_out) *disp_out = disp;
+    return 1;
+}
+static int sext_folds_frame_load(const IRFunction *fn, const int *def,
+                                 const int *alloca_off, const int *raw_uses,
+                                 const IRInst *sext, int *off_out, int *width_out) {
+    if (!sext || sext->op != IR_SEXT) return 0;
+    int src_w = (int)sext->imm;
+    if (src_w != 1 && src_w != 2 && src_w != 4) return 0;
+    IRValue a = sext->a;
+    if (a < 0 || a >= fn->next_value_id || def[a] < 0) return 0;
+    if (raw_uses && raw_uses[a] > 1) return 0;
+    const IRInst *ld = &fn->insts.data[def[a]];
+    if (ld->op != IR_LOAD_PTR || ld->width != src_w) return 0;
+    int off = 0;
+    if (!fold_ptr_off(fn, def, alloca_off, ld->a, &off, 0)) return 0;
+    if (off_out) *off_out = off;
+    if (width_out) *width_out = src_w;
+    return 1;
+}
+static int deref_folds_addr(const IRModule *ir, const IRFunction *fn,
+                            const int *def, const int *alloca_off,
+                            const int *raw_uses, const IRInst *inst,
+                            size_t ii) {
+    if (!inst || (inst->op != IR_LOAD_PTR && inst->op != IR_STORE_PTR))
+        return 0;
+    IRValue v = inst->a;
+    int dummy = 0;
+    if (fold_ptr_off(fn, def, alloca_off, v, &dummy, 0)) return 1;
+    IRValue val = inst->op == IR_LOAD_PTR ? inst->dst : inst->b;
+    if (value_is_ld(fn, val)) return 0;
+    if (value_is_float_class(fn, val)
+        && inst->width != 4 && inst->width != 8)
+        return 0;
+    if (!value_is_float_class(fn, val)
+        && inst->width != 1 && inst->width != 2 && inst->width != 4
+        && inst->width != 8)
+        return 0;
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
+    {
+        const char *gn = peel_gaddr_name_unique(fn, def, v);
+        if (gn && gaddr_is_local_abs(ir, gn)) return 1;
+    }
+    if (local_abs_af(ir, fn, def, alloca_off, v, ((void*)0), ((void*)0), ((void*)0), ((void*)0)))
+        return 1;
+    IRValue base = -1, idx = -1;
+    int sc = 0, disp = 0;
+    int kind = classify_ptr_addr(fn, def, alloca_off, v, &base, &idx, &sc,
+                                 &disp);
+    if (kind == AF_RBP_IDX) return 1;
+    if (raw_uses && raw_uses[v] > 1) return 0;
+    if (kind == AF_NONE) return 0;
+    return (size_t)def[v] + 1 == ii;
+}
 static void codegen_mark_inst_roots(char *needed, int *uses,
-                                    const int *raw_uses, int nv,
+                                    const int *raw_uses, const int *uses_left,
+                                    int nv, const IRModule *ir,
                                     const IRFunction *fn,
                                     const int *def, const int *alloca_off,
                                     const IRInst *inst, size_t ii) {
@@ -3542,17 +4632,51 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
             int asc = 0, adisp = 0;
             if (fold_ptr_off(fn, def, alloca_off, inst->a, &dummy, 0))
                 return;
+            {
+                const char *gn = peel_gaddr_name_unique(fn, def, inst->a);
+                if (gn && gaddr_is_local_abs(ir, gn)
+                    && !value_is_float_class(fn, inst->dst)
+                    && !value_is_ld(fn, inst->dst)
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8))
+                    return;
+            }
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
             int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
-            if (!value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
-                && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                    || inst->width == 8)
-                && adjacent && sole_use
-                && classify_ptr_addr(fn, def, alloca_off, inst->a,
-                                     &ab, &ai, &asc, &adisp) != AF_NONE) {
-            if (ab >= 0) mark_reg(needed, uses, nv, ab);
-            if (ai >= 0) mark_reg(needed, uses, nv, ai);
+            int af_ok = 0;
+            int fp_scalar = value_is_float_class(fn, inst->dst)
+                            && (inst->width == 4 || inst->width == 8);
+            int gp_scalar = !value_is_float_class(fn, inst->dst)
+                            && !value_is_ld(fn, inst->dst)
+                            && (inst->width == 1 || inst->width == 2
+                                || inst->width == 4 || inst->width == 8);
+            if (gp_scalar || fp_scalar) {
+                if (local_abs_af(ir, fn, def, alloca_off, inst->a,
+                                 &ab, &ai, &asc, &adisp))
+                    af_ok = 1;
+                else {
+                    int k = classify_ptr_addr(fn, def, alloca_off, inst->a,
+                                              &ab, &ai, &asc, &adisp);
+                    if (k == AF_RBP_IDX
+                        || (k != AF_NONE && adjacent && sole_use))
+                        af_ok = 1;
+                }
+            }
+            if (af_ok) {
+            if (ab >= 0) {
+                const char *gn = peel_gaddr_name(fn, def, ab);
+                if (!(gn && gaddr_is_local_abs(ir, gn)))
+                    mark_live_index(needed, uses, nv, fn, def, ab, 0);
+            }
+            if (ai >= 0) {
+                IRValue inner = ai;
+                int psc = 0;
+                if (peel_sib_scale(fn, def, ai, &inner, &psc))
+                    mark_live_index(needed, uses, nv, fn, def, inner, 0);
+                else
+                    mark_live_index(needed, uses, nv, fn, def, ai, 0);
+            }
             return;
         }
         mark_reg(needed, uses, nv, inst->a);
@@ -3565,20 +4689,77 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
                 mark_reg(needed, uses, nv, inst->b);
                 return;
             }
+            {
+                const char *gn = peel_gaddr_name_unique(fn, def, inst->a);
+                if (gn && gaddr_is_local_abs(ir, gn)
+                    && !value_is_float_class(fn, inst->b)
+                    && !value_is_ld(fn, inst->b)
+                    && (inst->width == 1 || inst->width == 2 || inst->width == 4
+                        || inst->width == 8)) {
+                    mark_reg(needed, uses, nv, inst->b);
+                    return;
+                }
+            }
             int adjacent = inst->a >= 0 && inst->a < fn->next_value_id
                            && def[inst->a] >= 0 && (size_t)def[inst->a] + 1 == ii;
             int sole_use = inst->a < 0 || raw_uses[inst->a] <= 1;
-            if (!value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
-                && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                    || inst->width == 8)
-                && adjacent && sole_use
-                && classify_ptr_addr(fn, def, alloca_off, inst->a,
-                                     &ab, &ai, &asc, &adisp) != AF_NONE) {
-            if (ab >= 0) mark_reg(needed, uses, nv, ab);
-            if (ai >= 0) mark_reg(needed, uses, nv, ai);
+            int af_ok = 0;
+            int fp_scalar = value_is_float_class(fn, inst->b)
+                            && (inst->width == 4 || inst->width == 8);
+            int gp_scalar = !value_is_float_class(fn, inst->b)
+                            && !value_is_ld(fn, inst->b)
+                            && (inst->width == 1 || inst->width == 2
+                                || inst->width == 4 || inst->width == 8);
+            if (gp_scalar || fp_scalar) {
+                if (local_abs_af(ir, fn, def, alloca_off, inst->a,
+                                 &ab, &ai, &asc, &adisp))
+                    af_ok = 1;
+                else {
+                    int k = classify_ptr_addr(fn, def, alloca_off, inst->a,
+                                              &ab, &ai, &asc, &adisp);
+                    if (k == AF_RBP_IDX
+                        || (k != AF_NONE && adjacent && sole_use))
+                        af_ok = 1;
+                }
+            }
+            if (af_ok) {
+            if (ab >= 0) {
+                const char *gn = peel_gaddr_name(fn, def, ab);
+                if (!(gn && gaddr_is_local_abs(ir, gn)))
+                    mark_live_index(needed, uses, nv, fn, def, ab, 0);
+            }
+            if (ai >= 0) {
+                IRValue inner = ai;
+                int psc = 0;
+                if (peel_sib_scale(fn, def, ai, &inner, &psc))
+                    mark_live_index(needed, uses, nv, fn, def, inner, 0);
+                else
+                    mark_live_index(needed, uses, nv, fn, def, ai, 0);
+            }
             mark_reg(needed, uses, nv, inst->b);
             return;
         }
+        mark_reg(needed, uses, nv, inst->a);
+        mark_reg(needed, uses, nv, inst->b);
+        return;
+    }
+    if (pure_addr_op(inst->op) && inst->dst >= 0 && inst->dst < nv
+        && uses_left && uses_left[inst->dst] == 0)
+        return;
+    if (inst->op == IR_ADD) {
+        IRValue li = -1;
+        int lsc = 0;
+        const char *ln = ((void*)0);
+        if (match_lea_local_gep(ir, fn, def, inst, &li, &lsc, &ln)) {
+            if (li >= 0)
+                mark_live_index(needed, uses, nv, fn, def, li, 0);
+            return;
+        }
+    }
+    if (inst->op == IR_VADD || inst->op == IR_VSUB || inst->op == IR_VMUL
+        || inst->op == IR_VDIV || inst->op == IR_VBAND || inst->op == IR_VBOR
+        || inst->op == IR_VBXOR) {
+        mark_reg(needed, uses, nv, inst->dst);
         mark_reg(needed, uses, nv, inst->a);
         mark_reg(needed, uses, nv, inst->b);
         return;
@@ -3591,18 +4772,402 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
         mark_reg(needed, uses, nv, inst->b);
         return;
     }
+    if (sext_folds_frame_load(fn, def, alloca_off, raw_uses, inst, ((void*)0), ((void*)0)))
+        return;
+    if (inst->op == IR_CALL
+        && mark_va_builtin(fn, def, alloca_off, inst, needed, uses, nv))
+        return;
     mark_inst_uses_needed(inst, needed, uses, nv);
 }
-static void codegen_mark_needed_and_uses(const IRFunction *fn, const int *def,
+static void codegen_mark_needed_and_uses(const IRModule *ir,
+                                 const IRFunction *fn, const int *def,
                                  const int *alloca_off, const char *skip_body,
                                  char *needed, int *ssa_uses,
-                                 const int *raw_uses) {
+                                 const int *raw_uses, const int *uses_left) {
     int nv = fn->next_value_id > 0 ? fn->next_value_id : 1;
     for (size_t i = 0; i < fn->insts.len; i++) {
         if (skip_body && skip_body[i]) continue;
-        codegen_mark_inst_roots(needed, ssa_uses, raw_uses, nv, fn, def,
-                                alloca_off, &fn->insts.data[i], i);
+        codegen_mark_inst_roots(needed, ssa_uses, raw_uses, uses_left, nv, ir,
+                                fn, def, alloca_off, &fn->insts.data[i], i);
     }
+}
+static int match_i128_carry(const IRFunction *fn, const int *uses, size_t i,
+                            int *is_sub, int *zero_hi) {
+    if (!fn || i + 3 >= fn->insts.len) return -1;
+    const IRInst *lo = &fn->insts.data[i];
+    int sub = lo->op == IR_SUB;
+    if ((lo->op != IR_ADD && !sub) || lo->width != 8 || lo->is_float)
+        return -1;
+    const IRInst *lt = &fn->insts.data[i + 1];
+    const IRInst *zx = &fn->insts.data[i + 2];
+    if (lt->op != IR_LT || !lt->is_unsigned || lt->dst < 0) return -1;
+    if (sub) {
+        if (lt->a != lo->a || lt->b != lo->b) return -1;
+    } else if (lt->a != lo->dst || lt->b != lo->a) {
+        return -1;
+    }
+    if ((zx->op != IR_ZEXT && zx->op != IR_SEXT) || zx->a != lt->dst || zx->dst < 0)
+        return -1;
+    if (!uses || lt->dst >= fn->next_value_id || zx->dst >= fn->next_value_id)
+        return -1;
+    if (uses[lt->dst] != 1 || uses[zx->dst] != 1)
+        return -1;
+    if (i + 4 < fn->insts.len) {
+        const IRInst *mid = &fn->insts.data[i + 3];
+        const IRInst *hi = &fn->insts.data[i + 4];
+        if (mid->op == lo->op && mid->width == 8 && !mid->is_float && mid->dst >= 0
+            && hi->op == lo->op && hi->width == 8 && !hi->is_float && hi->dst >= 0
+            && mid->dst < fn->next_value_id && uses[mid->dst] == 1) {
+            int hi_ok = sub ? (hi->a == mid->dst && hi->b == zx->dst)
+                            : ((hi->a == mid->dst && hi->b == zx->dst)
+                               || (hi->a == zx->dst && hi->b == mid->dst));
+            if (hi_ok) {
+                *is_sub = sub;
+                *zero_hi = 0;
+                return (int)(i + 4);
+            }
+        }
+    }
+    const IRInst *hi = &fn->insts.data[i + 3];
+    if (hi->op != lo->op || hi->width != 8 || hi->is_float || hi->dst < 0)
+        return -1;
+    int zx_a = hi->a == zx->dst;
+    int zx_b = hi->b == zx->dst;
+    if (zx_a == zx_b) return -1;
+    if (sub && !zx_b) return -1;
+    *is_sub = sub;
+    *zero_hi = 1;
+    return (int)(i + 3);
+}
+static int asm_constr_hardreg(const char *c) {
+    if (!c) return -1;
+    while (*c == '=' || *c == '+' || *c == '&' || *c == '%' || *c == '*') c++;
+    while (*c) {
+        if (*c == 'a') return REG_RAX;
+        if (*c == 'b') return REG_RBX;
+        if (*c == 'c') return REG_RCX;
+        if (*c == 'd') return REG_RDX;
+        if (*c == 'S') return REG_RSI;
+        if (*c == 'D') return REG_RDI;
+        if (*c == ',') { c++; continue; }
+        break;
+    }
+    return -1;
+}
+static int asm_constr_is_imm(const char *c) {
+    if (!c) return 0;
+    while (*c == '=' || *c == '+' || *c == '&' || *c == '%') c++;
+    while (*c) {
+        if (*c == 'i' || *c == 'n' || *c == 'N') return 1;
+        if (*c == 'r' || *c == 'm' || *c == 'a' || *c == 'b' || *c == 'c' ||
+            *c == 'd' || *c == 'S' || *c == 'D' || *c == 'q' || *c == 'Q' ||
+            *c == 'g' || *c == 'X') return 0;
+        if (*c == ',') { c++; continue; }
+        c++;
+    }
+    return 0;
+}
+static int asm_constr_is_mem(const char *c) {
+    if (!c) return 0;
+    while (*c == '=' || *c == '+' || *c == '&' || *c == '%') c++;
+    while (*c) {
+        if (*c == 'm' || *c == 'o') return 1;
+        if (*c == 'r' || *c == 'a' || *c == 'b' || *c == 'c' || *c == 'd' ||
+            *c == 'S' || *c == 'D' || *c == 'i' || *c == 'n' || *c == 'N')
+            return 0;
+        if (*c == ',') { c++; continue; }
+        c++;
+    }
+    return 0;
+}
+static int asm_constr_is_rw(const char *c) {
+    return c && runtime.strchr(c, '+') != ((void*)0);
+}
+static int asm_clobber_reg(const char *name) {
+    if (!name || !*name) return -1;
+    while (*name == ' ' || *name == '%') name++;
+    char buf[16];
+    size_t n = 0;
+    while (name[n] && name[n] != ',' && name[n] != ' ' && n + 1 < sizeof buf) {
+        buf[n] = name[n];
+        n++;
+    }
+    buf[n] = 0;
+    if (!buf[0]) return -1;
+    if (!runtime.strcmp(buf, "memory") || !runtime.strcmp(buf, "cc")) return -1;
+    if (!runtime.strcmp(buf, "rax") || !runtime.strcmp(buf, "eax") || !runtime.strcmp(buf, "ax") || !runtime.strcmp(buf, "al")) return REG_RAX;
+    if (!runtime.strcmp(buf, "rbx") || !runtime.strcmp(buf, "ebx") || !runtime.strcmp(buf, "bx") || !runtime.strcmp(buf, "bl")) return REG_RBX;
+    if (!runtime.strcmp(buf, "rcx") || !runtime.strcmp(buf, "ecx") || !runtime.strcmp(buf, "cx") || !runtime.strcmp(buf, "cl")) return REG_RCX;
+    if (!runtime.strcmp(buf, "rdx") || !runtime.strcmp(buf, "edx") || !runtime.strcmp(buf, "dx") || !runtime.strcmp(buf, "dl")) return REG_RDX;
+    if (!runtime.strcmp(buf, "rsi") || !runtime.strcmp(buf, "esi") || !runtime.strcmp(buf, "si") || !runtime.strcmp(buf, "sil")) return REG_RSI;
+    if (!runtime.strcmp(buf, "rdi") || !runtime.strcmp(buf, "edi") || !runtime.strcmp(buf, "di") || !runtime.strcmp(buf, "dil")) return REG_RDI;
+    if (!runtime.strcmp(buf, "rsp") || !runtime.strcmp(buf, "esp")) return REG_RSP;
+    if (!runtime.strcmp(buf, "rbp") || !runtime.strcmp(buf, "ebp")) return REG_RBP;
+    if (!runtime.strcmp(buf, "r8") || !runtime.strcmp(buf, "r8d") || !runtime.strcmp(buf, "r8b")) return REG_R8;
+    if (!runtime.strcmp(buf, "r9") || !runtime.strcmp(buf, "r9d") || !runtime.strcmp(buf, "r9b")) return REG_R9;
+    if (!runtime.strcmp(buf, "r10") || !runtime.strcmp(buf, "r10d") || !runtime.strcmp(buf, "r10b")) return REG_R10;
+    if (!runtime.strcmp(buf, "r11") || !runtime.strcmp(buf, "r11d") || !runtime.strcmp(buf, "r11b")) return REG_R11;
+    if (!runtime.strcmp(buf, "r12") || !runtime.strcmp(buf, "r12d") || !runtime.strcmp(buf, "r12b")) return REG_R12;
+    if (!runtime.strcmp(buf, "r13") || !runtime.strcmp(buf, "r13d") || !runtime.strcmp(buf, "r13b")) return REG_R13;
+    if (!runtime.strcmp(buf, "r14") || !runtime.strcmp(buf, "r14d") || !runtime.strcmp(buf, "r14b")) return REG_R14;
+    if (!runtime.strcmp(buf, "r15") || !runtime.strcmp(buf, "r15d") || !runtime.strcmp(buf, "r15b")) return REG_R15;
+    return -1;
+}
+static int asm_clobber_mask(const char *cl) {
+    int mask = 0;
+    if (!cl) return 0;
+    const char *p = cl;
+    while (*p) {
+        while (*p == ' ' || *p == ',') p++;
+        if (!*p) break;
+        int r = asm_clobber_reg(p);
+        if (r >= 0) mask |= 1 << r;
+        while (*p && *p != ',') p++;
+    }
+    return mask;
+}
+static int asm_pick_scratch(int used_mask) {
+    static const int cands[] = {
+        REG_R10, REG_R11, REG_R8, REG_R9, REG_RSI, REG_RDI, REG_RAX, REG_RCX, REG_RDX
+    };
+    for (size_t i = 0; i < sizeof cands / sizeof cands[0]; i++) {
+        int r = cands[i];
+        if (!(used_mask & (1 << r))) return r;
+    }
+    return REG_R11;
+}
+static int asm_try_const(const IRFunction *fn, IRValue v, int64_t *out) {
+    if (v < 0) return 0;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *ins = &fn->insts.data[i];
+        if (ins->dst == v && ins->op == IR_CONST && !ins->is_float) {
+            *out = ins->imm;
+            return 1;
+        }
+    }
+    return 0;
+}
+static void emit_ir_asm(Buffer *text, EmitModule *out, const IRFunction *fn,
+                        const IRInst *inst, const RAResult *ra,
+                        const int *ssa_def, const int *alloca_off) {
+    int n_out = (int)inst->imm;
+    int n_in = inst->call_nargs - n_out;
+    if (n_out < 0) n_out = 0;
+    if (n_in < 0) n_in = 0;
+    int nops = n_out + n_in;
+    IAsmOperand *ops = runtime.calloc((size_t)(nops > 0 ? nops : 1), sizeof(IAsmOperand));
+    int *out_addr = runtime.calloc((size_t)(n_out > 0 ? n_out : 1), sizeof(int));
+    int used = 0;
+    int i;
+    int clobber_m = asm_clobber_mask(inst->asm_clobbers);
+    for (i = 0; i < n_out; i++) out_addr[i] = -1;
+    int hard_demand = clobber_m;
+    for (i = 0; i < nops; i++) {
+        const char *c = (inst->asm_constraints && inst->asm_constraints[i])
+                            ? inst->asm_constraints[i] : "r";
+        int h = asm_constr_hardreg(c);
+        if (h >= 0) hard_demand |= 1 << h;
+        if (asm_constr_is_imm(c) && i >= n_out)
+            hard_demand |= 1 << REG_RDX;
+    }
+    for (i = 0; i < n_out; i++) {
+        const char *c = (inst->asm_constraints && inst->asm_constraints[i])
+                            ? inst->asm_constraints[i] : "r";
+        IRValue v = inst->call_args[i];
+        int w = 8;
+        if (inst->call_arg_nbytes && inst->call_arg_nbytes[i] > 0)
+            w = inst->call_arg_nbytes[i];
+        ops[i].width = w;
+        ops[i].sym = ((void*)0);
+        int addr_r = asm_pick_scratch(used | hard_demand);
+        {
+            int frame_off = 0;
+            if (ssa_def && alloca_off
+                && fold_ptr_off(fn, ssa_def, alloca_off, v, &frame_off, 0)
+                && frame_off != 0) {
+                emit_lea_rbp(text, addr_r, frame_off);
+            } else {
+                ensure_reg(text, v, addr_r, ra);
+            }
+        }
+        used |= 1 << addr_r;
+        out_addr[i] = addr_r;
+        if (asm_constr_is_mem(c)) {
+            ops[i].kind = 2;
+            ops[i].reg = addr_r;
+            continue;
+        }
+        int hard = asm_constr_hardreg(c);
+        if (hard < 0) {
+            hard = asm_pick_scratch(used | hard_demand);
+            used |= 1 << hard;
+        } else {
+            used |= 1 << hard;
+        }
+        if (asm_constr_is_rw(c)) {
+            int ww = ops[i].width;
+            if (ww == 1) {
+                emit_rex_wrb(text, 0, hard, addr_r);
+                emit_byte(text, 0x8A);
+                if ((addr_r & 7) == 4) { emit_modrm(text, 0, hard & 7, 4); emit_byte(text, 0x24); }
+                else if ((addr_r & 7) == 5) { emit_modrm(text, 1, hard & 7, 5); emit_byte(text, 0); }
+                else emit_modrm(text, 0, hard & 7, addr_r & 7);
+            } else {
+                if (ww == 2) emit_byte(text, 0x66);
+                emit_rex_wrb(text, ww == 8 ? 1 : 0, hard, addr_r);
+                emit_byte(text, 0x8B);
+                if ((addr_r & 7) == 4) { emit_modrm(text, 0, hard & 7, 4); emit_byte(text, 0x24); }
+                else if ((addr_r & 7) == 5) { emit_modrm(text, 1, hard & 7, 5); emit_byte(text, 0); }
+                else emit_modrm(text, 0, hard & 7, addr_r & 7);
+            }
+        }
+        ops[i].kind = 0;
+        ops[i].reg = hard;
+    }
+    {
+        int hard_of[16];
+        int kind_of[16];
+        int64_t imm_of[16];
+        int w_of[16];
+        int pushed[16];
+        for (i = 0; i < 16; i++) {
+            hard_of[i] = -1; kind_of[i] = 0; imm_of[i] = 0; w_of[i] = 8; pushed[i] = 0;
+        }
+        for (i = 0; i < n_in; i++) {
+            int oi = n_out + i;
+            const char *c = (inst->asm_constraints && inst->asm_constraints[oi])
+                                ? inst->asm_constraints[oi] : "r";
+            IRValue v = inst->call_args[oi];
+            int w = 8;
+            if (inst->call_arg_nbytes && inst->call_arg_nbytes[oi] > 0)
+                w = inst->call_arg_nbytes[oi];
+            w_of[i] = w;
+            if (asm_constr_is_imm(c)) {
+                int64_t imm = 0;
+                if (asm_try_const(fn, v, &imm)) {
+                    kind_of[i] = 1;
+                    imm_of[i] = imm;
+                    continue;
+                }
+                hard_of[i] = REG_RDX;
+                w_of[i] = 2;
+            } else if (asm_constr_is_mem(c)) {
+                kind_of[i] = 2;
+            } else {
+                int hard = asm_constr_hardreg(c);
+                const char *q = c;
+                while (*q == '=' || *q == '+' || *q == '&' || *q == '%') q++;
+                if (*q >= '0' && *q <= '9') {
+                    int m = *q - '0';
+                    if (m >= 0 && m < n_out && ops[m].kind == 0)
+                        hard = ops[m].reg;
+                }
+                if (hard >= 0) {
+                    for (int j = 0; j < n_out; j++) {
+                        if (ops[j].kind == 0 && ops[j].reg == hard) {
+                            hard_of[i] = hard;
+                            break;
+                        }
+                    }
+                    if (hard_of[i] < 0) hard_of[i] = hard;
+                }
+            }
+        }
+        for (i = n_in - 1; i >= 0; i--) {
+            if (kind_of[i] == 1) continue;
+            int oi = n_out + i;
+            IRValue v = inst->call_args[oi];
+            int64_t cimm = 0;
+            int blocked = 0;
+            for (int j = 0; j < n_out; j++)
+                if (out_addr[j] >= 0) blocked |= 1 << out_addr[j];
+            if (asm_try_const(fn, v, &cimm)) {
+                int tmp = asm_pick_scratch(blocked | used | hard_demand);
+                emit_rex_wrb(text, 1, 0, tmp);
+                emit_byte(text, (uint8_t)(0xB8 + (tmp & 7)));
+                for (int b = 0; b < 8; b++)
+                    emit_byte(text, (uint8_t)((cimm >> (8 * b)) & 0xFF));
+                emit_push_r(text, tmp);
+            } else {
+                int home = gp_home(ra, v);
+                if (home >= 0) {
+                    emit_push_r(text, home);
+                } else {
+                    int tmp = asm_pick_scratch(blocked);
+                    ensure_reg(text, v, tmp, ra);
+                    emit_push_r(text, tmp);
+                }
+            }
+            pushed[i] = 1;
+        }
+        for (i = 0; i < n_in; i++) {
+            int oi = n_out + i;
+            ops[oi].width = w_of[i];
+            ops[oi].sym = ((void*)0);
+            if (kind_of[i] == 1) {
+                ops[oi].kind = 1;
+                ops[oi].imm = imm_of[i];
+                continue;
+            }
+            int dest;
+            if (hard_of[i] >= 0) {
+                dest = hard_of[i];
+            } else {
+                int blocked = used | hard_demand;
+                for (int j = 0; j < i; j++) {
+                    int oj = n_out + j;
+                    if (ops[oj].kind == 0 || ops[oj].kind == 2)
+                        blocked |= 1 << ops[oj].reg;
+                }
+                for (int j = 0; j < n_out; j++)
+                    if (out_addr[j] >= 0) blocked |= 1 << out_addr[j];
+                dest = asm_pick_scratch(blocked);
+            }
+            if (pushed[i])
+                emit_pop_r(text, dest);
+            used |= 1 << dest;
+            if (kind_of[i] == 2) {
+                ops[oi].kind = 2;
+                ops[oi].reg = dest;
+            } else {
+                ops[oi].kind = 0;
+                ops[oi].reg = dest;
+            }
+        }
+    }
+    for (i = 0; i < n_out; i++) {
+        if (out_addr[i] >= 0)
+            emit_push_r(text, out_addr[i]);
+    }
+    iasm_emit_x86(text, out, inst->call_name ? inst->call_name : "",
+                  ops, nops, inst->loc.file, inst->loc.line, inst->loc.col);
+    for (i = n_out - 1; i >= 0; i--) {
+        if (out_addr[i] >= 0)
+            emit_pop_r(text, out_addr[i]);
+    }
+    for (i = 0; i < n_out; i++) {
+        if (ops[i].kind != 0) continue;
+        int addr = out_addr[i];
+        int hard = ops[i].reg;
+        int w = ops[i].width > 0 ? ops[i].width : 8;
+        if (addr < 0) continue;
+        if (w == 1) {
+            emit_rex_wrb(text, 0, hard, addr);
+            emit_byte(text, 0x88);
+            if ((addr & 7) == 4) { emit_modrm(text, 0, hard & 7, 4); emit_byte(text, 0x24); }
+            else if ((addr & 7) == 5) { emit_modrm(text, 1, hard & 7, 5); emit_byte(text, 0); }
+            else emit_modrm(text, 0, hard & 7, addr & 7);
+        } else {
+            if (w == 2) emit_byte(text, 0x66);
+            emit_rex_wrb(text, w == 8 ? 1 : 0, hard, addr);
+            emit_byte(text, 0x89);
+            if ((addr & 7) == 4) { emit_modrm(text, 0, hard & 7, 4); emit_byte(text, 0x24); }
+            else if ((addr & 7) == 5) { emit_modrm(text, 1, hard & 7, 5); emit_byte(text, 0); }
+            else emit_modrm(text, 0, hard & 7, addr & 7);
+        }
+    }
+    runtime.free(ops);
+    runtime.free(out_addr);
 }
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     if (target_current()->arch == TARGET_ARCH_ARM64) {
@@ -3681,6 +5246,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             gv.sym_name = g->name;
             gv.alloca_ssa = -1;
             gv.param_idx = -1;
+            gv.addr_sect = (int)shndx;
+            gv.addr_off = off;
             emit_module_add_dbg_global(out, &gv);
         }
     }
@@ -3706,9 +5273,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 emit_module_add_dbg_line(out, fn->loc.file, fn->loc.line,
                                          fn->loc.col, start_offset);
         }
-        int cs_used[3];
+        int cs_used[5];
         collect_callee_saved(ra, cs_used);
-        int cs_count = cs_used[0] + cs_used[1] + cs_used[2];
+        int cs_count = cs_used[0] + cs_used[1] + cs_used[2] + cs_used[3] + cs_used[4];
         curr_cs_count = cs_count;
         int cs_save_area = 8 * cs_count;
         int *alloca_off = xmalloc(fn->next_value_id * sizeof(int));
@@ -3750,7 +5317,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         int apply_args_rsp_off = -1, apply_result_rsp_off = -1, apply_saved_sp_rsp_off = -1;
         int aligned_call_saved_sp_rsp_off = -1;
         int bottom_extra = 0;
-        if (fn->is_variadic) bottom_extra = 176;
+        if (fn->is_variadic && target_current()->os != TOS_WINDOWS) bottom_extra = 176;
         if (fn->needs_apply_args) {
             apply_args_rsp_off = bottom_extra;
             bottom_extra += 192;
@@ -3778,18 +5345,38 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             ? -(frame_down - apply_saved_sp_rsp_off) : 0;
         int aligned_call_saved_sp_rbp_off = (aligned_call_saved_sp_rsp_off >= 0)
             ? -(frame_down - aligned_call_saved_sp_rsp_off) : 0;
-        emit_byte(&out->text, 0x55);
+        int prologue_stack = stack_size;
+        int naked = fn->is_naked;
+        if (naked) prologue_stack = 0;
         size_t after_push_rbp_pc = out->text.len;
+        size_t after_mov_rbp_pc = out->text.len;
+        if (!naked) {
+        emit_byte(&out->text, 0x55);
+        after_push_rbp_pc = out->text.len;
         emit_rex_w(&out->text);
         emit_byte(&out->text, 0x89);
         emit_byte(&out->text, 0xE5);
-        size_t after_mov_rbp_pc = out->text.len;
+        after_mov_rbp_pc = out->text.len;
         if (want_debug && dbg_func_idx >= 0)
             emit_module_dbg_func_frame(out, dbg_func_idx, after_push_rbp_pc,
                                        after_mov_rbp_pc);
         if (cs_used[0]) emit_push_r(&out->text, REG_RBX);
         if (cs_used[1]) emit_push_r(&out->text, REG_R12);
         if (cs_used[2]) emit_push_r(&out->text, REG_R13);
+        if (cs_used[3]) emit_push_r(&out->text, REG_RSI);
+        if (cs_used[4]) emit_push_r(&out->text, REG_RDI);
+        }
+        int8_t win_pushed[8];
+        int win_npushed = 0;
+        runtime.memset(win_pushed, -1, sizeof win_pushed);
+        if (target_current()->os == TOS_WINDOWS) {
+            if (cs_used[0]) win_pushed[win_npushed++] = 3;
+            if (cs_used[1]) win_pushed[win_npushed++] = 12;
+            if (cs_used[2]) win_pushed[win_npushed++] = 13;
+            if (cs_used[3]) win_pushed[win_npushed++] = 6;
+            if (cs_used[4]) win_pushed[win_npushed++] = 7;
+        }
+        (void)win_npushed;
         int nparams = 0;
         for (size_t j = 0; j < fn->insts.len; j++) {
             if (fn->insts.data[j].op == IR_PARAM) nparams++;
@@ -3809,56 +5396,93 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
         }
         int gp_reg_idx = 0, xmm_reg_idx = 0, stack_arg_idx = 0;
-        for (int p = 0; p < nparams; p++) {
-            const IRInst *pi = &fn->insts.data[p];
-            int is_ld = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
-                         value_is_ld(fn, pi->dst));
-            int is_float = !is_ld && (pi->dst >= 0 && pi->dst < fn->next_value_id &&
-                            value_is_float_class(fn, pi->dst));
-            int force_stack = pi->force_stack || is_ld;
-            int vecb = is_float ? value_vec_bytes(fn, pi->dst) : 0;
-            if (!vecb && is_float && (pi->width == 16 || pi->width == 32 || pi->width == 64))
-                vecb = pi->width;
-            int pal = flags_stack_align(0, vecb, pi->align16);
-            if (is_ld && pal < 16) pal = 16;
-            int nslots = vec_nslots(vecb, is_ld);
-            int blob = param_is_mem_blob(pi);
-            if (blob) {
-                nslots = (pi->alloca_bytes + 7) / 8;
-                if (nslots < 1) nslots = 1;
-            }
-            if (force_stack) {
-                stack_idx_align(&stack_arg_idx, pal);
-                arrive_reg[p] = -1;
-                arrive_is_xmm[p] = 0;
-                stack_off[p] = 16 + 8 * stack_arg_idx;
-                stack_arg_idx += nslots;
-                if (is_ld)
-                    ld_off[pi->dst] = stack_off[p];
-            } else if (is_float) {
-                if (xmm_reg_idx < 8) {
-                    arrive_reg[p] = xmm_reg_idx;
-                    arrive_is_xmm[p] = 1;
-                    xmm_reg_idx++;
+        int win_arg_slot = 0;
+        if (target_current()->os == TOS_WINDOWS) {
+            int slot = 0;
+            for (int p = 0; p < nparams; p++) {
+                const IRInst *pi = &fn->insts.data[p];
+                int is_float = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                                value_is_float_class(fn, pi->dst));
+                int vecb = 0;
+                if (is_float) {
+                    vecb = value_vec_bytes(fn, pi->dst);
+                    if (!vecb && (pi->width == 16 || pi->width == 32 || pi->width == 64))
+                        vecb = pi->width;
+                }
+                if (p < 4) {
+                    if (is_float) {
+                        arrive_reg[p] = p;
+                        arrive_is_xmm[p] = 1;
+                    } else {
+                        arrive_reg[p] = WIN64_ARG_REGS[p];
+                        arrive_is_xmm[p] = 0;
+                    }
+                    stack_off[p] = 16 + 8 * p;
+                    slot++;
                 } else {
+                    int nslots = win64_stack_slots(is_float, vecb);
+                    if (nslots > 1)
+                        stack_idx_align(&slot, nslots * 8);
                     arrive_reg[p] = -1;
                     arrive_is_xmm[p] = 0;
+                    stack_off[p] = 16 + 8 * slot;
+                    slot += nslots;
+                }
+            }
+            win_arg_slot = slot;
+        } else {
+            for (int p = 0; p < nparams; p++) {
+                const IRInst *pi = &fn->insts.data[p];
+                int is_ld = (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                             value_is_ld(fn, pi->dst));
+                int is_float = !is_ld && (pi->dst >= 0 && pi->dst < fn->next_value_id &&
+                                value_is_float_class(fn, pi->dst));
+                int force_stack = pi->force_stack || is_ld;
+                int vecb = is_float ? value_vec_bytes(fn, pi->dst) : 0;
+                if (!vecb && is_float && (pi->width == 16 || pi->width == 32 || pi->width == 64))
+                    vecb = pi->width;
+                int pal = flags_stack_align(0, vecb, pi->align16);
+                if (is_ld && pal < 16) pal = 16;
+                int nslots = vec_nslots(vecb, is_ld);
+                int blob = param_is_mem_blob(pi);
+                if (blob) {
+                    nslots = (pi->alloca_bytes + 7) / 8;
+                    if (nslots < 1) nslots = 1;
+                }
+                if (force_stack) {
                     stack_idx_align(&stack_arg_idx, pal);
+                    arrive_reg[p] = -1;
+                    arrive_is_xmm[p] = 0;
                     stack_off[p] = 16 + 8 * stack_arg_idx;
                     stack_arg_idx += nslots;
-                }
-            } else {
-                if (gp_reg_idx < 6) {
-                    arrive_reg[p] = SYSV_ARG_REGS[gp_reg_idx++];
-                    arrive_is_xmm[p] = 0;
+                    if (is_ld)
+                        ld_off[pi->dst] = stack_off[p];
+                } else if (is_float) {
+                    if (xmm_reg_idx < 8) {
+                        arrive_reg[p] = xmm_reg_idx;
+                        arrive_is_xmm[p] = 1;
+                        xmm_reg_idx++;
+                    } else {
+                        arrive_reg[p] = -1;
+                        arrive_is_xmm[p] = 0;
+                        stack_idx_align(&stack_arg_idx, pal);
+                        stack_off[p] = 16 + 8 * stack_arg_idx;
+                        stack_arg_idx += nslots;
+                    }
                 } else {
-                    arrive_reg[p] = -1;
-                    arrive_is_xmm[p] = 0;
-                    stack_off[p] = 16 + 8 * stack_arg_idx++;
+                    if (gp_reg_idx < 6) {
+                        arrive_reg[p] = SYSV_ARG_REGS[gp_reg_idx++];
+                        arrive_is_xmm[p] = 0;
+                    } else {
+                        arrive_reg[p] = -1;
+                        arrive_is_xmm[p] = 0;
+                        stack_off[p] = 16 + 8 * stack_arg_idx++;
+                    }
                 }
             }
         }
         int *ssa_def = codegen_build_defs(fn);
+        codegen_set_def_count(fn);
         char *skip_body = xmalloc(fn->insts.len ? fn->insts.len : 1);
         runtime.memset(skip_body, 0, fn->insts.len ? fn->insts.len : 1);
         int *param_home_off = ((void*)0);
@@ -3883,7 +5507,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     continue;
                 }
                 if (in->a == v) { other = 1; break; }
-                if (in->op != IR_CBR && in->op != IR_CALL && in->b == v) {
+                if (in->op != IR_CBR && in->op != IR_CALL && in->op != IR_ASM && in->b == v) {
                     other = 1;
                     break;
                 }
@@ -3899,18 +5523,45 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             const IRInst *st = &fn->insts.data[store_i];
             IRValue ptr = st->a;
             if (ptr < 0 || ptr >= fn->next_value_id || ssa_def[ptr] < 0) continue;
+            int slot = -1, field_off = 0;
             const IRInst *ad = &fn->insts.data[ssa_def[ptr]];
-            if (ad->op != IR_ADDR) continue;
-            int slot = ad->a;
+            if (ad->op == IR_ADDR) {
+                slot = ad->a;
+                field_off = 0;
+            } else if (ad->op == IR_ADD) {
+                IRValue base_ptr = -1;
+                int64_t imm = 0;
+                if (ad->a >= 0 && ad->a < fn->next_value_id && ssa_def[ad->a] >= 0
+                    && ad->b >= 0 && ad->b < fn->next_value_id && ssa_def[ad->b] >= 0) {
+                    const IRInst *xa = &fn->insts.data[ssa_def[ad->a]];
+                    const IRInst *xb = &fn->insts.data[ssa_def[ad->b]];
+                    if (xa->op == IR_ADDR && xb->op == IR_CONST && !xb->is_float) {
+                        base_ptr = ad->a;
+                        imm = xb->imm;
+                    } else if (xb->op == IR_ADDR && xa->op == IR_CONST && !xa->is_float) {
+                        base_ptr = ad->b;
+                        imm = xa->imm;
+                    }
+                }
+                if (base_ptr < 0 || ssa_def[base_ptr] < 0) continue;
+                const IRInst *ba = &fn->insts.data[ssa_def[base_ptr]];
+                if (ba->op != IR_ADDR) continue;
+                slot = ba->a;
+                field_off = (int)imm;
+            } else {
+                continue;
+            }
             if (slot < 0 || slot >= fn->next_value_id || ssa_def[slot] < 0) continue;
             const IRInst *al = &fn->insts.data[ssa_def[slot]];
             if (al->op != IR_ALLOCA) continue;
+            if (alloca_dyn_align(fn, ssa_def, slot)) continue;
             int store_w = st->width ? st->width : 4;
             int param_w = pi->width ? pi->width : 4;
-            if (al->alloca_bytes != store_w || store_w != param_w) continue;
+            if (store_w != param_w) continue;
+            if (field_off < 0 || al->alloca_bytes < field_off + store_w) continue;
             int off = alloca_off[slot];
             if (off == 0) continue;
-            param_home_off[p] = off;
+            param_home_off[p] = off + field_off;
             skip_body[store_i] = 1;
         }
         int nvals_f = fn->next_value_id > 0 ? fn->next_value_id : 1;
@@ -3927,22 +5578,69 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 continue;
             if (u->op != IR_ADDR && u->a >= 0)
                 raw_uses[u->a]++;
-            if (u->op != IR_CBR && u->op != IR_CALL && u->b >= 0)
+            if (u->op != IR_CBR && u->op != IR_CALL && u->op != IR_ASM && u->b >= 0)
                 raw_uses[u->b]++;
+            if ((u->op == IR_VADD || u->op == IR_VSUB || u->op == IR_VMUL
+                 || u->op == IR_VDIV || u->op == IR_VBAND || u->op == IR_VBOR
+                 || u->op == IR_VBXOR)
+                && u->dst >= 0)
+                raw_uses[u->dst]++;
             if (u->op == IR_CALL) {
                 if (u->call_callee >= 0) raw_uses[u->call_callee]++;
                 for (int uk = 0; uk < u->call_nargs; uk++)
                     if (u->call_args[uk] >= 0) raw_uses[u->call_args[uk]]++;
             }
         }
-        codegen_mark_needed_and_uses(fn, ssa_def, alloca_off, skip_body,
-                                    needed, ssa_uses_f, raw_uses);
+        int *uses_left = xmalloc((size_t)nvals_f * sizeof(int));
+        runtime.memcpy(uses_left, raw_uses, (size_t)nvals_f * sizeof(int));
+        for (size_t uj = fn->insts.len; uj-- > 0; ) {
+            if (skip_body[uj]) continue;
+            const IRInst *u = &fn->insts.data[uj];
+            if (deref_folds_addr(ir, fn, ssa_def, alloca_off, raw_uses, u, uj)
+                && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+                uses_left[u->a]--;
+            if (u->op == IR_ADD && u->dst >= 0 && u->dst < nvals_f
+                && uses_left[u->dst] > 0) {
+                IRValue li = -1;
+                int lsc = 0;
+                const char *ln = ((void*)0);
+                if (match_lea_local_gep(ir, fn, ssa_def, u, &li, &lsc, &ln)) {
+                    if (u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+                        uses_left[u->a]--;
+                    if (u->b >= 0 && u->b < nvals_f && uses_left[u->b] > 0)
+                        uses_left[u->b]--;
+                    continue;
+                }
+            }
+            if (!pure_addr_op(u->op) || u->dst < 0 || u->dst >= nvals_f
+                || uses_left[u->dst] != 0)
+                continue;
+            if (u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+                uses_left[u->a]--;
+            if (u->op != IR_SEXT && u->op != IR_ZEXT && u->op != IR_COPY
+                && u->b >= 0 && u->b < nvals_f && uses_left[u->b] > 0)
+                uses_left[u->b]--;
+        }
+        codegen_mark_needed_and_uses(ir, fn, ssa_def, alloca_off, skip_body,
+                                    needed, ssa_uses_f, raw_uses, uses_left);
         size_t ninst_f = fn->insts.len ? fn->insts.len : 1;
         char *fused_skip = xmalloc(ninst_f);
+        char *mask_nop = xmalloc(ninst_f);
         int *fused_cmp_at = xmalloc(ninst_f * sizeof(int));
         char *fused_inv_at = xmalloc(ninst_f);
+        int *carry_hi_at = xmalloc(ninst_f * sizeof(int));
+        char *carry_is_sub = xmalloc(ninst_f);
+        char *carry_zero_hi = xmalloc(ninst_f);
+        int *mul_hi_at = xmalloc(ninst_f * sizeof(int));
         runtime.memset(fused_skip, 0, ninst_f);
-        for (size_t uj = 0; uj < ninst_f; uj++) fused_cmp_at[uj] = -1;
+        runtime.memset(mask_nop, 0, ninst_f);
+        runtime.memset(carry_is_sub, 0, ninst_f);
+        runtime.memset(carry_zero_hi, 0, ninst_f);
+        for (size_t uj = 0; uj < ninst_f; uj++) {
+            fused_cmp_at[uj] = -1;
+            carry_hi_at[uj] = -1;
+            mul_hi_at[uj] = -1;
+        }
         runtime.memset(fused_inv_at, 0, ninst_f);
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             const IRInst *cb = &fn->insts.data[uj];
@@ -3980,32 +5678,527 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             fused_skip[ci] = 1;
             if (wi != ci) fused_skip[wi] = 1;
             mark_reg(needed, ssa_uses_f, nvals_f, cmp->a);
-            int64_t cimm;
-            if (!(ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)))
+            int64_t cimm = 0;
+            int cb_imm = 0;
+            if (ssa_const_imm(fn, ssa_def, cmp->b, &cimm) && imm_fits_i32(cimm)) {
+                cb_imm = 1;
+                if (cmp->b >= 0 && cmp->b < nvals_f && raw_uses[cmp->b] == 1)
+                    needed[cmp->b] = 0;
+            } else if (cmp->b >= 0 && cmp->b < nvals_f && raw_uses[cmp->b] == 1
+                       && value_unique_def(fn, cmp->b) && ssa_def[cmp->b] >= 0) {
+                const IRInst *x = &fn->insts.data[ssa_def[cmp->b]];
+                if ((x->op == IR_ZEXT || x->op == IR_TRUNC || x->op == IR_COPY)
+                    && ssa_const_imm(fn, ssa_def, x->a, &cimm) && cimm >= 0
+                    && imm_fits_i32(cimm)) {
+                    cb_imm = 1;
+                    fused_skip[ssa_def[cmp->b]] = 1;
+                    needed[cmp->b] = 0;
+                    if (x->a >= 0 && x->a < nvals_f && raw_uses[x->a] == 1)
+                        needed[x->a] = 0;
+                }
+            }
+            if (!cb_imm)
                 mark_reg(needed, ssa_uses_f, nvals_f, cmp->b);
+            if (cb_imm && cmp->a >= 0 && cmp->a < nvals_f && raw_uses[cmp->a] == 1
+                && ssa_def[cmp->a] >= 0) {
+                int li = ssa_def[cmp->a];
+                const IRInst *ld = &fn->insts.data[li];
+                int loff = 0;
+                if ((ld->op == IR_LOAD || ld->op == IR_LOAD_PTR) && ld->width == 4
+                    && !skip_body[li] && !fused_skip[li]
+                    && fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &loff, 0))
+                    fused_skip[li] = 1;
+            }
+        }
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *cb = &fn->insts.data[uj];
+            if (cb->op != IR_CBR || skip_body[uj] || fused_cmp_at[uj] >= 0)
+                continue;
+            if (cb->a < 0 || cb->a >= nvals_f || raw_uses[cb->a] != 1)
+                continue;
+            int li = ssa_def[cb->a];
+            if (li < 0 || skip_body[li] || fused_skip[li]) continue;
+            const IRInst *ld = &fn->insts.data[li];
+            int loff = 0;
+            if ((ld->op == IR_LOAD || ld->op == IR_LOAD_PTR) && ld->width == 4
+                && fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &loff, 0))
+                fused_skip[li] = 1;
+        }
+        char *store_imm = xmalloc(ninst_f ? ninst_f : 1);
+        runtime.memset(store_imm, 0, ninst_f ? ninst_f : 1);
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *st = &fn->insts.data[uj];
+            if (st->op != IR_STORE_PTR || skip_body[uj] || fused_skip[uj])
+                continue;
+            if (st->width != 1 && st->width != 2 && st->width != 4 && st->width != 8)
+                continue;
+            if (value_is_float_class(fn, st->b) || value_is_ld(fn, st->b))
+                continue;
+            int poff = 0;
+            if (fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0)) {
+            } else if (local_abs_af(ir, fn, ssa_def, alloca_off, st->a,
+                                    ((void*)0), ((void*)0), ((void*)0), ((void*)0))
+                       && (st->width == 1 || st->width == 4)) {
+            } else if (st->width == 1 || st->width == 4) {
+                const char *rg = peel_gaddr_name_unique(fn, ssa_def, st->a);
+                if (!rg || !gaddr_is_local_abs(ir, rg))
+                    continue;
+            } else {
+                continue;
+            }
+            IRValue cur = st->b;
+            int skip_chain[4];
+            int nskip = 0;
+            int64_t immv = 0;
+            int found = 0;
+            for (int depth = 0; depth < 4 && cur >= 0 && cur < nvals_f; depth++) {
+                if (ssa_uses_f[cur] != 1) break;
+                if (!value_unique_def(fn, cur)) break;
+                int di = ssa_def[cur];
+                if (di < 0 || skip_body[di] || fused_skip[di]) break;
+                const IRInst *d = &fn->insts.data[di];
+                if (d->op == IR_CONST && !d->is_float) {
+                    immv = d->imm;
+                    if (!imm_fits_i32(immv)) break;
+                    skip_chain[nskip++] = di;
+                    found = 1;
+                    break;
+                }
+                if (d->op == IR_COPY && d->a >= 0) {
+                    skip_chain[nskip++] = di;
+                    cur = d->a;
+                    continue;
+                }
+                break;
+            }
+            if (!found || nskip < 1) continue;
+            store_imm[uj] = 1;
+            for (int k = 0; k < nskip; k++)
+                fused_skip[skip_chain[k]] = 1;
+            if (st->a >= 0 && st->a < nvals_f && ssa_def[st->a] >= 0
+                && raw_uses[st->a] <= 1)
+                fused_skip[ssa_def[st->a]] = 1;
+            (void)poff;
+        }
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            const IRInst *ad = &fn->insts.data[uj];
+            int comm = 0;
+            if (ad->op == IR_ADD || ad->op == IR_BAND || ad->op == IR_BOR
+                || ad->op == IR_BXOR || ad->op == IR_MUL)
+                comm = 1;
+            else if (ad->op == IR_SUB || ad->op == IR_SHL || ad->op == IR_SHR
+                     || ad->op == IR_ROL)
+                comm = 0;
+            else
+                continue;
+            for (int side = 0; side < (comm ? 2 : 1); side++) {
+                IRValue cv = side ? ad->a : ad->b;
+                if (cv < 0 || cv >= nvals_f || raw_uses[cv] != 1
+                    || !value_unique_def(fn, cv) || ssa_def[cv] < 0)
+                    continue;
+                int64_t imm = 0;
+                if (!ssa_const_imm(fn, ssa_def, cv, &imm)) continue;
+                int ok = imm_fits_i32(imm);
+                if ((ad->op == IR_SHL || ad->op == IR_SHR || ad->op == IR_ROL)
+                    && (imm < 0 || imm >= 64))
+                    ok = 0;
+                if (!ok) continue;
+                int ci = ssa_def[cv];
+                if (!skip_body[ci] && !fused_skip[ci])
+                    fused_skip[ci] = 1;
+                needed[cv] = 0;
+            }
+        }
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj] || mask_nop[uj]) continue;
+            const IRInst *zx = &fn->insts.data[uj];
+            if (zx->op != IR_ZEXT || zx->a < 0 || zx->a >= nvals_f) continue;
+            if (raw_uses[zx->a] != 1 || ssa_def[zx->a] < 0) continue;
+            int ti = ssa_def[zx->a];
+            if (skip_body[ti] || fused_skip[ti] || mask_nop[ti]) continue;
+            const IRInst *tr = &fn->insts.data[ti];
+            if (tr->op != IR_TRUNC || tr->width != (int)zx->imm) continue;
+            int tw = tr->width;
+            if (tw != 1 && tw != 2) continue;
+            IRValue cur = tr->a;
+            int safe = 0;
+            for (int depth = 0; depth < 6 && cur >= 0 && cur < nvals_f
+                 && ssa_def[cur] >= 0; depth++) {
+                const IRInst *s = &fn->insts.data[ssa_def[cur]];
+                if (s->op == IR_COPY) {
+                    cur = s->a;
+                    continue;
+                }
+                int64_t ca = 0, lim = (tw == 1) ? 0xff : 0xffff;
+                if (s->op == IR_SHL && ssa_const_imm(fn, ssa_def, s->a, &ca)
+                    && ca == 1) {
+                    int64_t csh = 0;
+                    if (ssa_const_imm(fn, ssa_def, s->b, &csh)
+                        && csh >= 0 && csh < tw * 8)
+                        safe = 1;
+                    else {
+                        IRValue sh = s->b;
+                        for (int d2 = 0; d2 < 4 && sh >= 0 && sh < nvals_f
+                             && ssa_def[sh] >= 0; d2++) {
+                            const IRInst *h = &fn->insts.data[ssa_def[sh]];
+                            if (h->op == IR_COPY || h->op == IR_ZEXT
+                                || h->op == IR_TRUNC) {
+                                sh = h->a;
+                                continue;
+                            }
+                            int64_t mask = 0;
+                            if (h->op == IR_BAND
+                                && (ssa_extended_const(fn, ssa_def, h->b, &mask)
+                                    || ssa_extended_const(fn, ssa_def, h->a,
+                                                          &mask))
+                                && mask >= 0 && mask < (1 << (tw * 8)))
+                                safe = 1;
+                            break;
+                        }
+                    }
+                } else if (s->op == IR_BAND) {
+                    int64_t mask = 0;
+                    if (ssa_extended_const(fn, ssa_def, s->b, &mask)
+                        || ssa_extended_const(fn, ssa_def, s->a, &mask)) {
+                        if (mask >= 0 && mask <= lim) safe = 1;
+                    }
+                }
+                break;
+            }
+            if (!safe) continue;
+            mask_nop[uj] = 1;
+            mask_nop[ti] = 1;
+        }
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *st = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (st->op != IR_STORE_PTR && st->op != IR_STORE) continue;
+            if (st->width != 1 && st->width != 2) continue;
+            if (st->b < 0 || st->b >= nvals_f || raw_uses[st->b] != 1)
+                continue;
+            IRValue cur = st->b;
+            for (int depth = 0; depth < 4 && cur >= 0 && cur < nvals_f;
+                 depth++) {
+                if (raw_uses[cur] != 1 || ssa_def[cur] < 0) break;
+                int di = ssa_def[cur];
+                if (skip_body[di] || fused_skip[di]) break;
+                const IRInst *d = &fn->insts.data[di];
+                if (d->op == IR_COPY) {
+                    cur = d->a;
+                    continue;
+                }
+                if (d->op == IR_TRUNC && d->width == st->width) {
+                    mask_nop[di] = 1;
+                    break;
+                }
+                if ((d->op == IR_ZEXT || d->op == IR_SEXT)
+                    && (int)d->imm == st->width) {
+                    mask_nop[di] = 1;
+                    break;
+                }
+                break;
+            }
+        }
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj] || mask_nop[uj]) continue;
+            const IRInst *d = &fn->insts.data[uj];
+            if (d->op != IR_SEXT && !(d->op == IR_TRUNC && !d->is_unsigned))
+                continue;
+            int src_w = (d->op == IR_SEXT) ? (int)d->imm : d->width;
+            if (src_w != 4 || d->a < 0 || d->a >= nvals_f) continue;
+            IRValue cur = d->a;
+            for (int depth = 0; depth < 6 && cur >= 0 && cur < nvals_f
+                 && ssa_def[cur] >= 0; depth++) {
+                const IRInst *s = &fn->insts.data[ssa_def[cur]];
+                if (s->op == IR_COPY || s->op == IR_ZEXT || s->op == IR_TRUNC) {
+                    cur = s->a;
+                    continue;
+                }
+                if (s->op != IR_BAND) break;
+                int64_t imm = 0;
+                IRValue mv = -1;
+                if (s->b >= 0) mv = s->b;
+                for (int side = 0; side < 2; side++) {
+                    IRValue cand = side ? s->a : s->b;
+                    int64_t raw = 0;
+                    IRValue v = cand;
+                    for (int k = 0; k < 4 && v >= 0 && v < nvals_f
+                         && ssa_def[v] >= 0; k++) {
+                        const IRInst *c = &fn->insts.data[ssa_def[v]];
+                        if (c->op == IR_CONST && !c->is_float) {
+                            raw = c->imm;
+                            if (raw >= 0 && (imm_fits_i32(raw)
+                                             || imm_fits_bitwise_u32(raw))
+                                && (raw & 0x80000000u) == 0)
+                                mask_nop[uj] = 1;
+                            break;
+                        }
+                        if (c->op == IR_COPY || c->op == IR_ZEXT
+                            || c->op == IR_TRUNC) {
+                            v = c->a;
+                            continue;
+                        }
+                        break;
+                    }
+                    if (mask_nop[uj]) break;
+                }
+                (void)imm; (void)mv;
+                break;
+            }
+        }
+        char *mem_rmw = xmalloc(ninst_f ? ninst_f : 1);
+        runtime.memset(mem_rmw, 0, ninst_f ? ninst_f : 1);
+        int32_t *mem_rmw_imm = xmalloc((ninst_f ? ninst_f : 1) * sizeof(int32_t));
+        runtime.memset(mem_rmw_imm, 0, (ninst_f ? ninst_f : 1) * sizeof(int32_t));
+        const char **mem_rmw_gname = xmalloc((ninst_f ? ninst_f : 1) * sizeof(char *));
+        runtime.memset(mem_rmw_gname, 0, (ninst_f ? ninst_f : 1) * sizeof(char *));
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *st = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (st->op == IR_STORE_PTR && store_imm[uj]) continue;
+            if (st->op != IR_STORE_PTR && st->op != IR_STORE) continue;
+            if (st->width != 4) continue;
+            int poff = 0;
+            const char *st_gname = ((void*)0);
+            if (st->op == IR_STORE) {
+                if (st->a < 0 || st->a >= nvals_f || alloca_off[st->a] == 0)
+                    continue;
+                poff = alloca_off[st->a];
+            } else if (fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0)) {
+            } else {
+                st_gname = peel_gaddr_name_unique(fn, ssa_def, st->a);
+                if (!st_gname || !gaddr_is_local_abs(ir, st_gname))
+                    continue;
+                poff = 0;
+            }
+            if (st->b < 0 || st->b >= nvals_f || ssa_def[st->b] < 0
+                || raw_uses[st->b] != 1 || !value_unique_def(fn, st->b))
+                continue;
+            int ai = ssa_def[st->b];
+            if (skip_body[ai] || fused_skip[ai]) continue;
+            const IRInst *ad = &fn->insts.data[ai];
+            int ext = -1, rop = -1;
+            int commutative = 1;
+            if (ad->op == IR_ADD) { ext = 0; rop = 0x01; }
+            else if (ad->op == IR_BXOR) { ext = 6; rop = 0x31; }
+            else if (ad->op == IR_BAND) { ext = 4; rop = 0x21; }
+            else if (ad->op == IR_BOR) { ext = 1; rop = 0x09; }
+            else if (ad->op == IR_SUB) { ext = 5; rop = 0x29; commutative = 0; }
+            else continue;
+            IRValue other = -1;
+            int li = -1;
+            int peel_skip[4];
+            int npeel = 0;
+            for (int side = 0; side < 2; side++) {
+                if (!commutative && side != 0) break;
+                IRValue cand = side ? ad->b : ad->a;
+                IRValue oth = side ? ad->a : ad->b;
+                npeel = 0;
+                int lj = -1;
+                int loff = 0;
+                for (int depth = 0; depth < 4 && cand >= 0 && cand < nvals_f;
+                     depth++) {
+                    if (raw_uses[cand] != 1 || ssa_def[cand] < 0) break;
+                    int di = ssa_def[cand];
+                    if (skip_body[di] || fused_skip[di]) break;
+                    const IRInst *d = &fn->insts.data[di];
+                    if (d->op == IR_LOAD_PTR) {
+                        if (st_gname) {
+                            const char *lg = peel_gaddr_name_unique(
+                                fn, ssa_def, d->a);
+                            if (!lg || runtime.strcmp(lg, st_gname) != 0) break;
+                            loff = 0;
+                        } else if (!fold_ptr_off(fn, ssa_def, alloca_off, d->a,
+                                                 &loff, 0)) {
+                            break;
+                        }
+                        lj = di;
+                        break;
+                    }
+                    if (!st_gname && d->op == IR_LOAD && d->a >= 0
+                        && d->a < nvals_f && alloca_off[d->a] != 0) {
+                        loff = alloca_off[d->a];
+                        lj = di;
+                        break;
+                    }
+                    if (d->op == IR_ZEXT || d->op == IR_SEXT || d->op == IR_COPY) {
+                        peel_skip[npeel++] = di;
+                        cand = d->a;
+                        continue;
+                    }
+                    break;
+                }
+                if (lj < 0) continue;
+                if (st_gname) {
+                } else if (loff != poff) {
+                    continue;
+                }
+                other = oth;
+                li = lj;
+                break;
+            }
+            if (li < 0 || other < 0) continue;
+            int64_t immv = 0;
+            IRValue imm_src = other;
+            if (!value_unique_def(fn, other))
+                imm_src = -1;
+            for (int depth = 0; imm_src >= 0 && imm_src < nvals_f && depth < 3;
+                 depth++) {
+                if (!value_unique_def(fn, imm_src)) { imm_src = -1; break; }
+                if (ssa_const_imm(fn, ssa_def, imm_src, &immv)) break;
+                if (ssa_def[imm_src] < 0) { imm_src = -1; break; }
+                const IRInst *d = &fn->insts.data[ssa_def[imm_src]];
+                if (d->op != IR_ZEXT && d->op != IR_SEXT && d->op != IR_COPY)
+                    { imm_src = -1; break; }
+                imm_src = d->a;
+            }
+            if (imm_src >= 0 && imm_fits_i32(immv)) {
+                mem_rmw[uj] = (char)(1 + ext);
+                mem_rmw_imm[uj] = (int32_t)immv;
+                mem_rmw_gname[uj] = st_gname;
+                fused_skip[ai] = 1;
+                fused_skip[li] = 1;
+                for (int k = 0; k < npeel; k++)
+                    fused_skip[peel_skip[k]] = 1;
+                if (raw_uses[other] == 1) {
+                    for (IRValue c = other; c >= 0 && c < nvals_f; ) {
+                        int ci = ssa_def[c];
+                        if (ci < 0 || fused_skip[ci]) break;
+                        fused_skip[ci] = 1;
+                        const IRInst *d = &fn->insts.data[ci];
+                        if (d->op == IR_CONST) break;
+                        if (d->op != IR_ZEXT && d->op != IR_SEXT
+                            && d->op != IR_COPY)
+                            break;
+                        c = d->a;
+                    }
+                }
+                if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
+                    && ssa_def[st->a] >= 0
+                    && raw_uses[st->a] <= (st_gname ? 2 : 1))
+                    fused_skip[ssa_def[st->a]] = 1;
+                if (fn->insts.data[li].op == IR_LOAD_PTR
+                    && fn->insts.data[li].a >= 0
+                    && fn->insts.data[li].a < nvals_f
+                    && ssa_def[fn->insts.data[li].a] >= 0
+                    && raw_uses[fn->insts.data[li].a]
+                       <= (st_gname ? 2 : 1))
+                    fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
+            } else if (raw_uses[other] >= 1 && commutative) {
+                mem_rmw[uj] = (char)(10 + (rop & 0x3f));
+                mem_rmw_imm[uj] = other;
+                mem_rmw_gname[uj] = st_gname;
+                fused_skip[ai] = 1;
+                fused_skip[li] = 1;
+                if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
+                    && ssa_def[st->a] >= 0
+                    && raw_uses[st->a] <= (st_gname ? 2 : 1))
+                    fused_skip[ssa_def[st->a]] = 1;
+                if (fn->insts.data[li].op == IR_LOAD_PTR
+                    && fn->insts.data[li].a >= 0
+                    && fn->insts.data[li].a < nvals_f
+                    && ssa_def[fn->insts.data[li].a] >= 0
+                    && raw_uses[fn->insts.data[li].a]
+                       <= (st_gname ? 2 : 1))
+                    fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
+                mark_reg(needed, ssa_uses_f, nvals_f, other);
+            }
+            (void)rop;
+        }
+        for (size_t uj = 0; uj + 3 < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            int is_sub = 0, zero_hi = 0;
+            int hi = match_i128_carry(fn, raw_uses, uj, &is_sub, &zero_hi);
+            if (hi < 0) continue;
+            int span = hi - (int)uj;
+            int blocked = 0;
+            for (int k = 1; k <= span; k++) {
+                if (skip_body[uj + (size_t)k] || fused_skip[uj + (size_t)k])
+                    blocked = 1;
+            }
+            if (blocked) continue;
+            carry_hi_at[uj] = hi;
+            carry_is_sub[uj] = (char)is_sub;
+            carry_zero_hi[uj] = (char)zero_hi;
+            for (int k = 1; k <= span; k++)
+                fused_skip[uj + (size_t)k] = 1;
+        }
+        for (size_t uj = 0; uj + 1 < fn->insts.len; uj++) {
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            const IRInst *lo = &fn->insts.data[uj];
+            const IRInst *hi = &fn->insts.data[uj + 1];
+            if (lo->op != IR_MUL || hi->op != IR_UMULH) continue;
+            if (lo->width != 8 || hi->width != 8 || lo->is_float || hi->is_float)
+                continue;
+            if (lo->dst < 0 || hi->dst < 0) continue;
+            if (skip_body[uj + 1] || fused_skip[uj + 1]) continue;
+            int same = (lo->a == hi->a && lo->b == hi->b)
+                    || (lo->a == hi->b && lo->b == hi->a);
+            if (!same) continue;
+            mul_hi_at[uj] = (int)(uj + 1);
+            fused_skip[uj + 1] = 1;
         }
         int va_gp_offset = 0, va_fp_offset = 0, va_overflow_off = 16;
         if (fn->is_variadic) {
-            va_gp_offset = 8 * gp_reg_idx;
-            va_fp_offset = 48 + 16 * xmm_reg_idx;
-            va_overflow_off = 16 + 8 * stack_arg_idx;
+            if (target_current()->os == TOS_WINDOWS) {
+                va_overflow_off = 16 + 8 * win_arg_slot;
+            } else {
+                va_gp_offset = 8 * gp_reg_idx;
+                va_fp_offset = 48 + 16 * xmm_reg_idx;
+                va_overflow_off = 16 + 8 * stack_arg_idx;
+            }
         }
-        emit_sub_rsp_imm32(&out->text, stack_size);
+        if (target_current()->os == TOS_WINDOWS && prologue_stack >= 4096) {
+            emit_byte(&out->text, 0x49); emit_byte(&out->text, 0x89);
+            emit_byte(&out->text, 0xE3);
+            emit_mov_imm32(&out->text, REG_RAX, prologue_stack);
+            emit_byte(&out->text, 0x49); emit_byte(&out->text, 0x29);
+            emit_byte(&out->text, 0xC3);
+            emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+            emit_byte(&out->text, 0xE0);
+            size_t probe = out->text.len;
+            emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x2D);
+            emit_int32(&out->text, 0x1000);
+            emit_byte(&out->text, 0x80); emit_byte(&out->text, 0x38);
+            emit_byte(&out->text, 0x00);
+            emit_byte(&out->text, 0x4C); emit_byte(&out->text, 0x39);
+            emit_byte(&out->text, 0xD8);
+            emit_byte(&out->text, 0x77);
+            {
+                int rel = (int)probe - (int)(out->text.len + 1);
+                emit_byte(&out->text, (uint8_t)rel);
+            }
+        }
+        if (prologue_stack != 0)
+            emit_sub_rsp_imm32(&out->text, prologue_stack);
+        size_t after_sub_rsp_pc = out->text.len;
         if (fn->is_variadic) {
-            emit_store_rsp_off(&out->text, REG_RDI, 0);
-            emit_store_rsp_off(&out->text, REG_RSI, 8);
-            emit_store_rsp_off(&out->text, REG_RDX, 16);
-            emit_store_rsp_off(&out->text, REG_RCX, 24);
-            emit_store_rsp_off(&out->text, REG_R8, 32);
-            emit_store_rsp_off(&out->text, REG_R9, 40);
-            emit_sse_store_rsp_off(&out->text, 0, 48);
-            emit_sse_store_rsp_off(&out->text, 1, 64);
-            emit_sse_store_rsp_off(&out->text, 2, 80);
-            emit_sse_store_rsp_off(&out->text, 3, 96);
-            emit_sse_store_rsp_off(&out->text, 4, 112);
-            emit_sse_store_rsp_off(&out->text, 5, 128);
-            emit_sse_store_rsp_off(&out->text, 6, 144);
-            emit_sse_store_rsp_off(&out->text, 7, 160);
+            if (target_current()->os == TOS_WINDOWS) {
+                emit_store_base_off(&out->text, REG_RBP, REG_RCX, 16);
+                emit_store_base_off(&out->text, REG_RBP, REG_RDX, 24);
+                emit_store_base_off(&out->text, REG_RBP, REG_R8, 32);
+                emit_store_base_off(&out->text, REG_RBP, REG_R9, 40);
+            } else {
+                emit_store_rsp_off(&out->text, REG_RDI, 0);
+                emit_store_rsp_off(&out->text, REG_RSI, 8);
+                emit_store_rsp_off(&out->text, REG_RDX, 16);
+                emit_store_rsp_off(&out->text, REG_RCX, 24);
+                emit_store_rsp_off(&out->text, REG_R8, 32);
+                emit_store_rsp_off(&out->text, REG_R9, 40);
+                emit_byte(&out->text, 0x84);
+                emit_byte(&out->text, 0xC0);
+                size_t skip_xmm = emit_jcc_rel32(&out->text, 0x84);
+                emit_sse_store_rsp_off(&out->text, 0, 48);
+                emit_sse_store_rsp_off(&out->text, 1, 64);
+                emit_sse_store_rsp_off(&out->text, 2, 80);
+                emit_sse_store_rsp_off(&out->text, 3, 96);
+                emit_sse_store_rsp_off(&out->text, 4, 112);
+                emit_sse_store_rsp_off(&out->text, 5, 128);
+                emit_sse_store_rsp_off(&out->text, 6, 144);
+                emit_sse_store_rsp_off(&out->text, 7, 160);
+                patch_rel32(&out->text, skip_xmm, out->text.len);
+            }
         }
         if (fn->needs_apply_args)
             emit_fill_apply_args(&out->text, apply_args_rsp_off);
@@ -4163,18 +6356,49 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int fold_off = 0;
                 IRValue dummy_b = -1, dummy_idx = -1;
                 if (inst->dst >= 0 && inst->dst < fn->next_value_id && !needed[inst->dst]) {
+                    int addr_used_by_asm = 0;
+                    if (inst->op == IR_ADDR) {
+                        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+                            const IRInst *u = &fn->insts.data[uj];
+                            if (u->op != IR_ASM) continue;
+                            for (int k = 0; k < u->call_nargs; k++) {
+                                if (u->call_args[k] == inst->dst) {
+                                    addr_used_by_asm = 1;
+                                    break;
+                                }
+                            }
+                            if (addr_used_by_asm) break;
+                        }
+                    }
                     if (inst->op == IR_ADDR
+                        && !addr_used_by_asm
                         && fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0))
                         continue;
                     if (inst->op == IR_CONST && !inst->is_float && !value_is_ld(fn, inst->dst))
                         continue;
-                    if (inst->op == IR_MUL)
+                    if (inst->op == IR_GADDR) {
+                        const char *gn = inst->call_name;
+                        if (gn && gaddr_is_local_abs(ir, gn))
+                            continue;
+                    }
+                    if (inst->op == IR_MUL || inst->op == IR_SEXT
+                        || inst->op == IR_ZEXT)
+                        continue;
+                    if (inst->op == IR_LOAD_PTR || inst->op == IR_LOAD)
                         continue;
                     if (inst->op == IR_ADD
                         && (fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0)
                             || classify_ptr_addr(fn, ssa_def, alloca_off, inst->dst,
                                                  &dummy_b, &dummy_idx,
                                                  &fold_off, &fold_off) != AF_NONE))
+                        continue;
+                }
+                if ((inst->op == IR_LOAD_PTR || inst->op == IR_LOAD)
+                    && j + 1 < fn->insts.len) {
+                    const IRInst *nx = &fn->insts.data[j + 1];
+                    if (nx->op == IR_SEXT && nx->a == inst->dst
+                        && sext_folds_frame_load(fn, ssa_def, alloca_off,
+                                                 raw_uses, nx, ((void*)0), ((void*)0)))
                         continue;
                 }
             }
@@ -4227,15 +6451,87 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 break;
             }
-            case IR_ADD:
+            case IR_ADD: {
+                IRValue li = -1;
+                int lsc = 0;
+                const char *ln = ((void*)0);
+                if (match_lea_local_gep(ir, fn, ssa_def, inst, &li, &lsc, &ln)) {
+                    int dst_gp = dr >= 0 ? dr : REG_RAX;
+                    int idx_r = li >= 0 ? ensure_index(&out->text, li, ra) : -1;
+                    int gsym = emit_module_find_symbol(out, ln);
+                    if (gsym >= 0 && out->syms[gsym].shndx != 0) {
+                        size_t patch = emit_lea_abs32(
+                            &out->text, dst_gp, idx_r, lsc);
+                        emit_module_add_reloc(out, patch, 11,
+                                              gsym, 0);
+                        if (dr < 0)
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        break;
+                    }
+                }
+            }
             case IR_SUB:
             case IR_BAND:
             case IR_BOR:
             case IR_BXOR:
                 isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 0);
+                if ((inst->op == IR_ADD || inst->op == IR_SUB)
+                    && carry_hi_at[j] >= 0) {
+                    const IRInst *hi = &fn->insts.data[carry_hi_at[j]];
+                    int hdr = gp_home(ra, hi->dst);
+                    if (carry_zero_hi[j]) {
+                        const IRInst *zx = &fn->insts.data[(size_t)carry_hi_at[j] - 1];
+                        IRValue hsrc = (hi->a == zx->dst) ? hi->b : hi->a;
+                        int acc = pick_alu_acc(hdr, -1);
+                        ensure_reg(&out->text, hsrc, acc, ra);
+                        emit_arith_imm_w(&out->text, carry_is_sub[j] ? 3 : 2,
+                                         acc, 0, 8);
+                        finish_gp_dst(&out->text, acc, hdr, hi->dst, ra, 8, 1);
+                    } else {
+                        const IRInst *mid = &fn->insts.data[(size_t)carry_hi_at[j] - 1];
+                        int bhome = gp_home(ra, mid->b);
+                        int acc = pick_alu_acc(hdr, bhome);
+                        ensure_reg(&out->text, mid->a, acc, ra);
+                        int br = bhome >= 0 ? bhome : REG_RCX;
+                        if (bhome < 0) ensure_reg(&out->text, mid->b, br, ra);
+                        emit_arith_rr_w(&out->text, carry_is_sub[j] ? 0x19 : 0x11,
+                                        acc, br, 8);
+                        finish_gp_dst(&out->text, acc, hdr, hi->dst, ra, 8, 1);
+                    }
+                }
                 break;
             case IR_MUL:
-                isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 1);
+                if (mul_hi_at[j] >= 0) {
+                    const IRInst *hi = &fn->insts.data[mul_hi_at[j]];
+                    int lo_dr = gp_home(ra, inst->dst);
+                    int hi_dr = gp_home(ra, hi->dst);
+                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                    ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                    emit_rex_if(&out->text, 1, 0, 0, REG_RCX);
+                    emit_byte(&out->text, 0xF7);
+                    emit_modrm(&out->text, 3, 4, REG_RCX);
+                    if (lo_dr >= 0 && lo_dr != REG_RAX)
+                        emit_mov_rr(&out->text, lo_dr, REG_RAX);
+                    spill_if_needed(&out->text, inst->dst,
+                                    lo_dr >= 0 ? lo_dr : REG_RAX, ra);
+                    if (hi_dr >= 0 && hi_dr != REG_RDX)
+                        emit_mov_rr(&out->text, hi_dr, REG_RDX);
+                    spill_if_needed(&out->text, hi->dst,
+                                    hi_dr >= 0 ? hi_dr : REG_RDX, ra);
+                } else {
+                    isel_arith(&out->text, inst, fn, ssa_def, ra, dr, 1);
+                }
+                break;
+            case IR_UMULH:
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                ensure_reg(&out->text, inst->b, REG_RCX, ra);
+                emit_rex_if(&out->text, 1, 0, 0, REG_RCX);
+                emit_byte(&out->text, 0xF7);
+                emit_modrm(&out->text, 3, 4, REG_RCX);
+                if (dr >= 0 && dr != REG_RDX)
+                    emit_mov_rr(&out->text, dr, REG_RDX);
+                spill_if_needed(&out->text, inst->dst,
+                                dr >= 0 ? dr : REG_RDX, ra);
                 break;
             case IR_DIV:
             case IR_MOD: {
@@ -4360,44 +6656,136 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     ra->reg[inst->dst] >= 0) {
                     break;
                 }
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (dr >= 0) {
-                    if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                    ensure_reg(&out->text, inst->a, dr, ra);
                 } else {
+                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
             }
             case IR_SEXT:
             case IR_ZEXT: {
-                int src_w = inst->imm;
-                ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                if (inst->op == IR_SEXT)
-                    emit_movsx_rr(&out->text, REG_RAX, REG_RAX, src_w);
-                else
-                    emit_movzx_rr(&out->text, REG_RAX, REG_RAX, src_w);
-                if (dr >= 0 && dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
-                spill_if_needed(&out->text, inst->dst,
-                                dr >= 0 ? dr : REG_RAX, ra);
+                int src_w = (int)inst->imm;
+                int target = dr >= 0 ? dr : REG_RAX;
+                int fold_off = 0, fold_w = 0;
+                if (inst->op == IR_SEXT
+                    && sext_folds_frame_load(fn, ssa_def, alloca_off, raw_uses,
+                                             inst, &fold_off, &fold_w)) {
+                    if (fold_w == 4)
+                        emit_movsxd_disp(&out->text, target, REG_RBP, fold_off);
+                    else
+                        emit_load_disp(&out->text, target, REG_RBP, fold_off,
+                                       fold_w, 0);
+                    spill_if_needed(&out->text, inst->dst, target, ra);
+                    break;
+                }
+                int already = mask_nop[j];
+                if ((src_w == 1 || src_w == 2) && inst->a >= 0
+                    && inst->a < fn->next_value_id && ssa_def[inst->a] >= 0) {
+                    const IRInst *ld = &fn->insts.data[ssa_def[inst->a]];
+                    if ((ld->op == IR_LOAD_PTR || ld->op == IR_LOAD)
+                        && ld->width == src_w
+                        && ((inst->op == IR_ZEXT && ld->is_unsigned)
+                            || (inst->op == IR_SEXT && !ld->is_unsigned)))
+                        already = 1;
+                }
+                if (!already && inst->op == IR_SEXT && src_w == 4
+                    && inst->a >= 0 && inst->a < fn->next_value_id) {
+                    IRValue cur = inst->a;
+                    for (int depth = 0; depth < 6 && cur >= 0
+                         && cur < fn->next_value_id && ssa_def[cur] >= 0;
+                         depth++) {
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op == IR_COPY || d->op == IR_ZEXT
+                            || d->op == IR_TRUNC) {
+                            cur = d->a;
+                            continue;
+                        }
+                        if (d->op != IR_BAND) break;
+                        int64_t imm = 0;
+                        int ok = 0;
+                        if (ssa_extended_const(fn, ssa_def, d->b, &imm)) ok = 1;
+                        else if (ssa_extended_const(fn, ssa_def, d->a, &imm))
+                            ok = 1;
+                        if (ok && imm >= 0
+                            && (imm_fits_i32(imm) || imm_fits_bitwise_u32(imm))
+                            && (imm & 0x80000000u) == 0)
+                            already = 1;
+                        break;
+                    }
+                }
+                ensure_reg(&out->text, inst->a, target, ra);
+                if (!already) {
+                    if (inst->op == IR_SEXT)
+                        emit_movsx_rr(&out->text, target, target, src_w);
+                    else
+                        emit_movzx_rr(&out->text, target, target, src_w);
+                }
+                spill_if_needed(&out->text, inst->dst, target, ra);
                 break;
             }
             case IR_TRUNC: {
+                if ((int)inst->imm == inst->width) {
+                    if (ra && inst->a >= 0 && inst->a < ra->num_values &&
+                        inst->dst >= 0 && inst->dst < ra->num_values &&
+                        ra->reg[inst->dst] == ra->reg[inst->a] &&
+                        ra->reg[inst->dst] >= 0)
+                        break;
+                    if (dr >= 0)
+                        ensure_reg(&out->text, inst->a, dr, ra);
+                    else {
+                        ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    }
+                    break;
+                }
+                int trunc_u = inst->is_unsigned;
+                int trunc_nop = mask_nop[j];
+                if (!trunc_u && inst->width == 4 && inst->a >= 0
+                    && inst->a < fn->next_value_id) {
+                    IRValue cur = inst->a;
+                    for (int depth = 0; depth < 6 && cur >= 0
+                         && cur < fn->next_value_id && ssa_def[cur] >= 0;
+                         depth++) {
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op == IR_COPY || d->op == IR_ZEXT) {
+                            cur = d->a;
+                            continue;
+                        }
+                        if (d->op != IR_BAND) break;
+                        int64_t imm = 0;
+                        int ok = 0;
+                        if (ssa_extended_const(fn, ssa_def, d->b, &imm)) ok = 1;
+                        else if (ssa_extended_const(fn, ssa_def, d->a, &imm))
+                            ok = 1;
+                        if (ok && imm >= 0
+                            && (imm_fits_i32(imm) || imm_fits_bitwise_u32(imm))
+                            && (imm & 0x80000000u) == 0) {
+                            trunc_u = 1;
+                            trunc_nop = 1;
+                        }
+                        break;
+                    }
+                }
                 if (ra && inst->a >= 0 && inst->a < ra->num_values &&
                     inst->dst >= 0 && inst->dst < ra->num_values &&
                     ra->reg[inst->dst] == ra->reg[inst->a] &&
                     ra->reg[inst->dst] >= 0) {
-                    mask_to_width(&out->text, ra->reg[inst->dst],
-                                  inst->width, inst->is_unsigned);
+                    if (!trunc_nop)
+                        mask_to_width(&out->text, ra->reg[inst->dst],
+                                      inst->width, trunc_u);
                     break;
                 }
                 if (dr >= 0) {
                     ensure_reg(&out->text, inst->a, dr, ra);
-                    mask_to_width(&out->text, dr, inst->width,
-                                  inst->is_unsigned);
+                    if (!trunc_nop)
+                        mask_to_width(&out->text, dr, inst->width, trunc_u);
                 } else {
                     ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                    mask_to_width(&out->text, REG_RAX, inst->width,
-                                  inst->is_unsigned);
+                    if (!trunc_nop)
+                        mask_to_width(&out->text, REG_RAX, inst->width,
+                                      trunc_u);
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 }
                 break;
@@ -4406,6 +6794,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (value_is_ld(fn, inst->dst) || (inst->a >= 0 && value_is_ld(fn, inst->a))) {
                     emit_ld_load(&out->text, inst->a, ld_off);
                     emit_ld_store(&out->text, inst->dst, ld_off);
+                    break;
+                }
+                if (inst->a >= 0 && inst->a < fn->next_value_id
+                    && alloca_off[inst->a] != 0) {
+                    int off = alloca_off[inst->a];
+                    int w = inst->width > 0 ? inst->width : 8;
+                    int target = dr >= 0 ? dr : REG_RAX;
+                    emit_load_disp(&out->text, target, REG_RBP, off, w,
+                                   inst->is_unsigned);
+                    if (dr < 0)
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                     break;
                 }
                 if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
@@ -4442,6 +6841,29 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         ensure_reg_xmm(&out->text, inst->b, 14, ra_xmm, gp_spill_area);
                         spill_if_needed_xmm(&out->text, inst->a, 14, ra_xmm, gp_spill_area);
                     }
+                    break;
+                }
+                if (inst->a >= 0 && inst->a < fn->next_value_id
+                    && alloca_off[inst->a] != 0 && mem_rmw[j] >= 1
+                    && mem_rmw[j] <= 7) {
+                    emit_arith_imm32_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
+                                          mem_rmw_imm[j], alloca_off[inst->a]);
+                    break;
+                }
+                if (inst->a >= 0 && inst->a < fn->next_value_id
+                    && alloca_off[inst->a] != 0 && mem_rmw[j] >= 10) {
+                    IRValue ov = (IRValue)mem_rmw_imm[j];
+                    ensure_reg(&out->text, ov, REG_RAX, ra);
+                    emit_arith_r32_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
+                                        REG_RAX, alloca_off[inst->a]);
+                    break;
+                }
+                if (inst->a >= 0 && inst->a < fn->next_value_id
+                    && alloca_off[inst->a] != 0) {
+                    int off = alloca_off[inst->a];
+                    int w = inst->width > 0 ? inst->width : 8;
+                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    emit_store_disp(&out->text, REG_RBP, REG_RAX, off, w);
                     break;
                 }
                 int ar = (ra && inst->a >= 0 && inst->a < ra->num_values)
@@ -4502,9 +6924,26 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 else if (out->syms[gsym].shndx == 0
                          && out->syms[gsym].type == 0)
                     out->syms[gsym].type = 6 ;
-                emit_mov_fs0_reg(&out->text, target);
-                size_t patch = emit_add_rip(&out->text, target);
-                emit_module_add_reloc(out, patch, 22, gsym, -4);
+                if (target_current()->os == TOS_WINDOWS) {
+                    int scratch = (target == REG_RAX) ? REG_RDX : REG_RAX;
+                    int isym = emit_module_find_symbol(out, "_tls_index");
+                    if (isym < 0)
+                        isym = emit_module_add_undefined(out, "_tls_index");
+                    size_t patch_idx = emit_load_rip32(&out->text, scratch);
+                    emit_module_add_reloc(out, patch_idx, 2, isym, -4);
+                    emit_mov_gs58_reg(&out->text, target);
+                    emit_load_sib(&out->text, target, target, scratch, 3, 0, 8, 0);
+                    emit_rex_wrb(&out->text, 1, 0, target);
+                    emit_byte(&out->text, 0x81);
+                    emit_modrm(&out->text, 3, 0, target);
+                    size_t patch_off = out->text.len;
+                    emit_int32(&out->text, 0);
+                    emit_module_add_reloc(out, patch_off, 101, gsym, 0);
+                } else {
+                    emit_mov_fs0_reg(&out->text, target);
+                    size_t patch = emit_add_rip(&out->text, target);
+                    emit_module_add_reloc(out, patch, 22, gsym, -4);
+                }
                 if (dr < 0)
                     spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
                 break;
@@ -4523,6 +6962,34 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 emit_byte(&out->text, 0x41);
                 emit_byte(&out->text, 0xFF);
                 emit_byte(&out->text, 0xE3);
+                break;
+            }
+            case IR_BR_TABLE: {
+                int n = inst->call_nargs;
+                if (n <= 0 || !inst->call_args) {
+                    size_t patch = emit_jmp_rel32(&out->text);
+                    size_t after = out->text.len;
+                    do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (patch); patches[num_patches].label = (inst->imm); patches[num_patches].after_off = (after); num_patches++; } while (0);
+                    break;
+                }
+                ensure_reg(&out->text, inst->a, REG_RAX, ra);
+                emit_movzx_rr(&out->text, REG_RAX, REG_RAX, 4);
+                size_t lea_patch = emit_lea_rip(&out->text, REG_RDX);
+                emit_rex_if(&out->text, 1, REG_RAX, REG_RAX, REG_RDX);
+                emit_byte(&out->text, 0x63);
+                emit_modrm_sib_disp(&out->text, REG_RAX, REG_RDX, REG_RAX, 2, 0);
+                emit_add_rr(&out->text, REG_RAX, REG_RDX);
+                emit_byte(&out->text, 0xFF);
+                emit_modrm(&out->text, 3, 4, REG_RAX);
+                while (out->text.len & 3)
+                    emit_byte(&out->text, 0x90);
+                size_t table_off = out->text.len;
+                patch_rel32(&out->text, lea_patch, table_off);
+                for (int k = 0; k < n; k++) {
+                    size_t e = out->text.len;
+                    emit_int32(&out->text, 0);
+                    do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (e); patches[num_patches].label = (inst->call_args[k]); patches[num_patches].after_off = (table_off); num_patches++; } while (0);
+                }
                 break;
             }
             case IR_FRAME_ADDR: {
@@ -4558,6 +7025,34 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 emit_byte(&out->text, 0x83);
                 emit_byte(&out->text, 0xE0);
                 emit_byte(&out->text, 0xF0);
+                if (target_current()->os == TOS_WINDOWS) {
+                    emit_byte(&out->text, 0x49); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xE3);
+                    emit_byte(&out->text, 0x49); emit_byte(&out->text, 0x29);
+                    emit_byte(&out->text, 0xC3);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x3D);
+                    emit_int32(&out->text, 4096);
+                    emit_byte(&out->text, 0x72);
+                    size_t jb_at = out->text.len;
+                    emit_byte(&out->text, 0);
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x89);
+                    emit_byte(&out->text, 0xE1);
+                    size_t probe = out->text.len;
+                    emit_byte(&out->text, 0x48); emit_byte(&out->text, 0x81);
+                    emit_byte(&out->text, 0xE9);
+                    emit_int32(&out->text, 0x1000);
+                    emit_byte(&out->text, 0x80); emit_byte(&out->text, 0x39);
+                    emit_byte(&out->text, 0x00);
+                    emit_byte(&out->text, 0x4C); emit_byte(&out->text, 0x39);
+                    emit_byte(&out->text, 0xD9);
+                    emit_byte(&out->text, 0x77);
+                    {
+                        int rel = (int)probe - (int)(out->text.len + 1);
+                        emit_byte(&out->text, (uint8_t)rel);
+                    }
+                    int skip = (int)out->text.len - (int)jb_at - 1;
+                    out->text.data[jb_at] = (uint8_t)skip;
+                }
                 emit_byte(&out->text, 0x48);
                 emit_byte(&out->text, 0x29);
                 emit_byte(&out->text, 0xC4);
@@ -4607,24 +7102,64 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
                 IRValue af_base = -1, af_idx = -1;
                 int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
+                int af_sole = inst->a < 0 || raw_uses[inst->a] <= 1;
                 int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
                              && ssa_def[inst->a] >= 0
                              && (size_t)ssa_def[inst->a] + 1 == j
-                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
-                if (!folded && af_adj
+                             && af_sole;
+                {
+                    int fp_scalar = value_is_float_class(fn, inst->dst)
+                                    && (inst->width == 4 || inst->width == 8);
+                    int gp_scalar = !value_is_float_class(fn, inst->dst)
+                                    && !value_is_ld(fn, inst->dst)
+                                    && (inst->width == 1 || inst->width == 2
+                                        || inst->width == 4 || inst->width == 8);
+                    if (!folded && (gp_scalar || fp_scalar)) {
+                        if (local_abs_af(ir, fn, ssa_def, alloca_off, inst->a,
+                                         &af_base, &af_idx, &af_sc, &af_disp))
+                            af_kind = AF_SIB;
+                        else {
+                            int k = classify_ptr_addr(fn, ssa_def, alloca_off,
+                                                      inst->a, &af_base, &af_idx,
+                                                      &af_sc, &af_disp);
+                            if (k == AF_RBP_IDX
+                                || (k != AF_NONE && af_adj))
+                                af_kind = k;
+                        }
+                    }
+                }
+                if (af_kind != AF_NONE && af_idx >= 0) {
+                    IRValue inner = af_idx;
+                    int psc = 0;
+                    if (peel_sib_scale(fn, ssa_def, af_idx, &inner, &psc)) {
+                        af_idx = inner;
+                        af_sc = psc;
+                    }
+                }
+                const char *rip_gn = ((void*)0);
+                int rip_sym = -1;
+                if (!folded && af_kind == AF_NONE
                     && !value_is_float_class(fn, inst->dst) && !value_is_ld(fn, inst->dst)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                        || inst->width == 8))
-                    af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
-                                                &af_base, &af_idx, &af_sc, &af_disp);
-                if (!folded && af_kind == AF_NONE)
-                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                        || inst->width == 8)) {
+                    rip_gn = peel_gaddr_name_unique(fn, ssa_def, inst->a);
+                    if (rip_gn && gaddr_is_local_abs(ir, rip_gn)) {
+                        rip_sym = emit_module_find_symbol(out, rip_gn);
+                        if (rip_sym < 0 || out->syms[rip_sym].shndx == 0)
+                            rip_sym = -1;
+                    } else {
+                        rip_gn = ((void*)0);
+                    }
+                }
+                int ptr_r = REG_RCX;
+                if (!folded && af_kind == AF_NONE && rip_sym < 0)
+                    ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->dst)) {
                     if (folded)
                         emit_x87_fldt_disp(&out->text, REG_RBP, ptr_off);
                     else {
                         emit_byte(&out->text, 0xDB);
-                        emit_modrm(&out->text, 0, 5, REG_RCX & 7);
+                        emit_modrm(&out->text, 0, 5, ptr_r & 7);
                     }
                     emit_ld_store(&out->text, inst->dst, ld_off);
                 } else if (value_is_float_class(fn, inst->dst)) {
@@ -4634,12 +7169,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (folded)
                             emit_evex_vmovups_mem(&out->text, dst_xmm, REG_RBP, ptr_off, 0);
                         else
-                            emit_evex_vmovups_via_ptr(&out->text, dst_xmm, REG_RCX, 0);
+                            emit_evex_vmovups_via_ptr(&out->text, dst_xmm, ptr_r, 0);
                     } else if (vw >= 32) {
                         if (folded)
                             emit_vmovups_mem(&out->text, dst_xmm, REG_RBP, ptr_off, 0);
                         else
-                            emit_vmovups_via_ptr(&out->text, dst_xmm, REG_RCX, 0);
+                            emit_vmovups_via_ptr(&out->text, dst_xmm, ptr_r, 0);
                     } else if (vw == 16) {
                         if (folded) {
                             emit_rex_wrb(&out->text, 0, dst_xmm, REG_RBP);
@@ -4647,13 +7182,44 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_byte(&out->text, 0x10);
                             emit_modrm_disp(&out->text, dst_xmm, REG_RBP, ptr_off);
                         } else
-                            emit_movups_load_via_ptr(&out->text, dst_xmm, REG_RCX);
+                            emit_movups_load_via_ptr(&out->text, dst_xmm, ptr_r);
                     } else {
                         int is_float = (inst->width == 4);
                         if (folded)
                             emit_sse_load_disp(&out->text, dst_xmm, REG_RBP, ptr_off, is_float);
-                        else
-                            emit_sse_load_via_ptr(&out->text, dst_xmm, REG_RCX, is_float);
+                        else if (af_kind == AF_RBP_IDX) {
+                            int idx_r = af_idx >= 0
+                                        ? ensure_index(&out->text, af_idx, ra) : -1;
+                            if (af_idx >= 0)
+                                emit_sse_load_sib(&out->text, dst_xmm, REG_RBP,
+                                                  idx_r, af_sc, af_disp, is_float);
+                            else
+                                emit_sse_load_disp(&out->text, dst_xmm, REG_RBP,
+                                                   af_disp, is_float);
+                        } else if (af_kind == AF_SIB) {
+                            const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
+                            int gsym = (gn && gaddr_is_local_abs(ir, gn))
+                                       ? emit_module_find_symbol(out, gn) : -1;
+                            int abs_ok = gsym >= 0
+                                         && out->syms[gsym].shndx != 0;
+                            int idx_r = af_idx >= 0
+                                        ? ensure_index(&out->text, af_idx, ra) : -1;
+                            if (abs_ok) {
+                                size_t patch = emit_sse_load_abs32(
+                                    &out->text, dst_xmm, idx_r, af_sc, is_float);
+                                emit_module_add_reloc(out, patch, 11,
+                                                      gsym, af_disp);
+                            } else {
+                                ensure_reg(&out->text, af_base, REG_RAX, ra);
+                                if (af_idx >= 0)
+                                    emit_sse_load_sib(&out->text, dst_xmm, REG_RAX,
+                                                      idx_r, af_sc, af_disp, is_float);
+                                else
+                                    emit_sse_load_disp(&out->text, dst_xmm, REG_RAX,
+                                                       af_disp, is_float);
+                            }
+                        } else
+                            emit_sse_load_via_ptr(&out->text, dst_xmm, ptr_r, is_float);
                     }
                     if (dr < 0)
                         spill_if_needed_xmm(&out->text, inst->dst, 14,
@@ -4664,26 +7230,46 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_load_disp(&out->text, dst_gp, REG_RBP, ptr_off,
                                        inst->width, inst->is_unsigned);
                     else if (af_kind == AF_RBP_IDX) {
+                        int idx_r = af_idx >= 0
+                                    ? ensure_index(&out->text, af_idx, ra) : -1;
                         if (af_idx >= 0)
-                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                        if (af_idx >= 0)
-                            emit_load_sib(&out->text, dst_gp, REG_RBP, REG_RCX,
+                            emit_load_sib(&out->text, dst_gp, REG_RBP, idx_r,
                                           af_sc, af_disp, inst->width, inst->is_unsigned);
                         else
                             emit_load_disp(&out->text, dst_gp, REG_RBP, af_disp,
                                            inst->width, inst->is_unsigned);
                     } else if (af_kind == AF_SIB) {
-                        if (af_idx >= 0)
-                            ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                        ensure_reg(&out->text, af_base, REG_RAX, ra);
-                        if (af_idx >= 0)
-                            emit_load_sib(&out->text, dst_gp, REG_RAX, REG_RCX,
-                                          af_sc, af_disp, inst->width, inst->is_unsigned);
-                        else
-                            emit_load_disp(&out->text, dst_gp, REG_RAX, af_disp,
-                                           inst->width, inst->is_unsigned);
+                        const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
+                        int gsym = (gn && gaddr_is_local_abs(ir, gn))
+                                   ? emit_module_find_symbol(out, gn) : -1;
+                        int abs_ok = gsym >= 0
+                                     && out->syms[gsym].shndx != 0;
+                        int idx_r = af_idx >= 0
+                                    ? ensure_index(&out->text, af_idx, ra) : -1;
+                        if (abs_ok) {
+                            size_t patch = emit_load_abs32(
+                                &out->text, dst_gp, idx_r, af_sc,
+                                inst->width, inst->is_unsigned);
+                            emit_module_add_reloc(out, patch, 11,
+                                                  gsym, af_disp);
+                        } else {
+                            ensure_reg(&out->text, af_base, REG_RAX, ra);
+                            if (af_idx >= 0)
+                                emit_load_sib(&out->text, dst_gp, REG_RAX,
+                                              idx_r, af_sc, af_disp,
+                                              inst->width, inst->is_unsigned);
+                            else
+                                emit_load_disp(&out->text, dst_gp, REG_RAX,
+                                               af_disp, inst->width,
+                                               inst->is_unsigned);
+                        }
+                    } else if (rip_sym >= 0) {
+                        size_t patch = emit_load_rip_w(&out->text, dst_gp,
+                                                       inst->width, inst->is_unsigned);
+                        emit_module_add_reloc(out, patch, 2,
+                                              rip_sym, -4);
                     } else
-                        emit_load_via_ptr(&out->text, dst_gp, REG_RCX,
+                        emit_load_via_ptr(&out->text, dst_gp, ptr_r,
                                           inst->width, inst->is_unsigned);
                     if (dr < 0)
                         spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
@@ -4695,18 +7281,58 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int folded = fold_ptr_off(fn, ssa_def, alloca_off, inst->a, &ptr_off, 0);
                 IRValue af_base = -1, af_idx = -1;
                 int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
+                int af_sole = inst->a < 0 || raw_uses[inst->a] <= 1;
                 int af_adj = inst->a >= 0 && inst->a < fn->next_value_id
                              && ssa_def[inst->a] >= 0
                              && (size_t)ssa_def[inst->a] + 1 == j
-                             && (inst->a < 0 || raw_uses[inst->a] <= 1);
-                if (!folded && af_adj
+                             && af_sole;
+                {
+                    int fp_scalar = value_is_float_class(fn, inst->b)
+                                    && (inst->width == 4 || inst->width == 8);
+                    int gp_scalar = !value_is_float_class(fn, inst->b)
+                                    && !value_is_ld(fn, inst->b)
+                                    && (inst->width == 1 || inst->width == 2
+                                        || inst->width == 4 || inst->width == 8);
+                    if (!folded && (gp_scalar || fp_scalar)) {
+                        if (local_abs_af(ir, fn, ssa_def, alloca_off, inst->a,
+                                         &af_base, &af_idx, &af_sc, &af_disp))
+                            af_kind = AF_SIB;
+                        else {
+                            int k = classify_ptr_addr(fn, ssa_def, alloca_off,
+                                                      inst->a, &af_base, &af_idx,
+                                                      &af_sc, &af_disp);
+                            if (k == AF_RBP_IDX
+                                || (k != AF_NONE && af_adj))
+                                af_kind = k;
+                        }
+                    }
+                }
+                if (af_kind != AF_NONE && af_idx >= 0) {
+                    IRValue inner = af_idx;
+                    int psc = 0;
+                    if (peel_sib_scale(fn, ssa_def, af_idx, &inner, &psc)) {
+                        af_idx = inner;
+                        af_sc = psc;
+                    }
+                }
+                const char *rip_gn = ((void*)0);
+                int rip_sym = -1;
+                if (!folded && af_kind == AF_NONE
                     && !value_is_float_class(fn, inst->b) && !value_is_ld(fn, inst->b)
                     && (inst->width == 1 || inst->width == 2 || inst->width == 4
-                        || inst->width == 8))
-                    af_kind = classify_ptr_addr(fn, ssa_def, alloca_off, inst->a,
-                                                &af_base, &af_idx, &af_sc, &af_disp);
-                if (!folded && af_kind == AF_NONE)
-                    ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                        || inst->width == 8)) {
+                    rip_gn = peel_gaddr_name_unique(fn, ssa_def, inst->a);
+                    if (rip_gn && gaddr_is_local_abs(ir, rip_gn)) {
+                        rip_sym = emit_module_find_symbol(out, rip_gn);
+                        if (rip_sym < 0 || out->syms[rip_sym].shndx == 0)
+                            rip_sym = -1;
+                    } else {
+                        rip_gn = ((void*)0);
+                    }
+                }
+                int ptr_r = REG_RCX;
+                if (!folded && af_kind == AF_NONE && rip_sym < 0)
+                    ptr_r = ensure_ptr(&out->text, inst->a, ra);
                 if (value_is_ld(fn, inst->b)) {
                     emit_ld_load(&out->text, inst->b, ld_off);
                     if (folded)
@@ -4723,12 +7349,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (folded)
                             emit_evex_vmovups_mem(&out->text, 14, REG_RBP, ptr_off, 1);
                         else
-                            emit_evex_vmovups_via_ptr(&out->text, 14, REG_RCX, 1);
+                            emit_evex_vmovups_via_ptr(&out->text, 14, ptr_r, 1);
                     } else if (inst->width >= 32) {
                         if (folded)
                             emit_vmovups_mem(&out->text, 14, REG_RBP, ptr_off, 1);
                         else
-                            emit_vmovups_via_ptr(&out->text, 14, REG_RCX, 1);
+                            emit_vmovups_via_ptr(&out->text, 14, ptr_r, 1);
                     } else if (inst->width == 16) {
                         if (folded) {
                             emit_rex_wrb(&out->text, 0, 14, REG_RBP);
@@ -4736,44 +7362,198 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_byte(&out->text, 0x11);
                             emit_modrm_disp(&out->text, 14, REG_RBP, ptr_off);
                         } else
-                            emit_movups_store_via_ptr(&out->text, REG_RCX, 14);
+                            emit_movups_store_via_ptr(&out->text, ptr_r, 14);
                     } else {
                         int is_float = (inst->width == 4);
                         if (folded)
                             emit_sse_store_disp(&out->text, REG_RBP, 14,
                                                 ptr_off, is_float);
-                        else
-                            emit_sse_store_via_ptr(&out->text, REG_RCX, 14,
+                        else if (af_kind == AF_RBP_IDX) {
+                            int idx_r = af_idx >= 0
+                                        ? ensure_index(&out->text, af_idx, ra) : -1;
+                            if (af_idx >= 0)
+                                emit_sse_store_sib(&out->text, REG_RBP, idx_r,
+                                                   af_sc, af_disp, 14,
+                                                   is_float);
+                            else
+                                emit_sse_store_disp(&out->text, REG_RBP,
+                                                    14, af_disp, is_float);
+                        } else if (af_kind == AF_SIB) {
+                            const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
+                            int gsym = (gn && gaddr_is_local_abs(ir, gn))
+                                       ? emit_module_find_symbol(out, gn) : -1;
+                            int abs_ok = gsym >= 0
+                                         && out->syms[gsym].shndx != 0;
+                            int idx_r = af_idx >= 0
+                                        ? ensure_index(&out->text, af_idx, ra) : -1;
+                            if (abs_ok) {
+                                size_t patch = emit_sse_store_abs32(
+                                    &out->text, 14, idx_r, af_sc,
+                                    is_float);
+                                emit_module_add_reloc(out, patch, 11,
+                                                      gsym, af_disp);
+                            } else {
+                                ensure_reg(&out->text, af_base, REG_RAX, ra);
+                                if (af_idx >= 0)
+                                    emit_sse_store_sib(&out->text, REG_RAX, idx_r,
+                                                       af_sc, af_disp, 14,
+                                                       is_float);
+                                else
+                                    emit_sse_store_disp(&out->text, REG_RAX,
+                                                        14, af_disp,
+                                                        is_float);
+                            }
+                        } else
+                            emit_sse_store_via_ptr(&out->text, ptr_r, 14,
                                                    is_float);
                     }
                 } else if (af_kind == AF_RBP_IDX) {
+                    int idx_r = af_idx >= 0
+                                ? ensure_index(&out->text, af_idx, ra) : -1;
+                    int bhome = gp_home(ra, inst->b);
+                    int val_r;
+                    if (bhome >= 0 && bhome != REG_RSP && bhome != idx_r)
+                        val_r = bhome;
+                    else {
+                        val_r = REG_RAX;
+                        if (idx_r == val_r) val_r = REG_RDX;
+                        ensure_reg(&out->text, inst->b, val_r, ra);
+                    }
                     if (af_idx >= 0)
-                        ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
-                    if (af_idx >= 0)
-                        emit_store_sib(&out->text, REG_RBP, REG_RCX, af_sc, af_disp,
-                                       REG_RAX, inst->width);
+                        emit_store_sib(&out->text, REG_RBP, idx_r, af_sc, af_disp,
+                                       val_r, inst->width);
                     else
-                        emit_store_disp(&out->text, REG_RBP, REG_RAX, af_disp,
+                        emit_store_disp(&out->text, REG_RBP, val_r, af_disp,
                                         inst->width);
                 } else if (af_kind == AF_SIB) {
-                    if (af_idx >= 0)
-                        ensure_reg(&out->text, af_idx, REG_RCX, ra);
-                    ensure_reg(&out->text, inst->b, REG_RDX, ra);
-                    ensure_reg(&out->text, af_base, REG_RAX, ra);
-                    if (af_idx >= 0)
-                        emit_store_sib(&out->text, REG_RAX, REG_RCX, af_sc, af_disp,
-                                       REG_RDX, inst->width);
-                    else
-                        emit_store_disp(&out->text, REG_RAX, REG_RDX, af_disp,
-                                        inst->width);
-                } else {
+                    const char *gn = peel_gaddr_name(fn, ssa_def, af_base);
+                    int gsym = (gn && gaddr_is_local_abs(ir, gn))
+                               ? emit_module_find_symbol(out, gn) : -1;
+                    int abs_ok = gsym >= 0
+                                 && out->syms[gsym].shndx != 0;
+                    int idx_r = af_idx >= 0
+                                ? ensure_index(&out->text, af_idx, ra) : -1;
+                    if (abs_ok && store_imm[j]
+                        && (inst->width == 1 || inst->width == 4)) {
+                        int64_t immv = 0;
+                        IRValue cur = inst->b;
+                        for (int depth = 0; depth < 4; depth++) {
+                            if (ssa_const_imm(fn, ssa_def, cur, &immv)) break;
+                            if (cur < 0 || cur >= fn->next_value_id
+                                || ssa_def[cur] < 0) break;
+                            const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                            if (d->op != IR_ZEXT && d->op != IR_SEXT
+                                && d->op != IR_TRUNC && d->op != IR_COPY)
+                                break;
+                            cur = d->a;
+                        }
+                        size_t patch = emit_store_imm_abs32(
+                            &out->text, (int32_t)immv, idx_r, af_sc,
+                            inst->width);
+                        emit_module_add_reloc(out, patch, 11,
+                                              gsym, af_disp);
+                    } else {
+                        int val_r = REG_RDX;
+                        if (idx_r == val_r) val_r = REG_RAX;
+                        ensure_reg(&out->text, inst->b, val_r, ra);
+                        if (abs_ok) {
+                            size_t patch = emit_store_abs32(
+                                &out->text, val_r, idx_r, af_sc, inst->width);
+                            emit_module_add_reloc(out, patch, 11,
+                                                  gsym, af_disp);
+                        } else {
+                            ensure_reg(&out->text, af_base, REG_RAX, ra);
+                            if (af_idx >= 0)
+                                emit_store_sib(&out->text, REG_RAX, idx_r, af_sc,
+                                               af_disp, val_r, inst->width);
+                            else
+                                emit_store_disp(&out->text, REG_RAX, val_r,
+                                                af_disp, inst->width);
+                        }
+                    }
+                } else if (folded && mem_rmw[j] >= 1 && mem_rmw[j] <= 7) {
+                    emit_arith_imm32_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
+                                          mem_rmw_imm[j], ptr_off);
+                } else if (folded && mem_rmw[j] >= 10) {
+                    IRValue ov = (IRValue)mem_rmw_imm[j];
+                    ensure_reg(&out->text, ov, REG_RAX, ra);
+                    emit_arith_r32_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
+                                        REG_RAX, ptr_off);
+                } else if (mem_rmw_gname[j] && mem_rmw[j] >= 1
+                           && mem_rmw[j] <= 7) {
+                    int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
+                    if (gsym >= 0 && out->syms[gsym].shndx != 0) {
+                        int32_t imm = mem_rmw_imm[j];
+                        size_t patch = emit_arith_imm32_rip(
+                            &out->text, mem_rmw[j] - 1, imm);
+                        int addend = (imm >= -128 && imm <= 127) ? -5 : -8;
+                        emit_module_add_reloc(out, patch, 2,
+                                              gsym, addend);
+                    }
+                } else if (mem_rmw_gname[j] && mem_rmw[j] >= 10) {
+                    int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
+                    IRValue ov = (IRValue)mem_rmw_imm[j];
+                    ensure_reg(&out->text, ov, REG_RAX, ra);
+                    if (gsym >= 0 && out->syms[gsym].shndx != 0) {
+                        size_t patch = emit_arith_r32_rip(
+                            &out->text, mem_rmw[j] - 10, REG_RAX);
+                        emit_module_add_reloc(out, patch, 2,
+                                              gsym, -4);
+                    }
+                } else if (folded && store_imm[j]) {
+                    int64_t immv = 0;
+                    IRValue cur = inst->b;
+                    for (int depth = 0; depth < 4; depth++) {
+                        if (ssa_const_imm(fn, ssa_def, cur, &immv)) break;
+                        if (cur < 0 || cur >= fn->next_value_id
+                            || ssa_def[cur] < 0) break;
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op != IR_ZEXT && d->op != IR_SEXT
+                            && d->op != IR_TRUNC && d->op != IR_COPY)
+                            break;
+                        cur = d->a;
+                    }
+                    emit_store_imm_disp(&out->text, REG_RBP, (int32_t)immv,
+                                        ptr_off, inst->width);
+                } else if (rip_sym >= 0 && store_imm[j]
+                           && (inst->width == 1 || inst->width == 4)) {
+                    int64_t immv = 0;
+                    IRValue cur = inst->b;
+                    for (int depth = 0; depth < 4; depth++) {
+                        if (ssa_const_imm(fn, ssa_def, cur, &immv)) break;
+                        if (cur < 0 || cur >= fn->next_value_id
+                            || ssa_def[cur] < 0) break;
+                        const IRInst *d = &fn->insts.data[ssa_def[cur]];
+                        if (d->op != IR_ZEXT && d->op != IR_SEXT
+                            && d->op != IR_TRUNC && d->op != IR_COPY)
+                            break;
+                        cur = d->a;
+                    }
+                    size_t patch = emit_store_imm_rip(&out->text, (int32_t)immv,
+                                                      inst->width);
+                    int addend = (inst->width == 1) ? -5 : -8;
+                    emit_module_add_reloc(out, patch, 2,
+                                          rip_sym, addend);
+                } else if (rip_sym >= 0) {
                     ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    size_t patch = emit_store_rip_w(&out->text, REG_RAX,
+                                                    inst->width);
+                    emit_module_add_reloc(out, patch, 2,
+                                          rip_sym, -4);
+                } else {
+                    int bhome = gp_home(ra, inst->b);
+                    int val_r;
+                    if (folded && bhome >= 0 && bhome != REG_RSP)
+                        val_r = bhome;
+                    else {
+                        val_r = (ptr_r == REG_RAX) ? REG_RDX : REG_RAX;
+                        ensure_reg(&out->text, inst->b, val_r, ra);
+                    }
                     if (folded)
-                        emit_store_disp(&out->text, REG_RBP, REG_RAX, ptr_off,
+                        emit_store_disp(&out->text, REG_RBP, val_r, ptr_off,
                                         inst->width);
                     else
-                        emit_store_via_ptr(&out->text, REG_RCX, REG_RAX, inst->width);
+                        emit_store_via_ptr(&out->text, ptr_r, val_r, inst->width);
                 }
                 break;
             }
@@ -4881,6 +7661,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
             case IR_BR: {
+                size_t nbr = j + 1;
+                while (nbr < fn->insts.len
+                       && fn->insts.data[nbr].op == IR_DBG_VALUE)
+                    nbr++;
+                if (nbr < fn->insts.len
+                    && fn->insts.data[nbr].op == IR_LABEL
+                    && fn->insts.data[nbr].imm == inst->imm)
+                    break;
+                if (inst->imm >= 0 && inst->imm < nlabels
+                    && label_off[inst->imm] != (size_t)-1
+                    && emit_jmp_short_to(&out->text, label_off[inst->imm]))
+                    break;
                 size_t patch = emit_jmp_rel32(&out->text);
                 size_t after = out->text.len;
                 do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (patch); patches[num_patches].label = (inst->imm); patches[num_patches].after_off = (after); num_patches++; } while (0);
@@ -4894,29 +7686,117 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     int64_t cimmv = 0;
                     int cfb = ssa_const_imm(fn, ssa_def, cmp->b, &cimmv)
                               && imm_fits_i32(cimmv);
-                    ensure_reg(&out->text, cmp->a, REG_RAX, ra);
-                    if (!cfb)
-                        ensure_reg(&out->text, cmp->b, REG_RCX, ra);
+                    if (!cfb && cmp->b >= 0 && cmp->b < fn->next_value_id
+                        && ssa_def[cmp->b] >= 0 && fused_skip[ssa_def[cmp->b]]) {
+                        const IRInst *x = &fn->insts.data[ssa_def[cmp->b]];
+                        if ((x->op == IR_ZEXT || x->op == IR_TRUNC
+                             || x->op == IR_COPY)
+                            && ssa_const_imm(fn, ssa_def, x->a, &cimmv)
+                            && cimmv >= 0 && imm_fits_i32(cimmv))
+                            cfb = 1;
+                    }
+                    int a_off = 0, a_mem = 0;
+                    if (cfb && cmp->a >= 0
+                        && cmp->a < fn->next_value_id
+                        && raw_uses[cmp->a] == 1 && ssa_def[cmp->a] >= 0
+                        && fused_skip[ssa_def[cmp->a]]) {
+                        const IRInst *ld = &fn->insts.data[ssa_def[cmp->a]];
+                        if ((ld->op == IR_LOAD || ld->op == IR_LOAD_PTR)
+                            && ld->width == 4
+                            && fold_ptr_off(fn, ssa_def, alloca_off, ld->a,
+                                            &a_off, 0))
+                            a_mem = 1;
+                    }
+                    int ah = gp_home(ra, cmp->a);
+                    int ar = (ah >= 0) ? ah : REG_RAX;
+                    if (!a_mem) {
+                        ensure_reg(&out->text, cmp->a, ar, ra);
+                        if (!cfb)
+                            ensure_reg(&out->text, cmp->b, REG_RCX, ra);
+                    }
                     cc = (uint8_t)(0x80 | (ir_cmp_to_setcc(cmp->op, cmp->is_unsigned)
                                             & 0x0F));
                     if (fused_inv_at[j])
                         cc ^= 1;
-                    if (cfb && cimmv == 0)
-                        emit_test_r_w(&out->text, REG_RAX, cwidth);
+                    if (a_mem)
+                        emit_arith_imm32_disp(&out->text, 7, REG_RBP,
+                                              (int32_t)cimmv, a_off);
+                    else if (cfb && cimmv == 0)
+                        emit_test_r_w(&out->text, ar, cwidth);
                     else if (cfb)
-                        emit_cmp_imm_w(&out->text, REG_RAX, (int32_t)cimmv, cwidth);
+                        emit_cmp_imm_w(&out->text, ar, (int32_t)cimmv, cwidth);
                     else
-                        emit_cmp_rr_w(&out->text, REG_RAX, REG_RCX, cwidth);
+                        emit_cmp_rr_w(&out->text, ar, REG_RCX, cwidth);
                 } else {
-                    ensure_reg(&out->text, inst->a, REG_RAX, ra);
-                    emit_test_rr(&out->text, REG_RAX);
+                    int cwidth = 8, c_off = 0, c_mem = 0;
+                    if (inst->a >= 0 && inst->a < fn->next_value_id
+                        && ssa_def[inst->a] >= 0) {
+                        const IRInst *cd = &fn->insts.data[ssa_def[inst->a]];
+                        if (cd->width > 0) cwidth = cd->width;
+                        if (raw_uses[inst->a] == 1 && fused_skip[ssa_def[inst->a]]
+                            && (cd->op == IR_LOAD || cd->op == IR_LOAD_PTR)
+                            && cd->width == 4
+                            && fold_ptr_off(fn, ssa_def, alloca_off, cd->a,
+                                            &c_off, 0))
+                            c_mem = 1;
+                    }
+                    if (c_mem) {
+                        emit_arith_imm32_disp(&out->text, 7, REG_RBP, 0, c_off);
+                    } else {
+                        int ch = gp_home(ra, inst->a);
+                        int tr = (ch >= 0) ? ch : REG_RAX;
+                        ensure_reg(&out->text, inst->a, tr, ra);
+                        emit_test_r_w(&out->text, tr, cwidth);
+                    }
                 }
-                size_t p1 = emit_jcc_rel32(&out->text, cc);
-                size_t a1 = out->text.len;
-                do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (p1); patches[num_patches].label = (inst->imm); patches[num_patches].after_off = (a1); num_patches++; } while (0);
-                size_t p2 = emit_jmp_rel32(&out->text);
-                size_t a2 = out->text.len;
-                do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (p2); patches[num_patches].label = (inst->b); patches[num_patches].after_off = (a2); num_patches++; } while (0);
+                size_t ncbr = j + 1;
+                while (ncbr < fn->insts.len
+                       && fn->insts.data[ncbr].op == IR_DBG_VALUE)
+                    ncbr++;
+                int true_fall = (ncbr < fn->insts.len
+                                 && fn->insts.data[ncbr].op == IR_LABEL
+                                 && fn->insts.data[ncbr].imm == inst->imm);
+                int false_fall = (ncbr < fn->insts.len
+                                  && fn->insts.data[ncbr].op == IR_LABEL
+                                  && (int)fn->insts.data[ncbr].imm == inst->b);
+                if (true_fall) {
+                    int tlab = (int)inst->b;
+                    if (tlab >= 0 && tlab < nlabels
+                        && label_off[tlab] != (size_t)-1
+                        && emit_jcc_short_to(&out->text, (uint8_t)(cc ^ 1),
+                                             label_off[tlab]))
+                        break;
+                    size_t p1 = emit_jcc_rel32(&out->text, (uint8_t)(cc ^ 1));
+                    size_t a1 = out->text.len;
+                    do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (p1); patches[num_patches].label = (inst->b); patches[num_patches].after_off = (a1); num_patches++; } while (0);
+                } else if (false_fall) {
+                    int tlab = (int)inst->imm;
+                    if (tlab >= 0 && tlab < nlabels
+                        && label_off[tlab] != (size_t)-1
+                        && emit_jcc_short_to(&out->text, cc, label_off[tlab]))
+                        break;
+                    size_t p1 = emit_jcc_rel32(&out->text, cc);
+                    size_t a1 = out->text.len;
+                    do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (p1); patches[num_patches].label = (inst->imm); patches[num_patches].after_off = (a1); num_patches++; } while (0);
+                } else {
+                    int tlab = (int)inst->imm;
+                    if (!(tlab >= 0 && tlab < nlabels
+                          && label_off[tlab] != (size_t)-1
+                          && emit_jcc_short_to(&out->text, cc,
+                                               label_off[tlab]))) {
+                        size_t p1 = emit_jcc_rel32(&out->text, cc);
+                        size_t a1 = out->text.len;
+                        do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (p1); patches[num_patches].label = (inst->imm); patches[num_patches].after_off = (a1); num_patches++; } while (0);
+                    }
+                    int flab = (int)inst->b;
+                    if (flab >= 0 && flab < nlabels
+                        && label_off[flab] != (size_t)-1
+                        && emit_jmp_short_to(&out->text, label_off[flab]))
+                        break;
+                    size_t p2 = emit_jmp_rel32(&out->text);
+                    size_t a2 = out->text.len;
+                    do { if (num_patches >= cap_patches) { cap_patches = cap_patches ? cap_patches * 2 : 8; patches = xrealloc(patches, cap_patches * sizeof(Patch)); } patches[num_patches].patch_off = (p2); patches[num_patches].label = (inst->b); patches[num_patches].after_off = (a2); num_patches++; } while (0);
+                }
                 break;
             }
             case IR_PARAM:
@@ -5051,15 +7931,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     emit_push_r(&out->text, REG_RAX);
                     emit_pop_r(&out->text, REG_RDX);
-                    emit_pop_r(&out->text, REG_RSI);
+                    emit_pop_r(&out->text, REG_R10);
                     emit_pop_r(&out->text, REG_RCX);
-                    emit_load_via_ptr(&out->text, REG_RAX, REG_RSI, w, 1);
+                    emit_load_via_ptr(&out->text, REG_RAX, REG_R10, w, 1);
                     emit_push_r(&out->text, REG_RAX);
                     emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
                     emit_pop_r(&out->text, REG_R8);
                     emit_cmp_rr_w(&out->text, REG_RAX, REG_R8, w >= 8 ? 8 : 4);
                     size_t je = emit_jcc_rel32(&out->text, 0x84);
-                    emit_store_via_ptr(&out->text, REG_RSI, REG_RAX, w);
+                    emit_store_via_ptr(&out->text, REG_R10, REG_RAX, w);
                     emit_xor_rr(&out->text, REG_RAX);
                     size_t jmp = emit_jmp_rel32(&out->text);
                     patch_rel32(&out->text, je, out->text.len);
@@ -5086,10 +7966,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     ensure_reg(&out->text, inst->call_args[2], REG_RAX, ra);
                     emit_push_r(&out->text, REG_RAX);
                     emit_pop_r(&out->text, REG_RDX);
-                    emit_pop_r(&out->text, REG_RSI);
+                    emit_pop_r(&out->text, REG_R10);
                     emit_pop_r(&out->text, REG_RCX);
                     emit_load_via_ptr(&out->text, REG_RAX, REG_RCX, w, 1);
-                    emit_cmp_rr_w(&out->text, REG_RAX, REG_RSI, w >= 8 ? 8 : 4);
+                    emit_cmp_rr_w(&out->text, REG_RAX, REG_R10, w >= 8 ? 8 : 4);
                     size_t je = emit_jcc_rel32(&out->text, 0x84);
                     size_t jmp = emit_jmp_rel32(&out->text);
                     patch_rel32(&out->text, je, out->text.len);
@@ -5117,8 +7997,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     for (int k = nargs - 1; k >= 0; k--) {
                         emit_pop_r(&out->text, SYS_ARG_REGS[k]);
                     }
-                    emit_byte(&out->text, 0x0F);
-                    emit_byte(&out->text, 0x05);
+                    if (target_current()->os == TOS_WINDOWS) {
+                        size_t patch = emit_call_rel32(&out->text);
+                        int esym = emit_module_find_symbol(out, "__fakecc_win_syscall");
+                        if (esym < 0)
+                            esym = emit_module_add_undefined(out, "__fakecc_win_syscall");
+                        emit_module_add_reloc(out, patch, 4, esym, -4);
+                    } else {
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0x05);
+                    }
                     if (dr >= 0) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                     } else {
@@ -5127,6 +8015,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 if (inst->call_name && runtime.strcmp(inst->call_name, "__clone") == 0) {
+                    if (target_current()->os == TOS_WINDOWS) {
+                        emit_mov_imm32(&out->text, REG_RAX, -1);
+                        if (dr >= 0) {
+                            if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                        }
+                        break;
+                    }
                     static const int CLONE_ARG_REGS[6] = {
                         REG_RDI,
                         REG_RSI,
@@ -5294,20 +8191,39 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 if (inst->call_name && runtime.strcmp(inst->call_name, "__builtin_return") == 0) {
-                    emit_builtin_return(&out->text, inst, ra, stack_size, cs_used,
+                    emit_builtin_return(&out->text, inst, ra, prologue_stack, cs_used,
                                         fn->has_dyn_alloca);
                     break;
                 }
                 if (inst->call_name && runtime.strcmp(inst->call_name, "va_start") == 0) {
+                    int ap_frame = 0;
+                    if (inst->call_nargs >= 1)
+                        fold_ptr_off(fn, ssa_def, alloca_off, inst->call_args[0],
+                                     &ap_frame, 0);
                     emit_va_start(&out->text, inst, ra, va_gp_offset,
-                                  va_fp_offset, va_overflow_off, -frame_down);
+                                  va_fp_offset, va_overflow_off, -frame_down,
+                                  ap_frame);
                     break;
                 }
                 if (inst->call_name && runtime.strcmp(inst->call_name, "va_end") == 0) {
                     break;
                 }
                 if (inst->call_name && runtime.strcmp(inst->call_name, "va_arg") == 0) {
-                    emit_va_arg(&out->text, fn, inst, ra, ra_xmm, gp_spill_area, ld_off);
+                    int ap_frame = 0;
+                    if (inst->call_nargs >= 1)
+                        fold_ptr_off(fn, ssa_def, alloca_off, inst->call_args[0],
+                                     &ap_frame, 0);
+                    emit_va_arg(&out->text, fn, inst, ra, ra_xmm, gp_spill_area,
+                                ld_off, ap_frame);
+                    break;
+                }
+                if (inst->call_name &&
+                    (runtime.strcmp(inst->call_name, "unreachable") == 0 ||
+                     runtime.strcmp(inst->call_name, "__builtin_unreachable") == 0 ||
+                     runtime.strcmp(inst->call_name, "trap") == 0 ||
+                     runtime.strcmp(inst->call_name, "__builtin_trap") == 0)) {
+                    emit_byte(&out->text, 0x0F);
+                    emit_byte(&out->text, 0x0B);
                     break;
                 }
                 int nargs = inst->call_nargs;
@@ -5333,36 +8249,52 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         runtime.exit(1);
                     }
                 }
+                int is_win = (target_current()->os == TOS_WINDOWS);
                 int max_al = 16;
-                for (int k = 0; k < nargs; k++) {
-                    int is_ld = value_is_ld(fn, inst->call_args[k]);
-                    int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
-                    int vecb = is_float ? value_vec_bytes(fn, inst->call_args[k]) : 0;
-                    unsigned char flags = (inst->call_arg_on_stack && inst->call_arg_on_stack[k])
-                                          ? inst->call_arg_on_stack[k] : 0;
-                    int on_stack = flags & 1;
-                    int force_stack = on_stack || is_ld;
-                    int pal = flags_stack_align(flags, vecb, is_ld ? 16 : 0);
-                    int blob_n = call_arg_blob_bytes(inst, k);
-                    arg_slot[k] = -1;
-                    arg_nslots[k] = 0;
-                    if (force_stack) {
-                        int nslots = blob_n ? (blob_n + 7) / 8 : vec_nslots(vecb, is_ld);
-                        if (nslots < 1) nslots = 1;
-                        stack_idx_align(&n_stack, pal);
-                        if (pal > max_al) max_al = pal;
-                        target_reg[k] = -1;
-                        target_is_xmm[k] = 0;
-                        arg_slot[k] = n_stack;
-                        arg_nslots[k] = nslots;
-                        n_stack += nslots;
-                    } else if (is_float) {
-                        if (n_xmm < 8) {
-                            target_reg[k] = n_xmm;
-                            target_is_xmm[k] = 1;
-                            n_xmm++;
+                int win_end_slot = 4;
+                if (is_win) {
+                    int slot = 4;
+                    for (int k = 0; k < nargs; k++) {
+                        int is_float = value_is_float_class(fn, inst->call_args[k]);
+                        int vecb = is_float ? value_vec_bytes(fn, inst->call_args[k]) : 0;
+                        if (k < 4) {
+                            if (is_float) {
+                                target_reg[k] = k;
+                                target_is_xmm[k] = 1;
+                            } else {
+                                target_reg[k] = WIN64_ARG_REGS[k];
+                                target_is_xmm[k] = 0;
+                            }
+                            arg_slot[k] = -1;
+                            arg_nslots[k] = 0;
                         } else {
-                            int nslots = vec_nslots(vecb, 0);
+                            int nslots = win64_stack_slots(is_float, vecb);
+                            if (nslots > 1)
+                                stack_idx_align(&slot, nslots * 8);
+                            target_reg[k] = -1;
+                            target_is_xmm[k] = 0;
+                            arg_slot[k] = slot;
+                            arg_nslots[k] = nslots;
+                            slot += nslots;
+                        }
+                    }
+                    win_end_slot = slot;
+                } else {
+                    for (int k = 0; k < nargs; k++) {
+                        int is_ld = value_is_ld(fn, inst->call_args[k]);
+                        int is_float = !is_ld && value_is_float_class(fn, inst->call_args[k]);
+                        int vecb = is_float ? value_vec_bytes(fn, inst->call_args[k]) : 0;
+                        unsigned char flags = (inst->call_arg_on_stack && inst->call_arg_on_stack[k])
+                                              ? inst->call_arg_on_stack[k] : 0;
+                        int on_stack = flags & 1;
+                        int force_stack = on_stack || is_ld;
+                        int pal = flags_stack_align(flags, vecb, is_ld ? 16 : 0);
+                        int blob_n = call_arg_blob_bytes(inst, k);
+                        arg_slot[k] = -1;
+                        arg_nslots[k] = 0;
+                        if (force_stack) {
+                            int nslots = blob_n ? (blob_n + 7) / 8 : vec_nslots(vecb, is_ld);
+                            if (nslots < 1) nslots = 1;
                             stack_idx_align(&n_stack, pal);
                             if (pal > max_al) max_al = pal;
                             target_reg[k] = -1;
@@ -5370,24 +8302,73 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             arg_slot[k] = n_stack;
                             arg_nslots[k] = nslots;
                             n_stack += nslots;
-                        }
-                    } else {
-                        if (n_gp < 6) {
-                            target_reg[k] = SYSV_ARG_REGS[n_gp++];
-                            target_is_xmm[k] = 0;
+                        } else if (is_float) {
+                            if (n_xmm < 8) {
+                                target_reg[k] = n_xmm;
+                                target_is_xmm[k] = 1;
+                                n_xmm++;
+                            } else {
+                                int nslots = vec_nslots(vecb, 0);
+                                stack_idx_align(&n_stack, pal);
+                                if (pal > max_al) max_al = pal;
+                                target_reg[k] = -1;
+                                target_is_xmm[k] = 0;
+                                arg_slot[k] = n_stack;
+                                arg_nslots[k] = nslots;
+                                n_stack += nslots;
+                            }
                         } else {
-                            target_reg[k] = -1;
-                            target_is_xmm[k] = 0;
-                            arg_slot[k] = n_stack;
-                            arg_nslots[k] = 1;
-                            n_stack++;
+                            if (n_gp < 6) {
+                                target_reg[k] = SYSV_ARG_REGS[n_gp++];
+                                target_is_xmm[k] = 0;
+                            } else {
+                                target_reg[k] = -1;
+                                target_is_xmm[k] = 0;
+                                arg_slot[k] = n_stack;
+                                arg_nslots[k] = 1;
+                                n_stack++;
+                            }
                         }
                     }
                 }
                 int need_pad = 0;
-                int aligned_call = (max_al >= 32 && n_stack > 0);
+                int aligned_call = (!is_win && max_al >= 32 && n_stack > 0);
                 int stack_bytes = n_stack * 8;
-                if (aligned_call) {
+                int win_total_bytes = 0;
+                if (is_win) {
+                    int total_slots = win_end_slot;
+                    need_pad = (total_slots & 1);
+                    win_total_bytes = (total_slots + need_pad) * 8;
+                    emit_sub_rsp_imm32(&out->text, win_total_bytes);
+                    for (int k = 4; k < nargs; k++) {
+                        int off = 8 * arg_slot[k];
+                        int vecb = value_is_float_class(fn, inst->call_args[k])
+                            ? value_vec_bytes(fn, inst->call_args[k]) : 0;
+                        if (vecb >= 16) {
+                            ensure_reg_xmm(&out->text, inst->call_args[k],
+                                           14, ra_xmm, gp_spill_area);
+                            if (vecb >= 64)
+                                emit_evex_vmovups_mem(&out->text, 14,
+                                                      REG_RSP, off, 1);
+                            else if (vecb >= 32)
+                                emit_vmovups_mem(&out->text, 14,
+                                                 REG_RSP, off, 1);
+                            else
+                                emit_movups_store_disp(&out->text, REG_RSP,
+                                                       14, off);
+                        } else if (value_is_float_class(fn, inst->call_args[k])) {
+                            int w = value_width_of(fn, inst->call_args[k]);
+                            ensure_reg_xmm(&out->text, inst->call_args[k],
+                                           14, ra_xmm, gp_spill_area);
+                            emit_sse_store_disp(&out->text, REG_RSP,
+                                                14, off, w == 4);
+                        } else {
+                            ensure_reg(&out->text, inst->call_args[k],
+                                       REG_RAX, ra);
+                            emit_store_rsp_off(&out->text, REG_RAX, off);
+                        }
+                    }
+                } else if (aligned_call) {
                     stack_idx_align(&n_stack, max_al);
                     stack_bytes = n_stack * 8;
                     int slack = max_al;
@@ -5574,8 +8555,33 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     runtime.free(node_val);
                     runtime.free(node_home);
                 }
-                emit_byte(&out->text, 0xB0 | REG_RAX);
-                emit_byte(&out->text, (uint8_t)n_xmm);
+                if (is_win && inst->call_is_variadic) {
+                    for (int k = 0; k < nargs && k < 4; k++) {
+                        if (target_reg[k] >= 0 && target_is_xmm[k]) {
+                            int w = value_width_of(fn, inst->call_args[k]);
+                            if (w == 4)
+                                emit_movd_gp_xmm(&out->text, WIN64_ARG_REGS[k], target_reg[k]);
+                            else
+                                emit_movq_gp_xmm(&out->text, WIN64_ARG_REGS[k], target_reg[k]);
+                        }
+                    }
+                }
+                if (!is_win) {
+                    int need_al = 1;
+                    if (inst->call_name) {
+                        for (size_t fi = 0; fi < ir->functions.len; fi++) {
+                            const IRFunction *cf = &ir->functions.data[fi];
+                            if (cf->name && runtime.strcmp(cf->name, inst->call_name) == 0) {
+                                need_al = cf->is_variadic;
+                                break;
+                            }
+                        }
+                    }
+                    if (need_al) {
+                        emit_byte(&out->text, 0xB0 | REG_RAX);
+                        emit_byte(&out->text, (uint8_t)n_xmm);
+                    }
+                }
                 if (inst->call_name) {
                     size_t poff = emit_call_rel32(&out->text);
                     size_t aft = out->text.len;
@@ -5696,7 +8702,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         debug_call_site_release(&cs);
                     }
                 }
-                if (aligned_call) {
+                if (is_win) {
+                    if (win_total_bytes > 0) emit_add_rsp_imm32(&out->text, win_total_bytes);
+                } else if (aligned_call) {
                     if (fn->has_dyn_alloca)
                         emit_load_spill(&out->text, REG_RSP,
                                         aligned_call_saved_sp_rbp_off);
@@ -5712,6 +8720,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (inst->imm != 16) {
                         emit_add_imm32(&out->text, REG_RCX, 16);
                         emit_x87_fstptRCX(&out->text);
+                    }
+                } else if (!inst->x87_pair && inst->dst < 0 && inst->a >= 0
+                           && inst->imm >= 1 && inst->imm <= 2) {
+                    int slot_off = 0;
+                    if (fold_ptr_off(fn, ssa_def, alloca_off, inst->a,
+                                     &slot_off, 0)) {
+                        emit_store_disp(&out->text, REG_RBP, REG_RAX,
+                                        slot_off, 8);
+                        if (inst->imm > 1)
+                            emit_store_disp(&out->text, REG_RBP, REG_RDX,
+                                            slot_off + 8, 8);
+                    } else {
+                        ensure_reg(&out->text, inst->a, REG_RCX, ra);
+                        emit_store_base_off(&out->text, REG_RCX, REG_RAX, 0);
+                        if (inst->imm > 1)
+                            emit_store_base_off(&out->text, REG_RCX, REG_RDX, 8);
                     }
                 } else {
                 int ret_lo_f = (inst->dst >= 0) && value_is_float_class(fn, inst->dst);
@@ -5776,7 +8800,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 runtime.free(target_is_xmm);
                 break;
             }
+            case IR_ASM: {
+                emit_ir_asm(&out->text, out, fn, inst, ra, ssa_def, alloca_off);
+                break;
+            }
             case IR_RETURN: {
+                if (fn->is_naked) break;
                 if (inst->x87_pair && inst->a >= 0) {
                     ensure_reg(&out->text, inst->a, REG_RCX, ra);
                     if (inst->imm == 16) {
@@ -5820,7 +8849,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     else
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 }
-                emit_epilogue(&out->text, stack_size, cs_used, fn->has_dyn_alloca);
+                do { if (fn->is_naked) emit_byte(&out->text, 0xC3); else emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca); } while (0);
                 break;
             }
             case IR_FADD:
@@ -5842,10 +8871,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     break;
                 }
                 int is_float = (inst->width == 4);
-                ensure_reg_xmm(&out->text, inst->a, 14, ra_xmm,
-                               gp_spill_area);
-                ensure_reg_xmm(&out->text, inst->b, 15, ra_xmm,
-                               gp_spill_area);
+                int acc = (dr >= 0) ? dr : 14;
                 int op;
                 switch (inst->op) {
                 case IR_FADD: op = 0x58; break;
@@ -5853,12 +8879,35 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 case IR_FMUL: op = 0x59; break;
                 default: op = 0x5E; break;
                 }
-                emit_sse_arith(&out->text, op, 14, 15,
-                               is_float);
-                if (dr >= 0 && dr != 14)
-                    emit_sse_mov_rr(&out->text, dr, 14);
-                spill_if_needed_xmm(&out->text, inst->dst, 14,
-                                    ra_xmm, gp_spill_area);
+                int br = (ra_xmm && inst->b >= 0 && inst->b < ra_xmm->num_values)
+                         ? ra_xmm->reg[inst->b] : -1;
+                int mem_off = 0, use_mem = 0;
+                if (br < 0 && ra_xmm && inst->b >= 0
+                    && inst->b < ra_xmm->num_values
+                    && ra_xmm->spill_slot[inst->b] >= 0) {
+                    mem_off = spill_offset_xmm(ra_xmm->spill_slot[inst->b],
+                                               gp_spill_area);
+                    use_mem = 1;
+                }
+                if (use_mem) {
+                    ensure_reg_xmm(&out->text, inst->a, acc, ra_xmm,
+                                   gp_spill_area);
+                    emit_sse_arith_disp(&out->text, op, acc, REG_RBP, mem_off,
+                                        is_float);
+                } else {
+                    int bsrc = 15;
+                    if (br >= 0 && br != acc) bsrc = br;
+                    ensure_reg_xmm(&out->text, inst->b, bsrc, ra_xmm,
+                                   gp_spill_area);
+                    ensure_reg_xmm(&out->text, inst->a, acc, ra_xmm,
+                                   gp_spill_area);
+                    emit_sse_arith(&out->text, op, acc, bsrc, is_float);
+                }
+                if (dr < 0)
+                    spill_if_needed_xmm(&out->text, inst->dst, acc, ra_xmm,
+                                        gp_spill_area);
+                else if (dr != acc)
+                    emit_sse_mov_rr(&out->text, dr, acc);
                 break;
             }
             case IR_FCMP: {
@@ -6142,11 +9191,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             needs_ret = 1;
         } else {
             IROpcode last = fn->insts.data[fn->insts.len - 1].op;
-            if (last != IR_RETURN && last != IR_BR && last != IR_CBR)
+            if (last != IR_RETURN && last != IR_BR && last != IR_CBR
+                && last != IR_BR_TABLE && last != IR_JMP_PTR
+                && !(fn->is_naked && last == IR_ASM))
                 needs_ret = 1;
         }
-        if (needs_ret)
-            emit_epilogue(&out->text, stack_size, cs_used, fn->has_dyn_alloca);
+        if (needs_ret && !fn->is_naked)
+            emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca);
         if (want_debug && dbg_func_idx >= 0) {
             size_t fn_end_pc = out->text.len;
             emit_module_dbg_func_end(out, dbg_func_idx, fn_end_pc,
@@ -6270,14 +9321,34 @@ int dreg;
         runtime.free(arrive_reg);
         runtime.free(arrive_is_xmm);
         runtime.free(stack_off);
+        codegen_clear_def_count();
         runtime.free(ssa_def);
         runtime.free(skip_body);
+        runtime.free(store_imm);
+        runtime.free(mask_nop);
+        runtime.free(mem_rmw);
+        runtime.free(mem_rmw_imm);
+        runtime.free(mem_rmw_gname);
         runtime.free(param_home_off);
         runtime.free(needed);
+        runtime.free(carry_zero_hi);
+        runtime.free(mul_hi_at);
         size_t fn_size = out->text.len - start_offset;
         uint8_t binding = fn->is_static ? 0 : 1 ;
         emit_module_add_symbol(out, fn->name, binding, 2 ,
                                (uint16_t)1, start_offset, fn_size);
+        if (target_current()->os == TOS_WINDOWS && fn_size > 0) {
+            EmitWinUnwind wu;
+            runtime.memset(&wu, 0, sizeof wu);
+            wu.begin = start_offset;
+            wu.end = start_offset + fn_size;
+            wu.after_push_rbp = after_push_rbp_pc;
+            wu.after_set_fp = after_mov_rbp_pc;
+            wu.after_prolog = after_sub_rsp_pc;
+            wu.stack_alloc = (uint32_t)(stack_size > 0 ? stack_size : 0);
+            runtime.memcpy(wu.pushed, win_pushed, sizeof wu.pushed);
+            emit_module_add_win_unwind(out, &wu);
+        }
         if (fn->is_constructor) {
             int fsym = emit_module_find_symbol(out, fn->name);
             size_t slot = out->init_array.len;

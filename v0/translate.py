@@ -610,10 +610,10 @@ RUNTIME_FUNCS = frozenset({
     "abort", "atoi", "atol", "calloc", "chmod", "exit", "fclose", "fflush",
     "fileno", "fopen", "fprintf", "fputc", "fputs", "fread", "free", "fseek",
     "ftell", "fwrite", "getenv", "isalnum", "isalpha", "isdigit", "isspace",
-    "isxdigit", "malloc", "memcmp", "memcpy", "memmove", "memset", "mkdir",
+    "isxdigit", "tolower", "toupper", "isprint", "malloc", "memcmp", "memcpy", "memmove", "memset", "mkdir",
     "perror", "printf", "putchar", "puts", "qsort", "realloc", "remove",
     "rename", "snprintf", "sprintf", "tmpnam",
-    "strcmp", "strchr", "strcpy", "strdup", "strerror", "strlen", "strncmp",
+    "strcmp", "strchr", "strcat", "strcpy", "strdup", "strerror", "strlen", "strncmp",
     "strncpy", "strrchr", "strstr", "strtod", "strtof", "strtold", "strtol",
     "strtoll", "strtoul", "strtoull", "vfprintf", "vsnprintf", "vsprintf",
 })

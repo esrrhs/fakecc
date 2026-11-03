@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -67,6 +68,28 @@ struct EmitSymbol {
     size_t size;
     uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
+struct EmitComdat {
+    char *sect_name;
+    uint8_t selection;
+    char *symbol;
+    char *assoc_name;
+    uint8_t keep;
+};typedef struct EmitComdat EmitComdat;
+struct EmitSpan {
+    uint16_t kind;
+    size_t off;
+    size_t len;
+    int comdat;
+};typedef struct EmitSpan EmitSpan;
+struct EmitWinUnwind {
+    size_t begin;
+    size_t end;
+    size_t after_push_rbp;
+    size_t after_set_fp;
+    size_t after_prolog;
+    uint32_t stack_alloc;
+    int8_t pushed[8];
+};typedef struct EmitWinUnwind EmitWinUnwind;
 struct EmitReloc {
     size_t offset;
     uint32_t type;
@@ -194,6 +217,8 @@ struct EmitModule {
     Buffer fini_array;
     size_t fini_array_align;
     int *fini_prio;
+    Buffer tls_callbacks;
+    size_t tls_callbacks_align;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -219,6 +244,24 @@ struct EmitModule {
     DebugVar *dbg_globals;
     size_t num_dbg_globals;
     size_t cap_dbg_globals;
+    Buffer pdata;
+    Buffer xdata;
+    Buffer drectve;
+    EmitComdat *comdats;
+    size_t num_comdats;
+    size_t cap_comdats;
+    EmitSpan *spans;
+    size_t num_spans;
+    size_t cap_spans;
+    EmitReloc *pdata_relocs;
+    size_t num_pdata_relocs;
+    size_t cap_pdata_relocs;
+    EmitReloc *xdata_relocs;
+    size_t num_xdata_relocs;
+    size_t cap_xdata_relocs;
+    EmitWinUnwind *win_unwinds;
+    size_t num_win_unwinds;
+    size_t cap_win_unwinds;
 };typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
@@ -235,6 +278,16 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
 void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
 void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+void emit_module_add_win_unwind(EmitModule *m, const EmitWinUnwind *u);
+void emit_module_add_comdat(EmitModule *m, const char *sect_name,
+                            uint8_t selection, const char *symbol,
+                            const char *assoc_name);
+void emit_module_add_span(EmitModule *m, uint16_t kind, size_t off,
+                          size_t len, int comdat);
+void emit_module_add_pdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
+void emit_module_add_xdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
 int emit_is_darwin_import(const char *name);
 struct EmitAuxLib {
     char *install_name;
@@ -260,12 +313,17 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
+void link_set_image_base(uint64_t base);
+uint64_t link_image_base(void);
+int link_kernel_multiboot(const char **obj_paths, size_t npaths,
+                          const char *out_path);
 typedef int IRValue;
 enum IROpcode {
     IR_CONST,
     IR_ADD,
     IR_SUB,
     IR_MUL,
+    IR_UMULH,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -308,6 +366,7 @@ enum IROpcode {
     IR_LABEL,
     IR_BR,
     IR_CBR,
+    IR_BR_TABLE,
     IR_PARAM,
     IR_CALL,
     IR_RETURN,
@@ -326,6 +385,7 @@ enum IROpcode {
     IR_STACK_RESTORE,
     IR_LONGJMP,
     IR_DBG_VALUE,
+    IR_ASM,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -339,6 +399,7 @@ struct IRInst {
     char *call_name;
     IRValue *call_args;
     int call_nargs;
+    int call_is_variadic;
     IRValue call_callee;
     int width;
     int is_unsigned;
@@ -351,6 +412,8 @@ struct IRInst {
     int *call_arg_nbytes;
     int alloca_bytes;
     int is_volatile;
+    char **asm_constraints;
+    char *asm_clobbers;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -422,6 +485,7 @@ struct IRFunction {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
     int has_dyn_alloca;
     int needs_apply_args;
     int needs_apply;
@@ -628,8 +692,6 @@ struct Type {
     unsigned is_decimal : 1;
     unsigned is_long_double : 1;
 };
-struct FIn { int src; int dst; int spill; int isd; int stack; int done; };
-typedef struct FIn FIn;
 static inline Type type_make_int(long long width, int is_unsigned) {
     Type t; t.kind = TY_INT; t.width = width; t.is_unsigned = is_unsigned;
     t.is_const = 0; t.is_volatile = 0; t.is_restrict = 0; t.is_bool = 0;
@@ -693,6 +755,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -881,7 +944,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -908,6 +976,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -923,6 +1001,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -967,6 +1055,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -1089,7 +1178,6 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
-
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug);
 enum {
     A64_EQ = 0, A64_NE = 1, A64_CS = 2, A64_CC = 3,
@@ -1157,6 +1245,7 @@ void a64_lsl_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_lsr_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_asr_imm(A64Asm *a, int rd, int rn, unsigned amt, int is64);
 void a64_mul(A64Asm *a, int rd, int rn, int rm, int is64);
+void a64_umulh(A64Asm *a, int rd, int rn, int rm);
 void a64_msub(A64Asm *a, int rd, int rn, int rm, int ra, int is64);
 void a64_udiv(A64Asm *a, int rd, int rn, int rm, int is64);
 void a64_sdiv(A64Asm *a, int rd, int rn, int rm, int is64);
@@ -1344,7 +1433,6 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
-
 enum A64GpReg {
     A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
     A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,
@@ -1369,7 +1457,6 @@ enum A64VecReg {
     A64_V_NONE = -1,
 };typedef enum A64VecReg A64VecReg;
 const RaRegClasses *ra_classes_arm64(void);
-
 enum TargetArch {
     TARGET_ARCH_UNKNOWN = 0,
     TARGET_ARCH_X86_64 = 1,
@@ -1379,11 +1466,13 @@ enum TargetOS {
     TOS_UNKNOWN = 0,
     TOS_LINUX = 1,
     TOS_MACOS = 2,
+    TOS_WINDOWS = 3,
 };typedef enum TargetOS TargetOS;
 enum TargetObjFmt {
     TARGET_OBJFMT_UNKNOWN = 0,
     TARGET_OBJFMT_ELF = 1,
     TARGET_OBJFMT_MACHO = 2,
+    TARGET_OBJFMT_PE = 3,
 };typedef enum TargetObjFmt TargetObjFmt;
 struct TargetDesc {
     TargetArch arch;
@@ -1401,6 +1490,7 @@ const TargetDesc *target_default(void);
 const TargetDesc *target_parse(const char *triple);
 const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
+const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
 typedef struct FILE FILE;
 typedef long fpos_t;
@@ -1500,6 +1590,8 @@ static void note_page_reloc(C64 *c, uint32_t at, int gidx, const char *name,
     c->gfix[c->ngfix].bind = -1;
     c->ngfix++;
 }
+struct FIn { int src; int dst; int spill; int isd; int stack; int done; };
+typedef struct FIn FIn;
 static size_t c64_bind_slot(C64 *c, const char *name) {
     for (size_t i = 0; i < c->nbind; i++)
         if (runtime.strcmp(c->bind_name[i], name) == 0) return i;
@@ -4739,6 +4831,16 @@ static void emit_call(C64 *c, const IRInst *s) {
             a64_fmov_gp(a, A64_X16, A64_V0 + i, 0, vw(c, hv[i]) == 8);
             place_from(c, hv[i], A64_X16);
         }
+    } else if (s->dst < 0 && s->a >= 0 && !s->x87_pair
+               && s->imm >= 1 && s->imm <= 2) {
+        int p = load_ptrv(c, s->a, -1);
+        if (p == A64_X0 || p == A64_X1) {
+            a64_mov_reg(a, A64_X16, p, 1);
+            p = A64_X16;
+        }
+        a64_str64(a, A64_X0, p, 0);
+        if (s->imm > 1)
+            a64_str64(a, A64_X1, p, 8);
     } else if (s->dst >= 0 && vec16_val(c, s->dst)) {
         int h = fp_home(c, s->dst);
         if (h < 0) commit_q(c, s->dst, A64_V0);
@@ -4998,6 +5100,9 @@ static void emit_binop(C64 *c, const IRInst *s) {
         break;
     case IR_MUL:
         a64_mul(a, d, ra, rb, is64);
+        break;
+    case IR_UMULH:
+        a64_umulh(a, d, ra, rb);
         break;
     case IR_BAND:
         a64_and_reg(a, d, ra, rb, is64);
@@ -5398,7 +5503,7 @@ static void emit_function(C64 *c, int fi) {
                     int is64; int done;
                     int is_blob; };typedef struct PMove PMove;
     PMove *mv = xmalloc((size_t)(nparams > 0 ? nparams : 1) * sizeof(PMove));
-    FIn fin[16];
+    FIn *fin = xmalloc((size_t)(nparams > 0 ? nparams : 1) * sizeof(FIn));
     int nfin = 0;
     int gp_idx = 0, fp_idx = 0, stack_arg_idx = 0;
     for (int p = 0; p < nparams; p++) {
@@ -5441,9 +5546,9 @@ static void emit_function(C64 *c, int fi) {
             }
             mv[p].done = 1;
             mv[p].src_reg = -1;
-            mv[p].src_vec = -1;
+            mv[p].src_vec = from_stack ? -1 : srcv;
             mv[p].dst_reg = -1;
-            mv[p].src_mem = -1;
+            mv[p].src_mem = from_stack ? srcv : -1;
             if (param_is_used(fn, s->dst)) {
                 int dh = fp_home(c, s->dst);
                 fin[nfin].src = srcv;
@@ -5462,9 +5567,9 @@ static void emit_function(C64 *c, int fi) {
             int srcv = from_stack ? save_total + 8 * stack_arg_idx++ : fp_idx++;
             mv[p].done = 1;
             mv[p].src_reg = -1;
-            mv[p].src_vec = -1;
+            mv[p].src_vec = from_stack ? -1 : srcv;
             mv[p].dst_reg = -1;
-            mv[p].src_mem = -1;
+            mv[p].src_mem = from_stack ? srcv : -1;
             if (param_is_used(fn, s->dst)) {
                 int dh = fp_home(c, s->dst);
                 fin[nfin].src = srcv;
@@ -5630,6 +5735,7 @@ static void emit_function(C64 *c, int fi) {
         }
     }
     runtime.free(mv);
+    runtime.free(fin);
     c->vararg_off = save_total + 8 * stack_arg_idx;
     int epilog = a64_new_label(a);
     c->epilog_label = epilog;
@@ -5770,7 +5876,8 @@ static void emit_function(C64 *c, int fi) {
             commit(c, s->dst, d);
             break;
         }
-        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_UMULH:
+        case IR_DIV: case IR_MOD:
         case IR_BAND: case IR_BOR: case IR_BXOR: case IR_SHL: case IR_SHR:
         case IR_ROL:
         case IR_EQ: case IR_NE: case IR_LT: case IR_LE: case IR_GT:
@@ -5906,6 +6013,17 @@ static void emit_function(C64 *c, int fi) {
             a64_br_reg(a, r);
             break;
         }
+        case IR_BR_TABLE: {
+            int idx = load_op(c, s->a, -1);
+            int n = s->call_nargs;
+            for (int k = 0; k < n; k++) {
+                emit_mov_imm_w(a, A64_X16, k, 1);
+                a64_cmp_reg(a, idx, A64_X16, 1);
+                a64_bcond(a, A64_EQ, vlabels_get(c, s->call_args[k]));
+            }
+            a64_b(a, vlabels_get(c, (int)s->imm));
+            break;
+        }
         case IR_LADDR: {
             int d = dst_reg(c, s->dst);
             int lab = vlabels_get(c, (int)s->imm);
@@ -5921,6 +6039,8 @@ static void emit_function(C64 *c, int fi) {
             commit(c, s->dst, d);
             break;
         }
+        case IR_ASM:
+            break;
         case IR_CALL:
             emit_call(c, s);
             break;
