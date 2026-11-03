@@ -66,6 +66,7 @@ add_library(fakecc_core
     src/target.c
     src/a64.c
     src/codegen.c
+    src/iasm.c
     src/cg64.c
     src/debug.c
     src/emit.c

@@ -134,6 +134,7 @@ static int g_parsed_hidden = 0;
 static int g_parsed_used = 0;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
+static int g_parsed_naked = 0;
 static int g_parsed_constructor = 0;
 static int g_parsed_destructor = 0;
 static int g_parsed_ctor_prio = 65535;
@@ -366,6 +367,10 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                 continue;
             } else if (strcmp(name, "no_instrument_function") == 0 || strcmp(name, "__no_instrument_function__") == 0) {
                 g_parsed_no_instrument = 1;
+                advance(p);
+                continue;
+            } else if (strcmp(name, "naked") == 0 || strcmp(name, "__naked__") == 0) {
+                g_parsed_naked = 1;
                 advance(p);
                 continue;
             } else if (strcmp(name, "constructor") == 0 || strcmp(name, "__constructor__") == 0) {
@@ -4545,22 +4550,30 @@ static Stmt parse_stmt_impl(Parser *p) {
                           strcmp(peek(p)->text, "__asm") == 0)) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
+        int is_volatile = 0;
         while (!fakecc_had_error() && (peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_CONST ||
                peek(p)->kind == TK_KW_GOTO ||
                (peek(p)->kind == TK_IDENT && (strcmp(peek(p)->text, "__volatile__") == 0 ||
                                               strcmp(peek(p)->text, "__volatile") == 0 ||
                                               strcmp(peek(p)->text, "goto") == 0 ||
                                               strcmp(peek(p)->text, "__inline__") == 0)))) {
+            if (peek(p)->kind == TK_KW_VOLATILE ||
+                (peek(p)->kind == TK_IDENT &&
+                 (strcmp(peek(p)->text, "__volatile__") == 0 ||
+                  strcmp(peek(p)->text, "__volatile") == 0)))
+                is_volatile = 1;
             advance(p);
         }
         Stmt s;
         memset(&s, 0, sizeof(s));
-        s.kind = ST_BLOCK;
         s.loc = loc;
-        stmt_array_init(&s.u.block);
         if (peek(p)->kind == TK_LPAREN) {
             advance(p);
-            /* Parse asm template string(s) */
+            /* Concatenate template string literals. */
+            size_t tcap = 64, tlen = 0;
+            char *tmpl = malloc(tcap);
+            if (!tmpl) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            tmpl[0] = 0;
             int is_empty_template = 1;
             while (!fakecc_had_error() && peek(p)->kind == TK_STRING_LITERAL) {
                 const char *src = peek(p)->text;
@@ -4570,6 +4583,14 @@ static Stmt parse_stmt_impl(Parser *p) {
                 for (size_t i = 0; i < slen; i++) {
                     if (!isspace((unsigned char)src[i])) { is_empty_template = 0; break; }
                 }
+                if (tlen + slen + 1 > tcap) {
+                    tcap = (tlen + slen + 1) * 2;
+                    tmpl = realloc(tmpl, tcap);
+                    if (!tmpl) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+                }
+                memcpy(tmpl + tlen, src, slen);
+                tlen += slen;
+                tmpl[tlen] = 0;
                 advance(p);
             }
             Expr *outputs[16];
@@ -4578,13 +4599,15 @@ static Stmt parse_stmt_impl(Parser *p) {
             Expr *inputs[16];
             char *in_constr[16];
             int num_inputs = 0;
+            char *clobbers[32];
+            int num_clobbers = 0;
             memset(outputs, 0, sizeof(outputs));
             memset(out_constr, 0, sizeof(out_constr));
             memset(inputs, 0, sizeof(inputs));
             memset(in_constr, 0, sizeof(in_constr));
+            memset(clobbers, 0, sizeof(clobbers));
             if (peek(p)->kind == TK_COLON) {
-                advance(p); /* consume ':' */
-                /* Outputs */
+                advance(p); /* outputs */
                 while (!fakecc_had_error() && peek(p)->kind != TK_COLON && peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) {
                     char *c_str = NULL;
                     if (peek(p)->kind == TK_STRING_LITERAL) {
@@ -4608,13 +4631,14 @@ static Stmt parse_stmt_impl(Parser *p) {
                             expr_free(e);
                             free(c_str);
                         }
+                    } else {
+                        free(c_str);
                     }
                     if (peek(p)->kind == TK_COMMA) advance(p);
                     else break;
                 }
                 if (peek(p)->kind == TK_COLON) {
-                    advance(p); /* consume ':' */
-                    /* Inputs */
+                    advance(p); /* inputs */
                     while (!fakecc_had_error() && peek(p)->kind != TK_COLON && peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) {
                         char *c_str = NULL;
                         if (peek(p)->kind == TK_STRING_LITERAL) {
@@ -4638,13 +4662,37 @@ static Stmt parse_stmt_impl(Parser *p) {
                                 expr_free(e);
                                 free(c_str);
                             }
+                        } else {
+                            free(c_str);
                         }
                         if (peek(p)->kind == TK_COMMA) advance(p);
                         else break;
                     }
+                    if (peek(p)->kind == TK_COLON) {
+                        advance(p); /* clobbers */
+                        while (!fakecc_had_error() && peek(p)->kind != TK_COLON && peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) {
+                            if (peek(p)->kind == TK_STRING_LITERAL) {
+                                const char *src = peek(p)->text;
+                                size_t slen = strlen(src);
+                                if (slen >= 1 && src[0] == '"') { src++; slen--; }
+                                if (slen >= 1 && src[slen-1] == '"') slen--;
+                                if (num_clobbers < 32) {
+                                    clobbers[num_clobbers] = malloc(slen + 1);
+                                    memcpy(clobbers[num_clobbers], src, slen);
+                                    clobbers[num_clobbers][slen] = 0;
+                                    num_clobbers++;
+                                }
+                                advance(p);
+                            } else {
+                                advance(p);
+                            }
+                            if (peek(p)->kind == TK_COMMA) advance(p);
+                            else break;
+                        }
+                    }
                 }
             }
-            /* Skip remaining clobbers / labels until matching RPAREN */
+            /* Consume trailing goto-labels / closing paren. */
             int depth = 1;
             while (!fakecc_had_error() && depth > 0 && peek(p)->kind != TK_EOF) {
                 if (peek(p)->kind == TK_LPAREN) depth++;
@@ -4654,7 +4702,12 @@ static Stmt parse_stmt_impl(Parser *p) {
                 }
                 advance(p);
             }
+
             if (is_empty_template) {
+                /* Historical empty-template lowering: operand matching as
+                 * assignments / side-effect evaluation. */
+                s.kind = ST_BLOCK;
+                stmt_array_init(&s.u.block);
                 for (int oi = 0; oi < num_outputs; oi++) {
                     int match_idx = -1;
                     char match_char = (char)('0' + oi);
@@ -4678,31 +4731,81 @@ static Stmt parse_stmt_impl(Parser *p) {
                         stmt_array_push(&s.u.block, es);
                     }
                 }
-            }
-            for (int oi = 0; oi < num_outputs; oi++) {
-                if (outputs[oi]) {
-                    Stmt es;
-                    memset(&es, 0, sizeof(es));
-                    es.kind = ST_EXPR;
-                    es.loc = loc;
-                    es.u.expr = outputs[oi];
-                    outputs[oi] = NULL;
-                    stmt_array_push(&s.u.block, es);
+                for (int oi = 0; oi < num_outputs; oi++) {
+                    if (outputs[oi]) {
+                        Stmt es;
+                        memset(&es, 0, sizeof(es));
+                        es.kind = ST_EXPR;
+                        es.loc = loc;
+                        es.u.expr = outputs[oi];
+                        outputs[oi] = NULL;
+                        stmt_array_push(&s.u.block, es);
+                    }
+                    free(out_constr[oi]);
                 }
-                free(out_constr[oi]);
-            }
-            for (int ii = 0; ii < num_inputs; ii++) {
-                if (inputs[ii]) {
-                    Stmt es;
-                    memset(&es, 0, sizeof(es));
-                    es.kind = ST_EXPR;
-                    es.loc = loc;
-                    es.u.expr = inputs[ii];
-                    inputs[ii] = NULL;
-                    stmt_array_push(&s.u.block, es);
+                for (int ii = 0; ii < num_inputs; ii++) {
+                    if (inputs[ii]) {
+                        Stmt es;
+                        memset(&es, 0, sizeof(es));
+                        es.kind = ST_EXPR;
+                        es.loc = loc;
+                        es.u.expr = inputs[ii];
+                        inputs[ii] = NULL;
+                        stmt_array_push(&s.u.block, es);
+                    }
+                    free(in_constr[ii]);
                 }
-                free(in_constr[ii]);
+                for (int ci = 0; ci < num_clobbers; ci++) free(clobbers[ci]);
+                free(tmpl);
+            } else {
+                /* Real GNU asm: keep template + operands for codegen. */
+                s.kind = ST_ASM;
+                s.u.asm_s.template = tmpl;
+                s.u.asm_s.is_volatile = is_volatile;
+                s.u.asm_s.num_outputs = num_outputs;
+                s.u.asm_s.num_inputs = num_inputs;
+                s.u.asm_s.num_clobbers = num_clobbers;
+                s.u.asm_s.outputs = NULL;
+                s.u.asm_s.inputs = NULL;
+                s.u.asm_s.clobbers = NULL;
+                if (num_outputs > 0) {
+                    s.u.asm_s.outputs = calloc((size_t)num_outputs, sizeof(AsmOperand));
+                    for (int oi = 0; oi < num_outputs; oi++) {
+                        s.u.asm_s.outputs[oi].constraint = out_constr[oi];
+                        s.u.asm_s.outputs[oi].expr = outputs[oi];
+                        outputs[oi] = NULL;
+                        out_constr[oi] = NULL;
+                    }
+                }
+                if (num_inputs > 0) {
+                    s.u.asm_s.inputs = calloc((size_t)num_inputs, sizeof(AsmOperand));
+                    for (int ii = 0; ii < num_inputs; ii++) {
+                        s.u.asm_s.inputs[ii].constraint = in_constr[ii];
+                        s.u.asm_s.inputs[ii].expr = inputs[ii];
+                        inputs[ii] = NULL;
+                        in_constr[ii] = NULL;
+                    }
+                }
+                if (num_clobbers > 0) {
+                    s.u.asm_s.clobbers = calloc((size_t)num_clobbers, sizeof(char *));
+                    for (int ci = 0; ci < num_clobbers; ci++) {
+                        s.u.asm_s.clobbers[ci] = clobbers[ci];
+                        clobbers[ci] = NULL;
+                    }
+                }
+                for (int oi = 0; oi < num_outputs; oi++) {
+                    free(out_constr[oi]);
+                    if (outputs[oi]) expr_free(outputs[oi]);
+                }
+                for (int ii = 0; ii < num_inputs; ii++) {
+                    free(in_constr[ii]);
+                    if (inputs[ii]) expr_free(inputs[ii]);
+                }
+                for (int ci = 0; ci < num_clobbers; ci++) free(clobbers[ci]);
             }
+        } else {
+            s.kind = ST_BLOCK;
+            stmt_array_init(&s.u.block);
         }
         if (peek(p)->kind == TK_SEMICOLON) advance(p);
         return s;
@@ -4914,6 +5017,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.align = 0;
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
+    fn.is_naked = g_parsed_naked;
+    g_parsed_naked = 0;
     fn.is_constructor = g_parsed_constructor;
     fn.is_destructor = g_parsed_destructor;
     fn.ctor_prio = g_parsed_ctor_prio;
@@ -5109,6 +5214,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
     if (g_parsed_no_instrument) {
         fn.no_instrument = 1;
         g_parsed_no_instrument = 0;
+    }
+    if (g_parsed_naked) {
+        fn.is_naked = 1;
+        g_parsed_naked = 0;
     }
     if (g_parsed_constructor) {
         fn.is_constructor = 1;

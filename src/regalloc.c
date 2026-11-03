@@ -376,8 +376,8 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
             if (inst->d >= 0 && inst->d < nv) liv_add_use(&liv[inst->d], (int)i);
         }
 
-        /* IR_CALL: each call_args[k] is a use. */
-        if (inst->op == IR_CALL) {
+        /* IR_CALL / IR_ASM: each call_args[k] is a use. */
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
             for (int k = 0; k < inst->call_nargs; k++) {
                 IRValue av = inst->call_args[k];
                 if (av >= 0 && av < nv) liv_add_use(&liv[av], (int)i);
@@ -572,7 +572,7 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                     !bs_test(&def_b[bi], inst->d))
                     bs_set(&use_b[bi], inst->d);
             }
-            if (inst->op == IR_CALL) {
+            if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < use_b[bi].nv &&
@@ -710,7 +710,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
 
-            if (inst->op == IR_CALL) {
+            if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 BS_FOREACH(&live, over) {
                     if ((int)over != inst->dst && (int)over != inst->b &&
                         (int)over != inst->c && (int)over != inst->d &&
@@ -754,7 +754,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                     value_in_class(fn, inst->d, float_class, cls->exclude_16byte_ld))
                     bs_set(&live, inst->d);
             }
-            if (inst->op == IR_CALL) {
+            if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&
@@ -878,7 +878,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                     value_in_class(fn, inst->d, float_class, cls->exclude_16byte_ld))
                     bs_set(&live, inst->d);
             }
-            if (inst->op == IR_CALL) {
+            if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&

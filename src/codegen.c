@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "fakecc/iasm.h"
 
 /* ================================================================== */
 /* x86-64 machine-code emission primitives                             */
@@ -4050,10 +4051,11 @@ static void mark_inst_uses_needed(const IRInst *inst, char *needed,
     if (inst->op == IR_LABEL || inst->op == IR_BR || inst->op == IR_DBG_VALUE) return;
     if (inst->op == IR_ADDR) return; /* alloca id in `a` is not an SSA value use */
     mark_reg(needed, uses, nv, inst->a);
-    if (inst->op != IR_CBR && inst->op != IR_CALL)
+    if (inst->op != IR_CBR && inst->op != IR_CALL && inst->op != IR_ASM)
         mark_reg(needed, uses, nv, inst->b);
-    if (inst->op == IR_CALL) {
-        if (inst->call_callee >= 0) mark_reg(needed, uses, nv, inst->call_callee);
+    if (inst->op == IR_CALL || inst->op == IR_ASM) {
+        if (inst->op == IR_CALL && inst->call_callee >= 0)
+            mark_reg(needed, uses, nv, inst->call_callee);
         for (int k = 0; k < inst->call_nargs; k++)
             mark_reg(needed, uses, nv, inst->call_args[k]);
     }
@@ -4429,6 +4431,359 @@ static int match_i128_carry(const IRFunction *fn, const int *uses, size_t i,
     return (int)(i + 3);
 }
 
+
+/* ---- GNU inline asm (IR_ASM) -------------------------------------- */
+/* Constraint letter → hard register (SysV).  -1 = none / needs alloc. */
+static int asm_constr_hardreg(const char *c) {
+    if (!c) return -1;
+    while (*c == '=' || *c == '+' || *c == '&' || *c == '%' || *c == '*') c++;
+    /* multi-alternative: take first */
+    while (*c) {
+        if (*c == 'a') return REG_RAX;
+        if (*c == 'b') return REG_RBX;
+        if (*c == 'c') return REG_RCX;
+        if (*c == 'd') return REG_RDX;
+        if (*c == 'S') return REG_RSI;
+        if (*c == 'D') return REG_RDI;
+        if (*c == ',') { c++; continue; }
+        break;
+    }
+    return -1;
+}
+
+static int asm_constr_is_imm(const char *c) {
+    if (!c) return 0;
+    while (*c == '=' || *c == '+' || *c == '&' || *c == '%') c++;
+    while (*c) {
+        if (*c == 'i' || *c == 'n' || *c == 'N') return 1;
+        if (*c == 'r' || *c == 'm' || *c == 'a' || *c == 'b' || *c == 'c' ||
+            *c == 'd' || *c == 'S' || *c == 'D' || *c == 'q' || *c == 'Q' ||
+            *c == 'g' || *c == 'X') return 0;
+        if (*c == ',') { c++; continue; }
+        c++;
+    }
+    return 0;
+}
+
+static int asm_constr_is_mem(const char *c) {
+    if (!c) return 0;
+    while (*c == '=' || *c == '+' || *c == '&' || *c == '%') c++;
+    while (*c) {
+        if (*c == 'm' || *c == 'o') return 1;
+        if (*c == 'r' || *c == 'a' || *c == 'b' || *c == 'c' || *c == 'd' ||
+            *c == 'S' || *c == 'D' || *c == 'i' || *c == 'n' || *c == 'N')
+            return 0;
+        if (*c == ',') { c++; continue; }
+        c++;
+    }
+    return 0;
+}
+
+static int asm_constr_is_rw(const char *c) {
+    return c && strchr(c, '+') != NULL;
+}
+
+
+/* Map a GNU asm clobber name to a GP register, or -1 for non-GP (memory/cc). */
+static int asm_clobber_reg(const char *name) {
+    if (!name || !*name) return -1;
+    while (*name == ' ' || *name == '%') name++;
+    /* Strip trailing whitespace in-place via local compare. */
+    char buf[16];
+    size_t n = 0;
+    while (name[n] && name[n] != ',' && name[n] != ' ' && n + 1 < sizeof buf) {
+        buf[n] = name[n];
+        n++;
+    }
+    buf[n] = 0;
+    if (!buf[0]) return -1;
+    if (!strcmp(buf, "memory") || !strcmp(buf, "cc")) return -1;
+    if (!strcmp(buf, "rax") || !strcmp(buf, "eax") || !strcmp(buf, "ax") || !strcmp(buf, "al")) return REG_RAX;
+    if (!strcmp(buf, "rbx") || !strcmp(buf, "ebx") || !strcmp(buf, "bx") || !strcmp(buf, "bl")) return REG_RBX;
+    if (!strcmp(buf, "rcx") || !strcmp(buf, "ecx") || !strcmp(buf, "cx") || !strcmp(buf, "cl")) return REG_RCX;
+    if (!strcmp(buf, "rdx") || !strcmp(buf, "edx") || !strcmp(buf, "dx") || !strcmp(buf, "dl")) return REG_RDX;
+    if (!strcmp(buf, "rsi") || !strcmp(buf, "esi") || !strcmp(buf, "si") || !strcmp(buf, "sil")) return REG_RSI;
+    if (!strcmp(buf, "rdi") || !strcmp(buf, "edi") || !strcmp(buf, "di") || !strcmp(buf, "dil")) return REG_RDI;
+    if (!strcmp(buf, "rsp") || !strcmp(buf, "esp")) return REG_RSP;
+    if (!strcmp(buf, "rbp") || !strcmp(buf, "ebp")) return REG_RBP;
+    if (!strcmp(buf, "r8") || !strcmp(buf, "r8d") || !strcmp(buf, "r8b")) return REG_R8;
+    if (!strcmp(buf, "r9") || !strcmp(buf, "r9d") || !strcmp(buf, "r9b")) return REG_R9;
+    if (!strcmp(buf, "r10") || !strcmp(buf, "r10d") || !strcmp(buf, "r10b")) return REG_R10;
+    if (!strcmp(buf, "r11") || !strcmp(buf, "r11d") || !strcmp(buf, "r11b")) return REG_R11;
+    if (!strcmp(buf, "r12") || !strcmp(buf, "r12d") || !strcmp(buf, "r12b")) return REG_R12;
+    if (!strcmp(buf, "r13") || !strcmp(buf, "r13d") || !strcmp(buf, "r13b")) return REG_R13;
+    if (!strcmp(buf, "r14") || !strcmp(buf, "r14d") || !strcmp(buf, "r14b")) return REG_R14;
+    if (!strcmp(buf, "r15") || !strcmp(buf, "r15d") || !strcmp(buf, "r15b")) return REG_R15;
+    return -1;
+}
+
+static int asm_clobber_mask(const char *cl) {
+    int mask = 0;
+    if (!cl) return 0;
+    const char *p = cl;
+    while (*p) {
+        while (*p == ' ' || *p == ',') p++;
+        if (!*p) break;
+        int r = asm_clobber_reg(p);
+        if (r >= 0) mask |= 1 << r;
+        while (*p && *p != ',') p++;
+    }
+    return mask;
+}
+
+static int asm_pick_scratch(int used_mask) {
+    static const int cands[] = {
+        REG_R10, REG_R11, REG_R8, REG_R9, REG_RSI, REG_RDI, REG_RAX, REG_RCX, REG_RDX
+    };
+    for (size_t i = 0; i < sizeof cands / sizeof cands[0]; i++) {
+        int r = cands[i];
+        if (!(used_mask & (1 << r))) return r;
+    }
+    return REG_R11;
+}
+
+/* Try to read an IR_CONST immediate for value v; return 1 if found. */
+static int asm_try_const(const IRFunction *fn, IRValue v, int64_t *out) {
+    if (v < 0) return 0;
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *ins = &fn->insts.data[i];
+        if (ins->dst == v && ins->op == IR_CONST && !ins->is_float) {
+            *out = ins->imm;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void emit_ir_asm(Buffer *text, EmitModule *out, const IRFunction *fn,
+                        const IRInst *inst, const RAResult *ra) {
+    int n_out = (int)inst->imm;
+    int n_in = inst->call_nargs - n_out;
+    if (n_out < 0) n_out = 0;
+    if (n_in < 0) n_in = 0;
+    int nops = n_out + n_in;
+    IAsmOperand *ops = calloc((size_t)(nops > 0 ? nops : 1), sizeof(IAsmOperand));
+    int *out_addr = calloc((size_t)(n_out > 0 ? n_out : 1), sizeof(int));
+    int used = 0;
+    int i;
+    int clobber_m = asm_clobber_mask(inst->asm_clobbers);
+
+    for (i = 0; i < n_out; i++) out_addr[i] = -1;
+
+    /* Pre-compute hard regs demanded by constraints so out_addr avoids them. */
+    int hard_demand = clobber_m;
+    for (i = 0; i < nops; i++) {
+        const char *c = (inst->asm_constraints && inst->asm_constraints[i])
+                            ? inst->asm_constraints[i] : "r";
+        int h = asm_constr_hardreg(c);
+        if (h >= 0) hard_demand |= 1 << h;
+        /* matching-constraint digit handled later for inputs */
+        if (asm_constr_is_imm(c) && i >= n_out)
+            hard_demand |= 1 << REG_RDX;
+    }
+
+    /* ---- Outputs: keep address in a scratch; value lives in hard reg ---- */
+    for (i = 0; i < n_out; i++) {
+        const char *c = (inst->asm_constraints && inst->asm_constraints[i])
+                            ? inst->asm_constraints[i] : "r";
+        IRValue v = inst->call_args[i]; /* address of lvalue */
+        int w = 8;
+        if (inst->call_arg_nbytes && inst->call_arg_nbytes[i] > 0)
+            w = inst->call_arg_nbytes[i];
+        ops[i].width = w;
+        ops[i].sym = NULL;
+
+        int addr_r = asm_pick_scratch(used | hard_demand);
+        ensure_reg(text, v, addr_r, ra);
+        used |= 1 << addr_r;
+        out_addr[i] = addr_r;
+
+        if (asm_constr_is_mem(c)) {
+            ops[i].kind = 2;
+            ops[i].reg = addr_r;
+            continue;
+        }
+        int hard = asm_constr_hardreg(c);
+        if (hard < 0) {
+            hard = asm_pick_scratch(used | hard_demand);
+            used |= 1 << hard;
+        } else {
+            used |= 1 << hard;
+        }
+        if (asm_constr_is_rw(c)) {
+            /* load current value into hard from (addr) */
+            int ww = ops[i].width;
+            if (ww == 1) {
+                emit_rex_wrb(text, 0, hard, addr_r);
+                emit_byte(text, 0x8A);
+                if ((addr_r & 7) == 4) { emit_modrm(text, 0, hard & 7, 4); emit_byte(text, 0x24); }
+                else if ((addr_r & 7) == 5) { emit_modrm(text, 1, hard & 7, 5); emit_byte(text, 0); }
+                else emit_modrm(text, 0, hard & 7, addr_r & 7);
+            } else {
+                if (ww == 2) emit_byte(text, 0x66);
+                emit_rex_wrb(text, ww == 8 ? 1 : 0, hard, addr_r);
+                emit_byte(text, 0x8B);
+                if ((addr_r & 7) == 4) { emit_modrm(text, 0, hard & 7, 4); emit_byte(text, 0x24); }
+                else if ((addr_r & 7) == 5) { emit_modrm(text, 1, hard & 7, 5); emit_byte(text, 0); }
+                else emit_modrm(text, 0, hard & 7, addr_r & 7);
+            }
+        }
+        ops[i].kind = 0;
+        ops[i].reg = hard;
+    }
+
+    /* ---- Inputs: push from homes (no sibling clobber), then pop to hard ---- */
+    {
+        int hard_of[16];
+        int kind_of[16]; /* 0=reg, 1=imm, 2=mem */
+        int64_t imm_of[16];
+        int w_of[16];
+        int pushed[16];
+        for (i = 0; i < 16; i++) {
+            hard_of[i] = -1; kind_of[i] = 0; imm_of[i] = 0; w_of[i] = 8; pushed[i] = 0;
+        }
+        for (i = 0; i < n_in; i++) {
+            int oi = n_out + i;
+            const char *c = (inst->asm_constraints && inst->asm_constraints[oi])
+                                ? inst->asm_constraints[oi] : "r";
+            IRValue v = inst->call_args[oi];
+            int w = 8;
+            if (inst->call_arg_nbytes && inst->call_arg_nbytes[oi] > 0)
+                w = inst->call_arg_nbytes[oi];
+            w_of[i] = w;
+
+            if (asm_constr_is_imm(c)) {
+                int64_t imm = 0;
+                if (asm_try_const(fn, v, &imm)) {
+                    kind_of[i] = 1;
+                    imm_of[i] = imm;
+                    continue;
+                }
+                hard_of[i] = REG_RDX;
+                w_of[i] = 2;
+            } else if (asm_constr_is_mem(c)) {
+                kind_of[i] = 2;
+            } else {
+                int hard = asm_constr_hardreg(c);
+                const char *q = c;
+                while (*q == '=' || *q == '+' || *q == '&' || *q == '%') q++;
+                if (*q >= '0' && *q <= '9') {
+                    int m = *q - '0';
+                    if (m >= 0 && m < n_out && ops[m].kind == 0)
+                        hard = ops[m].reg;
+                }
+                if (hard >= 0) {
+                    /* Share with matching output hard reg when same letter. */
+                    for (int j = 0; j < n_out; j++) {
+                        if (ops[j].kind == 0 && ops[j].reg == hard) {
+                            hard_of[i] = hard;
+                            break;
+                        }
+                    }
+                    if (hard_of[i] < 0) hard_of[i] = hard;
+                }
+            }
+        }
+
+        /* Push inputs right-to-left so pop left-to-right restores order. */
+        for (i = n_in - 1; i >= 0; i--) {
+            if (kind_of[i] == 1) continue; /* imm: no push */
+            int oi = n_out + i;
+            IRValue v = inst->call_args[oi];
+            int home = gp_home(ra, v);
+            if (home >= 0) {
+                emit_push_r(text, home);
+            } else {
+                /* Spilled: load into a scratch that is not an out_addr, then push. */
+                int blocked = 0;
+                for (int j = 0; j < n_out; j++)
+                    if (out_addr[j] >= 0) blocked |= 1 << out_addr[j];
+                int tmp = asm_pick_scratch(blocked);
+                ensure_reg(text, v, tmp, ra);
+                emit_push_r(text, tmp);
+            }
+            pushed[i] = 1;
+        }
+
+        /* Pop into destination regs (hard or fresh scratch for 'r'/'m'). */
+        for (i = 0; i < n_in; i++) {
+            int oi = n_out + i;
+            ops[oi].width = w_of[i];
+            ops[oi].sym = NULL;
+            if (kind_of[i] == 1) {
+                ops[oi].kind = 1;
+                ops[oi].imm = imm_of[i];
+                continue;
+            }
+            int dest;
+            if (hard_of[i] >= 0) {
+                dest = hard_of[i];
+            } else {
+                int blocked = used | hard_demand;
+                for (int j = 0; j < i; j++) {
+                    int oj = n_out + j;
+                    if (ops[oj].kind == 0 || ops[oj].kind == 2)
+                        blocked |= 1 << ops[oj].reg;
+                }
+                for (int j = 0; j < n_out; j++)
+                    if (out_addr[j] >= 0) blocked |= 1 << out_addr[j];
+                dest = asm_pick_scratch(blocked);
+            }
+            if (pushed[i])
+                emit_pop_r(text, dest);
+            used |= 1 << dest;
+            if (kind_of[i] == 2) {
+                ops[oi].kind = 2;
+                ops[oi].reg = dest;
+            } else {
+                ops[oi].kind = 0;
+                ops[oi].reg = dest;
+            }
+        }
+    }
+
+    /* Save out_addr regs across the template (template/clobbers may smash them). */
+    for (i = 0; i < n_out; i++) {
+        if (out_addr[i] >= 0)
+            emit_push_r(text, out_addr[i]);
+    }
+
+    iasm_emit_x86(text, out, inst->call_name ? inst->call_name : "",
+                  ops, nops, inst->loc.file, inst->loc.line, inst->loc.col);
+
+    for (i = n_out - 1; i >= 0; i--) {
+        if (out_addr[i] >= 0)
+            emit_pop_r(text, out_addr[i]);
+    }
+
+    /* Store register outputs back through saved addresses. */
+    for (i = 0; i < n_out; i++) {
+        if (ops[i].kind != 0) continue;
+        int addr = out_addr[i];
+        int hard = ops[i].reg;
+        int w = ops[i].width > 0 ? ops[i].width : 8;
+        if (addr < 0) continue;
+        if (w == 1) {
+            emit_rex_wrb(text, 0, hard, addr);
+            emit_byte(text, 0x88);
+            if ((addr & 7) == 4) { emit_modrm(text, 0, hard & 7, 4); emit_byte(text, 0x24); }
+            else if ((addr & 7) == 5) { emit_modrm(text, 1, hard & 7, 5); emit_byte(text, 0); }
+            else emit_modrm(text, 0, hard & 7, addr & 7);
+        } else {
+            if (w == 2) emit_byte(text, 0x66);
+            emit_rex_wrb(text, w == 8 ? 1 : 0, hard, addr);
+            emit_byte(text, 0x89);
+            if ((addr & 7) == 4) { emit_modrm(text, 0, hard & 7, 4); emit_byte(text, 0x24); }
+            else if ((addr & 7) == 5) { emit_modrm(text, 1, hard & 7, 5); emit_byte(text, 0); }
+            else emit_modrm(text, 0, hard & 7, addr & 7);
+        }
+    }
+    free(ops);
+    free(out_addr);
+}
+
+
+
 void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
     /* Backend dispatch point: everything below this function is the
      * x86-64 instruction selector; the arm64 selector is codegen64(). */
@@ -4662,13 +5017,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
          * sit in the 128B red zone and clobber rbp-relative locals when
          * prologue omits `sub %rsp` (bitfield_packed_spill / unit prologue). */
         int prologue_stack = stack_size;
+        int naked = fn->is_naked;
+        if (naked) prologue_stack = 0;
 
-        emit_byte(&out->text, 0x55);              /* pushq %rbp */
         size_t after_push_rbp_pc = out->text.len;
+        size_t after_mov_rbp_pc = out->text.len;
+        if (!naked) {
+        emit_byte(&out->text, 0x55);              /* pushq %rbp */
+        after_push_rbp_pc = out->text.len;
         emit_rex_w(&out->text);
         emit_byte(&out->text, 0x89);
         emit_byte(&out->text, 0xE5);              /* movq %rsp, %rbp */
-        size_t after_mov_rbp_pc = out->text.len;
+        after_mov_rbp_pc = out->text.len;
         if (want_debug && dbg_func_idx >= 0)
             emit_module_dbg_func_frame(out, dbg_func_idx, after_push_rbp_pc,
                                        after_mov_rbp_pc);
@@ -4678,6 +5038,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         if (cs_used[2]) emit_push_r(&out->text, REG_R13);
         if (cs_used[3]) emit_push_r(&out->text, REG_RSI);
         if (cs_used[4]) emit_push_r(&out->text, REG_RDI);
+        }
         /* Windows x64 UWOP register numbers for callee-saved pushes after rbp. */
         int8_t win_pushed[8];
         int win_npushed = 0;
@@ -4843,7 +5204,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     continue;
                 }
                 if (in->a == v) { other = 1; break; }
-                if (in->op != IR_CBR && in->op != IR_CALL && in->b == v) {
+                if (in->op != IR_CBR && in->op != IR_CALL && in->op != IR_ASM && in->b == v) {
                     other = 1;
                     break;
                 }
@@ -4919,7 +5280,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 continue;
             if (u->op != IR_ADDR && u->a >= 0)
                 raw_uses[u->a]++;
-            if (u->op != IR_CBR && u->op != IR_CALL && u->b >= 0)
+            if (u->op != IR_CBR && u->op != IR_CALL && u->op != IR_ASM && u->b >= 0)
                 raw_uses[u->b]++;
             if ((u->op == IR_VADD || u->op == IR_VSUB || u->op == IR_VMUL
                  || u->op == IR_VDIV || u->op == IR_VBAND || u->op == IR_VBOR
@@ -8585,7 +8946,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
 
+            case IR_ASM: {
+                emit_ir_asm(&out->text, out, fn, inst, ra);
+                break;
+            }
+
             case IR_RETURN: {
+                /* Naked: compiler must not inject epilogue/ret — the asm body
+                 * owns control flow (jmp/iretq/sysretq/ret). */
+                if (fn->is_naked) break;
                 /* Void function: bare `return;` — no value in a.
                  * SysV multi-eightbyte returns: INTEGER eightbytes go to
                  * RAX then RDX; SSE eightbytes go to XMM0 then XMM1. */
@@ -8639,7 +9008,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     else
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 }
-                emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca);
+                do { if (fn->is_naked) emit_byte(&out->text, 0xC3); else emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca); } while (0);
                 break;
             }
 
@@ -9078,11 +9447,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         } else {
             IROpcode last = fn->insts.data[fn->insts.len - 1].op;
             if (last != IR_RETURN && last != IR_BR && last != IR_CBR
-                && last != IR_BR_TABLE && last != IR_JMP_PTR)
+                && last != IR_BR_TABLE && last != IR_JMP_PTR
+                && !(fn->is_naked && last == IR_ASM))
                 needs_ret = 1;
         }
-        if (needs_ret)
+        if (needs_ret && !fn->is_naked)
             emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca);
+        /* naked: never inject a trailing ret; asm owns the exit. */
 
         if (want_debug && dbg_func_idx >= 0) {
             size_t fn_end_pc = out->text.len;

@@ -167,6 +167,13 @@ void ir_module_free(IRModule *m) {
             free(m->functions.data[i].insts.data[j].call_args);
             free(m->functions.data[i].insts.data[j].call_arg_on_stack);
             free(m->functions.data[i].insts.data[j].call_arg_nbytes);
+            if (m->functions.data[i].insts.data[j].asm_constraints) {
+                int n = m->functions.data[i].insts.data[j].call_nargs;
+                for (int k = 0; k < n; k++)
+                    free(m->functions.data[i].insts.data[j].asm_constraints[k]);
+                free(m->functions.data[i].insts.data[j].asm_constraints);
+            }
+            free(m->functions.data[i].insts.data[j].asm_clobbers);
         }
         free(m->functions.data[i].insts.data);
         free(m->functions.data[i].value_width);
@@ -703,6 +710,12 @@ static int stmt_takes_addr_of(const Stmt *s, const char *name) {
         if (s->u.for_s.cond && expr_takes_addr_of(s->u.for_s.cond, name)) return 1;
         if (s->u.for_s.step && expr_takes_addr_of(s->u.for_s.step, name)) return 1;
         return stmt_takes_addr_of(s->u.for_s.body, name);
+    case ST_ASM:
+        for (int i = 0; i < s->u.asm_s.num_outputs; i++)
+            if (expr_takes_addr_of(s->u.asm_s.outputs[i].expr, name)) return 1;
+        for (int i = 0; i < s->u.asm_s.num_inputs; i++)
+            if (expr_takes_addr_of(s->u.asm_s.inputs[i].expr, name)) return 1;
+        return 0;
     case ST_BREAK:
     case ST_CONTINUE:
         return 0;
@@ -904,6 +917,8 @@ static int stmt_has_computed_goto(const Stmt *s) {
         for (size_t i = 0; i < s->u.block.len; i++)
             if (stmt_has_computed_goto(&s->u.block.data[i])) return 1;
         return 0;
+    case ST_ASM:
+        return 0;
     default: return 0;
     }
 }
@@ -941,6 +956,8 @@ static int stmt_has_vla(const Stmt *s) {
     case ST_BLOCK:
         for (size_t i = 0; i < s->u.block.len; i++)
             if (stmt_has_vla(&s->u.block.data[i])) return 1;
+        return 0;
+    case ST_ASM:
         return 0;
     default: return 0;
     }
@@ -1004,6 +1021,8 @@ static int stmt_has_setjmp(const Stmt *s) {
     case ST_BLOCK:
         for (size_t i = 0; i < s->u.block.len; i++)
             if (stmt_has_setjmp(&s->u.block.data[i])) return 1;
+        return 0;
+    case ST_ASM:
         return 0;
     default: return 0;
     }
@@ -3513,6 +3532,12 @@ static void bos_collect_stmt(const Stmt *s, const char *name,
         for (size_t i = 0; i < s->u.block.len; i++)
             bos_collect_stmt(&s->u.block.data[i], name, out, n, cap, saw_unk);
         break;
+    case ST_ASM:
+        for (int i = 0; i < s->u.asm_s.num_outputs; i++)
+            bos_collect_expr(s->u.asm_s.outputs[i].expr, name, out, n, cap, saw_unk);
+        for (int i = 0; i < s->u.asm_s.num_inputs; i++)
+            bos_collect_expr(s->u.asm_s.inputs[i].expr, name, out, n, cap, saw_unk);
+        break;
     default:
         break;
     }
@@ -3551,6 +3576,8 @@ static int bos_stmt_declares(const Stmt *s, const char *name) {
         for (size_t i = 0; i < s->u.block.len; i++)
             if (bos_stmt_declares(&s->u.block.data[i], name))
                 return 1;
+        return 0;
+    case ST_ASM:
         return 0;
     default:
         return 0;
@@ -5677,6 +5704,8 @@ static int stmt_has_va_arg_pack(const Stmt *s) {
         }
         return 0;
     }
+    case ST_ASM:
+        return 0;
     default: return 0;
     }
 }
@@ -10481,6 +10510,8 @@ static void assign_label_ids(IRFunction *fn, LabelMap *lm, const Stmt *s) {
         for (size_t i = 0; i < s->u.block.len; i++)
             assign_label_ids(fn, lm, &s->u.block.data[i]);
         break;
+    case ST_ASM:
+        break;
     default:
         break;
     }
@@ -10629,6 +10660,8 @@ static void snapshot_vla_stmt(const LabelMap *lm, const Stmt *s) {
         for (size_t i = 0; i < s->u.block.len; i++)
             snapshot_vla_stmt(lm, &s->u.block.data[i]);
         g_vla_walk_sp = saved;
+        break;
+    case ST_ASM:
         break;
     }
     default:
@@ -10896,6 +10929,81 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 }
             }
         }
+        break;
+    }
+    case ST_ASM: {
+        /* Layout: call_args[0..n_out) = output addresses;
+         *         call_args[n_out..n_out+n_in) = input values.
+         * imm = n_out. Constraints parallel to GNU operand order
+         * (outputs first, then inputs). */
+        int n_out = s->u.asm_s.num_outputs;
+        int n_in = s->u.asm_s.num_inputs;
+        int nargs = n_out + n_in;
+        IRInst inst;
+        memset(&inst, 0, sizeof(inst));
+        inst.op = IR_ASM;
+        inst.dst = -1;
+        inst.a = -1; inst.b = -1; inst.c = -1; inst.d = -1;
+        inst.call_callee = -1;
+        inst.imm = n_out;
+        inst.loc = s->loc;
+        inst.is_volatile = s->u.asm_s.is_volatile;
+        inst.call_name = s->u.asm_s.template ? xstrdup(s->u.asm_s.template) : xstrdup("");
+        ir_call_reserve_args(&inst, nargs);
+        if (nargs > 0)
+            inst.asm_constraints = calloc((size_t)nargs, sizeof(char *));
+        for (int i = 0; i < n_out; i++) {
+            const AsmOperand *op = &s->u.asm_s.outputs[i];
+            IRValue addr = lower_lvalue_addr(fn, st, op->expr);
+            inst.call_args[i] = addr;
+            {
+                Type ty = op->expr->type;
+                int sz = type_size(ty);
+                if (sz <= 0) sz = 8;
+                if (sz > 8) sz = 8;
+                inst.call_arg_nbytes[i] = sz;
+            }
+            if (inst.asm_constraints)
+                inst.asm_constraints[i] = op->constraint ? xstrdup(op->constraint) : xstrdup("r");
+        }
+        for (int i = 0; i < n_in; i++) {
+            const AsmOperand *op = &s->u.asm_s.inputs[i];
+            const char *c = op->constraint ? op->constraint : "r";
+            int is_mem = 0;
+            for (const char *q = c; *q; q++) {
+                if (*q == '=' || *q == '+' || *q == '&' || *q == '%') continue;
+                if (*q == 'm' || *q == 'o') { is_mem = 1; break; }
+                break;
+            }
+            IRValue v;
+            if (is_mem)
+                v = lower_lvalue_addr(fn, st, op->expr);
+            else
+                v = lower_expr(fn, st, op->expr);
+            inst.call_args[n_out + i] = v;
+            {
+                Type ty = op->expr->type;
+                int sz = type_size(ty);
+                if (sz <= 0) sz = 8;
+                if (sz > 8) sz = 8;
+                inst.call_arg_nbytes[n_out + i] = sz;
+            }
+            if (inst.asm_constraints)
+                inst.asm_constraints[n_out + i] = xstrdup(c);
+        }
+        if (s->u.asm_s.num_clobbers > 0) {
+            size_t clen = 0;
+            for (int i = 0; i < s->u.asm_s.num_clobbers; i++)
+                clen += strlen(s->u.asm_s.clobbers[i]) + 1;
+            char *cl = malloc(clen + 1);
+            cl[0] = 0;
+            for (int i = 0; i < s->u.asm_s.num_clobbers; i++) {
+                if (i) strcat(cl, ",");
+                strcat(cl, s->u.asm_s.clobbers[i]);
+            }
+            inst.asm_clobbers = cl;
+        }
+        ir_inst_array_push(&fn->insts, inst);
         break;
     }
     case ST_EXPR:
@@ -13057,6 +13165,7 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         irfn.is_used = fd->is_used;
         irfn.is_constructor = fd->is_constructor;
         irfn.is_destructor = fd->is_destructor;
+        irfn.is_naked = fd->is_naked;
         irfn.ctor_prio = fd->ctor_prio ? fd->ctor_prio : 65535;
         irfn.dtor_prio = fd->dtor_prio ? fd->dtor_prio : 65535;
         irfn.sret_value = -1;
