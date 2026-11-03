@@ -2601,9 +2601,12 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
  * Operands are materialised first; only then is the flag reg zeroed so a
  * later setcc yields a clean 0/1 without a movzx. */
 /* keep_flags: leave CF/OF live for a fused CBR (no setcc).  Mov/spill of
- * the wrapped result does not clobber flags, so the branch can jnc/jno. */
+ * the wrapped result does not clobber flags, so the branch can jnc/jno.
+ * wrap_off!=0: sole use is a frame STORE — emit from ALU acc (flag-safe
+ * movl) and skip the GP-home shuttle gcc also avoids. */
 static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
-                     const int *def, const RAResult *ra, int dr, int keep_flags) {
+                     const int *def, const RAResult *ra, int dr, int keep_flags,
+                     int wrap_off, int wrap_w) {
     int width = inst->width > 0 ? inst->width : 8;
     int tu = inst->is_unsigned;
     int ov_dr = gp_home(ra, inst->c);
@@ -2635,7 +2638,10 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
         emit_rex_if(b, alu_w64(width), 0, 0, br);
         emit_byte(b, 0xF7);
         emit_modrm(b, 3, 4, br & 7);
-        finish_gp_dst(b, REG_RAX, dr, inst->dst, ra, width, 1);
+        if (keep_flags && wrap_off != 0)
+            emit_store_disp(b, REG_RBP, REG_RAX, wrap_off, wrap_w > 0 ? wrap_w : width);
+        else
+            finish_gp_dst(b, REG_RAX, dr, inst->dst, ra, width, 1);
         if (!keep_flags)
             emit_setcc_r(b, 0x92 /* setc */, ov);
     } else {
@@ -2659,14 +2665,20 @@ static void isel_ovf(Buffer *b, const IRInst *inst, const IRFunction *fn,
         if (inst->op == IR_MULO) {
             if (fb) emit_imul_imm_w(b, acc, (int32_t)imm_b, width);
             else emit_imul_rr_w(b, acc, br, width);
-            finish_gp_dst(b, acc, dr, inst->dst, ra, width, 0);
+            if (keep_flags && wrap_off != 0)
+                emit_store_disp(b, REG_RBP, acc, wrap_off, wrap_w > 0 ? wrap_w : width);
+            else
+                finish_gp_dst(b, acc, dr, inst->dst, ra, width, 0);
             cc = 0x90;
         } else {
             uint8_t rr_op = (inst->op == IR_SUBO) ? 0x29 : 0x01;
             int imm_ext = (inst->op == IR_SUBO) ? 5 : 0;
             if (fb) emit_arith_imm_w(b, imm_ext, acc, (int32_t)imm_b, width);
             else emit_arith_rr_w(b, rr_op, acc, br, width);
-            finish_gp_dst(b, acc, dr, inst->dst, ra, width, tu);
+            if (keep_flags && wrap_off != 0)
+                emit_store_disp(b, REG_RBP, acc, wrap_off, wrap_w > 0 ? wrap_w : width);
+            else
+                finish_gp_dst(b, acc, dr, inst->dst, ra, width, tu);
             cc = tu ? 0x92 : 0x90;
         }
         if (!keep_flags)
@@ -4856,6 +4868,65 @@ static int abs32_idx_equiv(const IRFunction *fn, const int *def,
     return 0;
 }
 
+
+
+/* fused_skip a private (raw_uses==1) integer tree that remat_rmw_operand can
+ * rebuild.  Only for indexed abs32 RMW (clear_prime): frame RMW like
+ * i+=p uses ensure_reg, not remat — skipping its operand LOAD drops the
+ * reload after clear_prime.  Does not clear needed[]. */
+static void fused_skip_remat_tree(char *fused_skip, const IRFunction *fn,
+                                  const int *def, const int *raw_uses,
+                                  int nvals, const int *alloca_off,
+                                  IRValue v, int depth) {
+    if (depth > 12 || !fused_skip || !fn || !def || !raw_uses) return;
+    if (v < 0 || v >= nvals || raw_uses[v] != 1) return;
+    if (!value_unique_def(fn, v) || def[v] < 0) return;
+    int di = def[v];
+    if (fused_skip[di]) return;
+    const IRInst *d = &fn->insts.data[di];
+    switch (d->op) {
+    case IR_CONST:
+        if (!d->is_float) fused_skip[di] = 1;
+        return;
+    case IR_COPY:
+    case IR_ZEXT:
+    case IR_SEXT:
+    case IR_TRUNC:
+    case IR_BNOT:
+    case IR_NEG:
+        fused_skip[di] = 1;
+        fused_skip_remat_tree(fused_skip, fn, def, raw_uses, nvals, alloca_off,
+                              d->a, depth + 1);
+        return;
+    case IR_SHL:
+    case IR_SHR:
+    case IR_BAND:
+    case IR_BOR:
+    case IR_BXOR:
+    case IR_ADD:
+    case IR_SUB:
+        if (d->is_float) return;
+        fused_skip[di] = 1;
+        fused_skip_remat_tree(fused_skip, fn, def, raw_uses, nvals, alloca_off,
+                              d->a, depth + 1);
+        fused_skip_remat_tree(fused_skip, fn, def, raw_uses, nvals, alloca_off,
+                              d->b, depth + 1);
+        return;
+    case IR_LOAD:
+    case IR_LOAD_PTR: {
+        int off = 0;
+        if (!fold_ptr_off(fn, def, alloca_off, d->a, &off, 0) || off == 0)
+            return;
+        fused_skip[di] = 1;
+        if (d->a >= 0 && d->a < nvals && raw_uses[d->a] == 1 && def[d->a] >= 0)
+            fused_skip[def[d->a]] = 1;
+        return;
+    }
+    default:
+        return;
+    }
+}
+
 /* Rematerialize a small integer tree into dst.  Used for indexed abs32 RMW
  * masks (~(1<<(i&7))): RA may have reused the mask's home after the fused
  * BAND, so ensure_reg would read a stale register. */
@@ -5925,6 +5996,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         /* EQ/NE vs 0 of a sole-use ZF ALU → xor; alu; setcc (no test). */
         int *alu_setcc_at = xmalloc(ninst_f * sizeof(int));
         char *ovf_keep_flags = xmalloc(ninst_f);
+        int *ovf_wrap_off = xmalloc(ninst_f * sizeof(int));
+        int *ovf_wrap_w = xmalloc(ninst_f * sizeof(int));
         int *carry_hi_at = xmalloc(ninst_f * sizeof(int));
         char *carry_is_sub = xmalloc(ninst_f);
         char *carry_zero_hi = xmalloc(ninst_f);
@@ -5934,6 +6007,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         memset(carry_is_sub, 0, ninst_f);
         memset(carry_zero_hi, 0, ninst_f);
         memset(ovf_keep_flags, 0, ninst_f);
+        memset(ovf_wrap_off, 0, ninst_f * sizeof(int));
+        memset(ovf_wrap_w, 0, ninst_f * sizeof(int));
         for (size_t uj = 0; uj < ninst_f; uj++) {
             fused_cmp_at[uj] = -1;
             fused_ovf_at[uj] = -1;
@@ -6015,7 +6090,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         }
         /* ADDO/SUBO/MULO → CBR: keep CF/OF and jcc (skip setcc+test when
          * the overflow bit only feeds the branch).  STORE of the wrapped
-         * result between arith and CBR is flag-safe. */
+         * result between arith and CBR is flag-safe; when that STORE is the
+         * wrap's sole use into a frame slot, emit from ALU acc at the ovf. */
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             const IRInst *cb = &fn->insts.data[uj];
             if (cb->op != IR_CBR || skip_body[uj] || fused_cmp_at[uj] >= 0)
@@ -6028,18 +6104,50 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             const IRInst *ovf = &fn->insts.data[oi];
             if (!ir_op_with_overflow(ovf->op) || ovf->c != cb->a) continue;
             int blocked = 0;
+            int wrap_si = -1, wrap_off = 0, wrap_w = 0;
             for (int k = oi + 1; k < (int)uj; k++) {
                 if (skip_body[k] || fused_skip[k]) continue;
                 const IRInst *m = &fn->insts.data[k];
                 if (m->op == IR_DBG_VALUE) continue;
                 if ((m->op == IR_STORE_PTR || m->op == IR_STORE)
-                    && m->b == ovf->dst) continue;
+                    && m->b == ovf->dst) {
+                    if (wrap_si >= 0) { blocked = 1; break; }
+                    int off = 0;
+                    int ok = 0;
+                    if (m->op == IR_STORE && m->a >= 0 && m->a < fn->next_value_id
+                        && alloca_off[m->a] != 0) {
+                        off = alloca_off[m->a];
+                        ok = 1;
+                    } else if (m->op == IR_STORE_PTR
+                               && fold_ptr_off(fn, ssa_def, alloca_off, m->a,
+                                              &off, 0)) {
+                        ok = 1;
+                    }
+                    int ww = m->width > 0 ? m->width
+                             : (ovf->width > 0 ? ovf->width : 8);
+                    if (!ok || (ww != 4 && ww != 8)) {
+                        /* Keep keep_flags; just don't fold the store. */
+                        wrap_si = -1;
+                        wrap_off = 0;
+                        continue;
+                    }
+                    wrap_si = k;
+                    wrap_off = off;
+                    wrap_w = ww;
+                    continue;
+                }
                 blocked = 1;
                 break;
             }
             if (blocked) continue;
             fused_ovf_at[uj] = oi;
             ovf_keep_flags[oi] = 1;
+            if (wrap_si >= 0 && ovf->dst >= 0 && ovf->dst < nvals_f
+                && raw_uses[ovf->dst] == 1) {
+                fused_skip[wrap_si] = 1;
+                ovf_wrap_off[oi] = wrap_off;
+                ovf_wrap_w[oi] = wrap_w;
+            }
         }
         /* Bare CBR of a sole-use frame int: cmpl $0, off(%rbp) (logic). */
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
@@ -6575,6 +6683,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 mem_rmw_disp[uj] = st_disp;
                 fused_skip[ai] = 1;
                 fused_skip[li] = 1;
+                for (int k = 0; k < npeel; k++)
+                    fused_skip[peel_skip[k]] = 1;
                 for (int k = 0; k < ntrunc; k++)
                     fused_skip[trunc_skip[k]] = 1;
                 {
@@ -6593,6 +6703,26 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 mark_reg(needed, ssa_uses_f, nvals_f, other);
                 if (st_idx >= 0)
                     mark_reg(needed, ssa_uses_f, nvals_f, st_idx);
+                /* Indexed abs32 only: remat rebuilds mask/index at andb.
+                 * Also drop the load-side index tree (distinct SAR SSA). */
+                if (st_gname && st_idx >= 0) {
+                    fused_skip_remat_tree(fused_skip, fn, ssa_def, raw_uses,
+                                          nvals_f, alloca_off, other, 0);
+                    fused_skip_remat_tree(fused_skip, fn, ssa_def, raw_uses,
+                                          nvals_f, alloca_off, st_idx, 0);
+                    if (fn->insts.data[li].op == IR_LOAD_PTR
+                        && fn->insts.data[li].a >= 0) {
+                        IRValue lb = -1, lix = -1;
+                        int lsc = 0, ldisp = 0;
+                        if (local_abs_af(ir, fn, ssa_def, alloca_off,
+                                         fn->insts.data[li].a,
+                                         &lb, &lix, &lsc, &ldisp)
+                            && lix >= 0)
+                            fused_skip_remat_tree(fused_skip, fn, ssa_def,
+                                                  raw_uses, nvals_f,
+                                                  alloca_off, lix, 0);
+                    }
+                }
             }
             (void)rop;
         }
@@ -7216,7 +7346,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_SUBO:
             case IR_MULO:
                 isel_ovf(&out->text, inst, fn, ssa_def, ra, dr,
-                         ovf_keep_flags[j]);
+                         ovf_keep_flags[j], ovf_wrap_off[j], ovf_wrap_w[j]);
                 break;
 
             case IR_ADD: {
@@ -11001,6 +11131,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(call_cbr_rax);
         free(ret_only);
         free(ovf_keep_flags);
+        free(ovf_wrap_off);
+        free(ovf_wrap_w);
         free(fused_skip);
         free(carry_hi_at);
         free(carry_is_sub);
