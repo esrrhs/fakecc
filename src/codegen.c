@@ -1660,6 +1660,52 @@ static size_t emit_arith_r8_rip(Buffer *b, int op, int src) {
     return patch;
 }
 
+/* andb/orb/… %src8, symb(index*scale) — R_X86_64_32S (sieve clear_prime). */
+static size_t emit_arith_r8_abs32(Buffer *b, int op, int src, int index,
+                                  int scale2) {
+    uint8_t bop = (uint8_t)(op & ~1);
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        int need_rex = (src >= 4 && src <= 7) || src >= 8 || index >= 8;
+        if (need_rex)
+            emit_byte(b, (uint8_t)(0x40 | ((src & 8) >> 1) | ((index & 8) >> 3)));
+        emit_byte(b, bop);
+        emit_modrm(b, 2, src & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        int need_rex = (src >= 4 && src <= 7) || src >= 8 || idx >= 8;
+        if (need_rex)
+            emit_byte(b, (uint8_t)(0x40 | ((src & 8) >> 1) | ((idx & 8) >> 2)));
+        emit_byte(b, bop);
+        emit_modrm(b, 0, src & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+
+/* andb/orb/… $imm8, symb(index*scale) — R_X86_64_32S. */
+static size_t emit_arith_imm8_abs32(Buffer *b, int ext, int32_t imm, int index,
+                                    int scale2) {
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        if (index >= 8) emit_byte(b, 0x41);
+        emit_byte(b, 0x80);
+        emit_modrm(b, 2, ext, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        if (idx >= 8) emit_byte(b, 0x42);
+        emit_byte(b, 0x80);
+        emit_modrm(b, 0, ext, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    emit_byte(b, (uint8_t)imm);
+    return patch;
+}
+
 /* movl/movb $imm, symb(%rip) — returns patch offset of the disp32. */
 static size_t emit_store_imm_rip(Buffer *b, int32_t imm, int width) {
     size_t patch;
@@ -4770,6 +4816,153 @@ static int local_abs_af(const IRModule *ir, const IRFunction *fn,
     return 1;
 }
 
+/* clear_prime emits two GEPs (load + store) of bits[i>>3]; the SAR indices
+ * are distinct SSA values of the same frame load.  Treat them as equivalent
+ * when they peel to the same shape. */
+static int abs32_idx_equiv(const IRFunction *fn, const int *def,
+                           const int *alloca_off, IRValue a, IRValue b,
+                           int depth) {
+    if (a == b) return 1;
+    if (depth > 8 || !fn || !def) return 0;
+    if (a < 0 || b < 0 || a >= fn->next_value_id || b >= fn->next_value_id)
+        return 0;
+    if (def[a] < 0 || def[b] < 0) return 0;
+    if (!value_unique_def(fn, a) || !value_unique_def(fn, b)) return 0;
+    const IRInst *da = &fn->insts.data[def[a]];
+    const IRInst *db = &fn->insts.data[def[b]];
+    /* Peel COPY / widen. */
+    if (da->op == IR_COPY || da->op == IR_SEXT || da->op == IR_ZEXT
+        || da->op == IR_TRUNC)
+        return abs32_idx_equiv(fn, def, alloca_off, da->a, b, depth + 1);
+    if (db->op == IR_COPY || db->op == IR_SEXT || db->op == IR_ZEXT
+        || db->op == IR_TRUNC)
+        return abs32_idx_equiv(fn, def, alloca_off, a, db->a, depth + 1);
+    if (da->op == IR_SHR && db->op == IR_SHR
+        && da->is_unsigned == db->is_unsigned) {
+        int64_t ia = 0, ib = 0;
+        if (!ssa_const_imm(fn, def, da->b, &ia)
+            || !ssa_const_imm(fn, def, db->b, &ib) || ia != ib)
+            return 0;
+        return abs32_idx_equiv(fn, def, alloca_off, da->a, db->a, depth + 1);
+    }
+    if ((da->op == IR_LOAD || da->op == IR_LOAD_PTR)
+        && (db->op == IR_LOAD || db->op == IR_LOAD_PTR)) {
+        int oa = 0, ob = 0;
+        if (fold_ptr_off(fn, def, alloca_off, da->a, &oa, 0)
+            && fold_ptr_off(fn, def, alloca_off, db->a, &ob, 0)
+            && oa != 0 && oa == ob)
+            return 1;
+    }
+    return 0;
+}
+
+/* Rematerialize a small integer tree into dst.  Used for indexed abs32 RMW
+ * masks (~(1<<(i&7))): RA may have reused the mask's home after the fused
+ * BAND, so ensure_reg would read a stale register. */
+static int remat_rmw_operand(Buffer *b, const IRFunction *fn, const int *def,
+                             const RAResult *ra, const int *alloca_off,
+                             IRValue v, int dst, int depth) {
+    if (depth > 10 || !fn || !def || v < 0 || v >= fn->next_value_id
+        || def[v] < 0 || !value_unique_def(fn, v))
+        return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    int width = d->width > 0 ? d->width : 4;
+    if (d->op == IR_COPY || d->op == IR_ZEXT || d->op == IR_SEXT
+        || d->op == IR_TRUNC)
+        return remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst,
+                                 depth + 1);
+    if (d->op == IR_CONST && !d->is_float) {
+        if (d->imm == 0)
+            emit_xor_rr(b, dst);
+        else if (imm_fits_i32(d->imm))
+            emit_mov_imm32(b, dst, (int32_t)d->imm);
+        else
+            emit_mov_imm64(b, dst, d->imm);
+        return 1;
+    }
+    if (d->op == IR_LOAD || d->op == IR_LOAD_PTR) {
+        int off = 0;
+        if (!fold_ptr_off(fn, def, alloca_off, d->a, &off, 0) || off == 0)
+            return 0;
+        int lw = d->width > 0 ? d->width : width;
+        emit_load_disp(b, dst, REG_RBP, off, lw, d->is_unsigned);
+        return 1;
+    }
+    if (d->op == IR_BNOT) {
+        if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst, depth + 1))
+            return 0;
+        emit_unary_f7_w(b, 2, dst, width); /* not */
+        return 1;
+    }
+    if (d->op == IR_NEG) {
+        if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst, depth + 1))
+            return 0;
+        emit_unary_f7_w(b, 3, dst, width);
+        return 1;
+    }
+    {
+        int64_t imm = 0;
+        IRValue base = -1;
+        if (ssa_const_imm(fn, def, d->b, &imm))
+            base = d->a;
+        else if (d->op != IR_SUB && d->op != IR_SHL && d->op != IR_SHR
+                 && d->op != IR_ROL && ssa_const_imm(fn, def, d->a, &imm))
+            base = d->b;
+        if (base >= 0 && (d->op == IR_BAND || d->op == IR_BOR || d->op == IR_BXOR
+                          || d->op == IR_ADD)
+            && (imm_fits_i32(imm) || ((d->op == IR_BAND || d->op == IR_BOR
+                                       || d->op == IR_BXOR)
+                                      && imm_fits_bitwise_u32(imm)))) {
+            if (!remat_rmw_operand(b, fn, def, ra, alloca_off, base, dst,
+                                   depth + 1))
+                return 0;
+            int ext = 0;
+            if (d->op == IR_BAND) ext = 4;
+            else if (d->op == IR_BOR) ext = 1;
+            else if (d->op == IR_BXOR) ext = 6;
+            /* ADD ext 0 */
+            int ew = width;
+            int32_t enc = (int32_t)imm;
+            if ((d->op == IR_BAND || d->op == IR_BOR || d->op == IR_BXOR)
+                && !imm_fits_i32(imm) && imm_fits_bitwise_u32(imm)) {
+                ew = 4;
+                enc = (int32_t)(uint32_t)imm;
+            }
+            emit_arith_imm_w(b, ext, dst, enc, ew);
+            return 1;
+        }
+        if (base >= 0 && d->op == IR_SHL && imm >= 0 && imm < 64) {
+            if (!remat_rmw_operand(b, fn, def, ra, alloca_off, base, dst,
+                                   depth + 1))
+                return 0;
+            emit_shift_imm_w(b, 4, dst, (uint8_t)imm, width);
+            return 1;
+        }
+        if (base >= 0 && d->op == IR_SHR && imm >= 0 && imm < 64) {
+            if (!remat_rmw_operand(b, fn, def, ra, alloca_off, base, dst,
+                                   depth + 1))
+                return 0;
+            /* ext 5 = shr, 7 = sar */
+            emit_shift_imm_w(b, d->is_unsigned ? 5 : 7, dst, (uint8_t)imm, width);
+            return 1;
+        }
+        /* Variable shift count: remat count into RCX, base into dst. */
+        if (d->op == IR_SHL) {
+            if (dst == REG_RCX) return 0;
+            if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->b, REG_RCX,
+                                   depth + 1))
+                return 0;
+            if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst,
+                                   depth + 1))
+                return 0;
+            emit_shift_cl_w(b, 4, dst, width);
+            return 1;
+        }
+    }
+    (void)ra;
+    return 0;
+}
+
 /* SEXT of a sole-use frame LOAD_PTR → one movsx/movsxd from [rbp+off]. */
 static int sext_folds_frame_load(const IRFunction *fn, const int *def,
                                  const int *alloca_off, const int *raw_uses,
@@ -6140,17 +6333,27 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         memset(mem_rmw_imm, 0, (ninst_f ? ninst_f : 1) * sizeof(int32_t));
         const char **mem_rmw_gname = xmalloc((ninst_f ? ninst_f : 1) * sizeof(char *));
         memset(mem_rmw_gname, 0, (ninst_f ? ninst_f : 1) * sizeof(char *));
+        IRValue *mem_rmw_idx = xmalloc((ninst_f ? ninst_f : 1) * sizeof(IRValue));
+        int *mem_rmw_sc = xmalloc((ninst_f ? ninst_f : 1) * sizeof(int));
+        int *mem_rmw_disp = xmalloc((ninst_f ? ninst_f : 1) * sizeof(int));
+        for (size_t uj = 0; uj < (ninst_f ? ninst_f : 1); uj++) {
+            mem_rmw_idx[uj] = -1;
+            mem_rmw_sc[uj] = 0;
+            mem_rmw_disp[uj] = 0;
+        }
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             const IRInst *st = &fn->insts.data[uj];
             if (skip_body[uj] || fused_skip[uj]) continue;
             if (st->op == IR_STORE_PTR && store_imm[uj]) continue;
             if (st->op != IR_STORE_PTR && st->op != IR_STORE) continue;
             /* Width 4: addl/andl mem.  Width 1: andb/orb for bit clears
-             * (sieve bits[0] &= ~3, bitfields).  Indexed abs32 (clear_prime)
-             * still needs a unique GADDR and is skipped below. */
+             * (sieve bits[0] &= ~3, bitfields).  Indexed abs32 covers
+             * clear_prime: andb %reg, bits(,%idx,1). */
             if (st->width != 4 && st->width != 1) continue;
             int poff = 0;
             const char *st_gname = NULL;
+            IRValue st_idx = -1;
+            int st_sc = 0, st_disp = 0;
             if (st->op == IR_STORE) {
                 if (st->a < 0 || st->a >= nvals_f || alloca_off[st->a] == 0)
                     continue;
@@ -6158,10 +6361,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             } else if (fold_ptr_off(fn, ssa_def, alloca_off, st->a, &poff, 0)) {
                 /* frame slot */
             } else {
-                st_gname = peel_gaddr_name_unique(fn, ssa_def, st->a);
-                if (!st_gname || !gaddr_is_local_abs(ir, st_gname))
-                    continue;
-                poff = 0; /* sentinel: match by gname */
+                IRValue sab = -1;
+                if (local_abs_af(ir, fn, ssa_def, alloca_off, st->a,
+                                 &sab, &st_idx, &st_sc, &st_disp)) {
+                    st_gname = peel_gaddr_name(fn, ssa_def, sab);
+                    if (!st_gname || !gaddr_is_local_abs(ir, st_gname))
+                        continue;
+                    poff = 0;
+                } else {
+                    st_gname = peel_gaddr_name_unique(fn, ssa_def, st->a);
+                    if (!st_gname || !gaddr_is_local_abs(ir, st_gname))
+                        continue;
+                    poff = 0; /* sentinel: match by gname */
+                    st_idx = -1;
+                }
             }
             if (st->b < 0 || st->b >= nvals_f || ssa_def[st->b] < 0
                 || raw_uses[st->b] != 1 || !value_unique_def(fn, st->b))
@@ -6222,7 +6435,26 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (skip_body[di] || fused_skip[di]) break;
                     const IRInst *d = &fn->insts.data[di];
                     if (d->op == IR_LOAD_PTR) {
-                        if (st_gname) {
+                        if (st_gname && st_idx >= 0) {
+                            /* Indexed abs32: same pointer SSA, or same
+                             * local-abs (gname + equiv idx, scale, disp). */
+                            if (d->a == st->a) {
+                                loff = 0;
+                            } else {
+                                IRValue lb = -1, li = -1;
+                                int lsc = 0, ldisp = 0;
+                                if (!local_abs_af(ir, fn, ssa_def, alloca_off,
+                                                  d->a, &lb, &li, &lsc, &ldisp))
+                                    break;
+                                const char *lg = peel_gaddr_name(fn, ssa_def, lb);
+                                if (!lg || strcmp(lg, st_gname) != 0
+                                    || lsc != st_sc || ldisp != st_disp
+                                    || !abs32_idx_equiv(fn, ssa_def, alloca_off,
+                                                        li, st_idx, 0))
+                                    break;
+                                loff = 0;
+                            }
+                        } else if (st_gname) {
                             const char *lg = peel_gaddr_name_unique(
                                 fn, ssa_def, d->a);
                             if (!lg || strcmp(lg, st_gname) != 0) break;
@@ -6292,6 +6524,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 mem_rmw[uj] = (char)(1 + ext); /* 1..7 = imm form */
                 mem_rmw_imm[uj] = (int32_t)immv;
                 mem_rmw_gname[uj] = st_gname;
+                mem_rmw_idx[uj] = st_idx;
+                mem_rmw_sc[uj] = st_sc;
+                mem_rmw_disp[uj] = st_disp;
                 fused_skip[ai] = 1;
                 fused_skip[li] = 1;
                 for (int k = 0; k < npeel; k++)
@@ -6313,40 +6548,51 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                 }
                 /* Only skip a STORE_PTR address ADDR; IR_STORE's a is the
-                 * alloca itself and must stay.  Rip RMW: load+store share
-                 * the GADDR (2 uses) — skip it too. */
-                if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
-                    && ssa_def[st->a] >= 0
-                    && raw_uses[st->a] <= (st_gname ? 2 : 1))
-                    fused_skip[ssa_def[st->a]] = 1;
-                if (fn->insts.data[li].op == IR_LOAD_PTR
-                    && fn->insts.data[li].a >= 0
-                    && fn->insts.data[li].a < nvals_f
-                    && ssa_def[fn->insts.data[li].a] >= 0
-                    && raw_uses[fn->insts.data[li].a]
-                       <= (st_gname ? 2 : 1))
-                    fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
+                 * alloca itself and must stay.  Rip/indexed RMW: load+store
+                 * share the address (2 uses) — skip it too. */
+                {
+                    int auses = st_gname ? 2 : 1;
+                    if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
+                        && ssa_def[st->a] >= 0
+                        && raw_uses[st->a] <= auses)
+                        fused_skip[ssa_def[st->a]] = 1;
+                    if (fn->insts.data[li].op == IR_LOAD_PTR
+                        && fn->insts.data[li].a >= 0
+                        && fn->insts.data[li].a < nvals_f
+                        && ssa_def[fn->insts.data[li].a] >= 0
+                        && raw_uses[fn->insts.data[li].a] <= auses)
+                        fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
+                }
+                if (st_idx >= 0)
+                    mark_reg(needed, ssa_uses_f, nvals_f, st_idx);
             } else if (raw_uses[other] >= 1 && commutative) {
                 /* reg form: addl/xorl %reg, mem.  Keep SUB as load/op/store. */
                 mem_rmw[uj] = (char)(10 + (rop & 0x3f)); /* mark reg form */
                 mem_rmw_imm[uj] = other; /* reuse as IRValue */
                 mem_rmw_gname[uj] = st_gname;
+                mem_rmw_idx[uj] = st_idx;
+                mem_rmw_sc[uj] = st_sc;
+                mem_rmw_disp[uj] = st_disp;
                 fused_skip[ai] = 1;
                 fused_skip[li] = 1;
                 for (int k = 0; k < ntrunc; k++)
                     fused_skip[trunc_skip[k]] = 1;
-                if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
-                    && ssa_def[st->a] >= 0
-                    && raw_uses[st->a] <= (st_gname ? 2 : 1))
-                    fused_skip[ssa_def[st->a]] = 1;
-                if (fn->insts.data[li].op == IR_LOAD_PTR
-                    && fn->insts.data[li].a >= 0
-                    && fn->insts.data[li].a < nvals_f
-                    && ssa_def[fn->insts.data[li].a] >= 0
-                    && raw_uses[fn->insts.data[li].a]
-                       <= (st_gname ? 2 : 1))
-                    fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
+                {
+                    int auses = st_gname ? 2 : 1;
+                    if (st->op == IR_STORE_PTR && st->a >= 0 && st->a < nvals_f
+                        && ssa_def[st->a] >= 0
+                        && raw_uses[st->a] <= auses)
+                        fused_skip[ssa_def[st->a]] = 1;
+                    if (fn->insts.data[li].op == IR_LOAD_PTR
+                        && fn->insts.data[li].a >= 0
+                        && fn->insts.data[li].a < nvals_f
+                        && ssa_def[fn->insts.data[li].a] >= 0
+                        && raw_uses[fn->insts.data[li].a] <= auses)
+                        fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
+                }
                 mark_reg(needed, ssa_uses_f, nvals_f, other);
+                if (st_idx >= 0)
+                    mark_reg(needed, ssa_uses_f, nvals_f, st_idx);
             }
             (void)rop;
         }
@@ -8309,6 +8555,54 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_sse_store_via_ptr(&out->text, ptr_r, XMM_SCRATCH0,
                                                    is_float);
                     }
+                } else if (mem_rmw_gname[j] && mem_rmw_idx[j] >= 0
+                           && mem_rmw[j] >= 1 && inst->width == 1) {
+                    /* Indexed abs32 byte RMW (clear_prime andb).  Rematerialize
+                     * the mask first — its RA home may be stale after the
+                     * fused BAND. */
+                    int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
+                    IRValue ix = mem_rmw_idx[j];
+                    int isc = mem_rmw_sc[j];
+                    IRValue inner = ix;
+                    int psc = 0;
+                    if (peel_sib_scale(fn, ssa_def, ix, &inner, &psc)) {
+                        ix = inner;
+                        isc = psc;
+                    }
+                    if (gsym >= 0 && out->syms[gsym].shndx != SECT_UNDEF) {
+                        size_t patch;
+                        if (mem_rmw[j] <= 7) {
+                            int idx_r = ensure_index(&out->text, ix, ra);
+                            patch = emit_arith_imm8_abs32(
+                                &out->text, mem_rmw[j] - 1, mem_rmw_imm[j],
+                                idx_r, isc);
+                        } else {
+                            IRValue ov = (IRValue)mem_rmw_imm[j];
+                            int val_r = REG_RAX;
+                            if (!remat_rmw_operand(&out->text, fn, ssa_def, ra,
+                                                   alloca_off, ov, val_r, 0))
+                                ensure_reg(&out->text, ov, val_r, ra);
+                            /* Rematerialize index into RSI (not RAX). */
+                            int idx_r = REG_RSI;
+                            if (!remat_rmw_operand(&out->text, fn, ssa_def, ra,
+                                                   alloca_off, ix, idx_r, 0)) {
+                                idx_r = ensure_index(&out->text, ix, ra);
+                                if (idx_r == val_r) {
+                                    emit_mov_rr(&out->text, REG_RDX, val_r);
+                                    val_r = REG_RDX;
+                                }
+                            } else {
+                                /* cltq-equivalent for signed i>>3 index. */
+                                emit_rex_wrb(&out->text, 1, idx_r, idx_r);
+                                emit_byte(&out->text, 0x63); /* movsxd */
+                                emit_modrm(&out->text, 3, idx_r & 7, idx_r & 7);
+                            }
+                            patch = emit_arith_r8_abs32(
+                                &out->text, mem_rmw[j] - 10, val_r, idx_r, isc);
+                        }
+                        emit_module_add_reloc(out, patch, R_X86_64_32S,
+                                              gsym, mem_rmw_disp[j]);
+                    }
                 } else if (af_kind == AF_RBP_IDX) {
                     int idx_r = af_idx >= 0
                                 ? ensure_index(&out->text, af_idx, ra) : -1;
@@ -8394,8 +8688,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     else
                         emit_arith_r32_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
                                             REG_RAX, ptr_off);
-                } else if (mem_rmw_gname[j] && mem_rmw[j] >= 1
-                           && mem_rmw[j] <= 7) {
+                } else if (mem_rmw_gname[j] && mem_rmw_idx[j] < 0
+                           && mem_rmw[j] >= 1 && mem_rmw[j] <= 7) {
                     int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
                     if (gsym >= 0 && out->syms[gsym].shndx != SECT_UNDEF) {
                         int32_t imm = mem_rmw_imm[j];
@@ -8414,7 +8708,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_module_add_reloc(out, patch, R_X86_64_PC32,
                                               gsym, addend);
                     }
-                } else if (mem_rmw_gname[j] && mem_rmw[j] >= 10) {
+                } else if (mem_rmw_gname[j] && mem_rmw_idx[j] < 0
+                           && mem_rmw[j] >= 10) {
                     int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
                     IRValue ov = (IRValue)mem_rmw_imm[j];
                     ensure_reg(&out->text, ov, REG_RAX, ra);
@@ -10692,6 +10987,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(mem_rmw);
         free(mem_rmw_imm);
         free(mem_rmw_gname);
+        free(mem_rmw_idx);
+        free(mem_rmw_sc);
+        free(mem_rmw_disp);
         free(param_home_off);
         free(needed);
         free(carry_zero_hi);
