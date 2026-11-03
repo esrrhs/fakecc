@@ -1,3 +1,4 @@
+// unsupported_on: darwin-arm64
 // expect: 7
 /* M2: naked function — no push %rbp; whole body is asm. */
 package main;

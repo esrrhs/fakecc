@@ -1,3 +1,4 @@
+// unsupported_on: darwin-arm64
 // expect: 0
 /* M1: outb-style constrained asm must emit OUT; mov path checks storeback. */
 package main;

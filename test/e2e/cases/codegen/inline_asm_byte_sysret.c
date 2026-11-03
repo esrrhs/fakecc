@@ -1,3 +1,4 @@
+// unsupported_on: darwin-arm64
 // expect: 0
 /* M1: .byte / sysretq raw opcode path. */
 package main;

@@ -3439,6 +3439,18 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
                     emit_module_dbg_func_end(
                         &dm, fi, text_base[i] + f->end_pc,
                         text_base[i] + f->prologue_end_pc);
+                    /* Preserve prologue CFA landmarks (N3: QEMU+gdb unwind).
+                     * Without these, DW_AT_frame_base falls back to sp/rsp while
+                     * locals stay fbreg-off-fp -- breaks Darwin lldb. */
+                    if (f->after_push_rbp_pc > f->start_pc ||
+                        f->after_mov_rbp_pc > f->start_pc) {
+                        emit_module_dbg_func_frame(
+                            &dm, fi,
+                            text_base[i] + f->after_push_rbp_pc,
+                            text_base[i] + f->after_mov_rbp_pc);
+                        if (f->frame_size)
+                            dm.dbg_funcs[fi].frame_size = f->frame_size;
+                    }
                     for (size_t k = 0; k < f->num_vars; k++) {
                         emit_module_add_dbg_var(&dm, fi, &f->vars[k]);
                         DebugVar *dv =

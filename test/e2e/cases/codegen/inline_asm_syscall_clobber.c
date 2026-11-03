@@ -1,3 +1,4 @@
+// unsupported_on: darwin-arm64
 // expect: 42
 /* M1: syscall-like asm with clobbers + rcx→r10 style mov. */
 package main;
