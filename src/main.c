@@ -1,6 +1,7 @@
 #include "fakecc/codegen.h"
 #include "fakecc/common.h"
 #include "fakecc/emit.h"
+#include "fakecc/iasm.h"
 #include "fakecc/ir.h"
 #include "fakecc/lexer.h"
 #include "fakecc/macho.h"
@@ -107,7 +108,7 @@ static void usage(void) {
             "              [--image-base=ADDR] [--kernel-multiboot]\n"
             "              [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
             "              [-nostdlib] [-nodefaultlibs]\n"
-            "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
+            "              [-LDIR]... [-lLIB]... <input.c|.S|.o...> -o <output>\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
             "  -shared         produce a shared library (.so, or a DLL on Windows)\n"
             "  -g              emit DWARF debug info (line numbers, variables);\n"
@@ -146,6 +147,12 @@ static int ends_with(const char *s, const char *suf) {
 /* Relocatable object inputs: ELF/Mach-O use .o; Windows COFF uses .obj too. */
 static int is_obj_input(const char *s) {
     return ends_with(s, ".o") || ends_with(s, ".obj");
+}
+
+/* Gas-subset assembly (fakeos S3). */
+static int is_asm_input(const char *s) {
+    return ends_with(s, ".S") || ends_with(s, ".s")
+        || ends_with(s, ".fakecc.S");
 }
 
 /* Windows link inputs that are archives, import libraries, or DLLs.
@@ -643,11 +650,15 @@ int main(int argc, char **argv) {
     if (target_arg) {
         target = target_parse(target_arg);
         if (!target) {
+            /* S4: do not hard-fail on Makefile /flags probing with an unknown
+             * triple — fall back to the host default so single-backend and
+             * embedded /etc/fakecc.flags stay usable. */
             fprintf(stderr,
-                    "fakecc: unrecognized target triple '%s' "
-                    "(supported: x86_64-linux, arm64-macos, x86_64-windows)\n",
+                    "fakecc: warning: unrecognized target triple '%s' "
+                    "(supported: x86_64-linux, arm64-macos, x86_64-windows); "
+                    "using host default\n",
                     target_arg);
-            exit(1);
+            target = target_default();
         }
     } else {
         target = target_default();
@@ -869,22 +880,36 @@ int main(int argc, char **argv) {
                     "fakecc: -l / -L / -nostdlib / -nodefaultlibs are link-time options\n");
             exit(1);
         }
-        TranslationUnit tu;
-        char *src = read_file(inputs[0]);
-        if (parse_source(src, inputs[0], &tu, &pkg) != FAKECC_OK) {
-            free(src);
-            exit(1);
-        }
-        free(src);
         EmitModule em;
+        emit_module_init(&em);
         emit_set_object_mode(1);
-        int low = lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
-        emit_set_object_mode(0);
-        if (low != FAKECC_OK) {
+        if (is_asm_input(inputs[0])) {
+            if (target->arch != TARGET_ARCH_X86_64) {
+                fprintf(stderr, "fakecc: .S assembly requires x86_64 target\n");
+                exit(1);
+            }
+            char *src = read_file(inputs[0]);
+            if (assemble_s_file(src, inputs[0], &em) != 0) {
+                free(src);
+                exit(1);
+            }
+            free(src);
+        } else {
+            TranslationUnit tu;
+            char *src = read_file(inputs[0]);
+            if (parse_source(src, inputs[0], &tu, &pkg) != FAKECC_OK) {
+                free(src);
+                exit(1);
+            }
+            free(src);
+            int low = lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+            if (low != FAKECC_OK) {
+                tu_free(&tu);
+                exit(1);
+            }
             tu_free(&tu);
-            exit(1);
         }
-        tu_free(&tu);
+        emit_set_object_mode(0);
         emit_obj(&em, output_path);
         module_free(&em);
         free(inputs);
@@ -935,7 +960,7 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < ninputs; i++) {
         tu_init(&user_tus[i]);
-        if (is_obj_input(inputs[i])) {
+        if (is_obj_input(inputs[i]) || is_asm_input(inputs[i])) {
             token_array_init(&user_tokens[i]);
         } else {
             char *src = read_file(inputs[i]);
@@ -1043,6 +1068,15 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ninputs; i++) {
         if (is_obj_input(inputs[i])) {
             if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
+        } else if (is_asm_input(inputs[i])) {
+            emit_module_init(&mods[i]);
+            char *src = read_file(inputs[i]);
+            if (assemble_s_file(src, inputs[i], &mods[i]) != 0) {
+                free(src);
+                exit(1);
+            }
+            free(src);
+            tu_free(&user_tus[i]);
         } else {
             if (lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg) != FAKECC_OK)
                 exit(1);

@@ -29,4 +29,13 @@ int iasm_emit_x86(Buffer *text, EmitModule *out,
                   const IAsmOperand *ops, int nops,
                   const char *file, int line, int col);
 
+/* Assemble a gas-subset AT&T body into out->text and register globals
+ * / externs on the EmitModule (fakeos S3 / fakecc -c foo.S). */
+int iasm_assemble_body(EmitModule *out, const char *body,
+                       const char **globals, int nglobals,
+                       const char **externs, int nexterns);
+
+/* Parse a gas-compatible .S / .s / .fakecc.S file into an EmitModule. */
+int assemble_s_file(const char *src, const char *filename, EmitModule *out);
+
 #endif /* FAKECC_IASM_H */

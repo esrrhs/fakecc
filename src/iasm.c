@@ -80,8 +80,8 @@ typedef struct {
     int jcc_op;  /* 0xEB short jmp, 0xE9 near, or 0x0F8x jcc */
 } LocFix;
 
-#define MAX_LOCLAB 64
-#define MAX_LOCFIX 128
+#define MAX_LOCLAB 256
+#define MAX_LOCFIX 512
 
 static int is_ident_start(int c) {
     return isalpha(c) || c == '_' || c == '.';
@@ -262,8 +262,25 @@ static void emit_mov_ri(Buffer *b, int dst, int64_t imm, int w) {
     }
 }
 
-static void emit_mov_rm(Buffer *b, int dst, int base, int w) {
-    /* mov dst, (base) */
+
+static void modrm_mem(Buffer *b, int reg, int base, int64_t disp) {
+    int use_sib = ((base & 7) == 4);
+    if (disp == 0 && (base & 7) != 5) {
+        if (use_sib) { modrm(b, 0, reg, 4); eb(b, 0x24); }
+        else modrm(b, 0, reg, base);
+    } else if (disp == (int64_t)(int8_t)disp) {
+        if (use_sib) { modrm(b, 1, reg, 4); eb(b, 0x24); }
+        else modrm(b, 1, reg, base);
+        eb(b, (uint8_t)disp);
+    } else {
+        if (use_sib) { modrm(b, 2, reg, 4); eb(b, 0x24); }
+        else modrm(b, 2, reg, base);
+        e32(b, (int32_t)disp);
+    }
+}
+
+static void emit_mov_rm(Buffer *b, int dst, int base, int64_t disp, int w) {
+    /* mov dst, disp(base) */
     if (w == 1) {
         rex(b, 0, dst, 0, base);
         eb(b, 0x8A);
@@ -274,16 +291,10 @@ static void emit_mov_rm(Buffer *b, int dst, int base, int w) {
     } else {
         rex(b, 1, dst, 0, base); eb(b, 0x8B);
     }
-    if ((base & 7) == 4) { /* rsp/r12 SIB */
-        modrm(b, 0, dst, 4); eb(b, 0x24);
-    } else if ((base & 7) == 5) { /* rbp/r13 need disp8=0 */
-        modrm(b, 1, dst, 5); eb(b, 0);
-    } else {
-        modrm(b, 0, dst, base);
-    }
+    modrm_mem(b, dst, base, disp);
 }
 
-static void emit_mov_mr(Buffer *b, int base, int src, int w) {
+static void emit_mov_mr(Buffer *b, int base, int64_t disp, int src, int w) {
     if (w == 1) {
         rex(b, 0, src, 0, base); eb(b, 0x88);
     } else if (w == 2) {
@@ -293,16 +304,50 @@ static void emit_mov_mr(Buffer *b, int base, int src, int w) {
     } else {
         rex(b, 1, src, 0, base); eb(b, 0x89);
     }
-    if ((base & 7) == 4) { modrm(b, 0, src, 4); eb(b, 0x24); }
-    else if ((base & 7) == 5) { modrm(b, 1, src, 5); eb(b, 0); }
-    else modrm(b, 0, src, base);
+    modrm_mem(b, src, base, disp);
 }
 
-/* Parse a single operand token into kind/reg/imm/sym. Consumes from *pp. */
+/* Parse a single operand token into kind/reg/imm/sym. Consumes from *pp.
+ * kind 0=reg 1=imm 2=mem(reg[+disp in *imm]) 3=symbol 4=sym(%rip). */
 static int parse_operand(const char **pp, int *kind, int *reg, int64_t *imm,
                          char **sym, int *width) {
     const char *p = skip_ws(*pp);
     *kind = -1; *reg = 0; *imm = 0; *sym = NULL; *width = 8;
+
+    /* Peek: disp(%reg) or (%reg) */
+    {
+        const char *q = p;
+        int64_t disp = 0;
+        int has_disp = 0;
+        if (*q == '(') {
+            /* bare (%reg) */
+        } else if (*q == '-' || *q == '+' || isdigit((unsigned char)*q)) {
+            const char *save = q;
+            if (!parse_imm(&q, &disp)) goto not_mem;
+            q = skip_ws(q);
+            if (*q != '(') goto not_mem;
+            has_disp = 1;
+            (void)save;
+        } else {
+            goto not_mem;
+        }
+        if (*q != '(') goto not_mem;
+        q++;
+        q = skip_ws(q);
+        if (*q != '%') goto not_mem;
+        q++;
+        int w = 8;
+        int r = parse_reg_name(q, &w);
+        if (r < 0) goto not_mem;
+        while (isalnum((unsigned char)*q) || *q == '_') q++;
+        q = skip_ws(q);
+        if (*q != ')') goto not_mem;
+        q++;
+        *kind = 2; *reg = r; *width = w; *imm = has_disp ? disp : 0;
+        *pp = q;
+        return 1;
+    }
+not_mem:
     if (*p == '$' || (*p == '-' && p[1] == '$') ||
         (isdigit((unsigned char)*p) || (*p == '-' && isdigit((unsigned char)p[1])))) {
         if (!parse_imm(&p, imm)) return 0;
@@ -315,33 +360,22 @@ static int parse_operand(const char **pp, int *kind, int *reg, int64_t *imm,
         int w = 8;
         int r = parse_reg_name(p, &w);
         if (r < 0) return 0;
-        /* advance past reg name */
         while (isalnum((unsigned char)*p) || *p == '_') p++;
         *kind = 0; *reg = r; *width = w;
         *pp = p;
         return 1;
     }
-    if (*p == '(') {
-        p++;
-        p = skip_ws(p);
-        if (*p == '%') {
-            p++;
-            int w = 8;
-            int r = parse_reg_name(p, &w);
-            if (r < 0) return 0;
-            while (isalnum((unsigned char)*p) || *p == '_') p++;
-            p = skip_ws(p);
-            if (*p != ')') return 0;
-            p++;
-            *kind = 2; *reg = r; *width = w;
-            *pp = p;
-            return 1;
-        }
-        return 0;
-    }
     if (is_ident_start((unsigned char)*p)) {
         char *id = dup_ident(&p);
         if (!id) return 0;
+        const char *q = skip_ws(p);
+        if (q[0] == '(' && q[1] == '%' &&
+            (strncmp(q + 2, "rip)", 4) == 0 || strncmp(q + 2, "RIP)", 4) == 0)) {
+            *kind = 4;
+            *sym = id;
+            *pp = q + 6;
+            return 1;
+        }
         *kind = 3; *sym = id;
         *pp = p;
         return 1;
@@ -377,6 +411,8 @@ static int emit_unary_no_op(Buffer *b, const char *mn) {
     if (strcmp(mn, "cltq") == 0 || strcmp(mn, "cdqe") == 0) { eb(b, 0x48); eb(b, 0x98); return 1; }
     if (strcmp(mn, "ud2") == 0) { eb(b, 0x0F); eb(b, 0x0B); return 1; }
     if (strcmp(mn, "int3") == 0) { eb(b, 0xCC); return 1; }
+    if (strcmp(mn, "rdmsr") == 0) { eb(b, 0x0F); eb(b, 0x32); return 1; }
+    if (strcmp(mn, "wrmsr") == 0) { eb(b, 0x0F); eb(b, 0x30); return 1; }
     return 0;
 }
 
@@ -571,6 +607,37 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
         free(sym); free(mn); return 0;
     }
 
+    /* one-operand privileged / system */
+    if (strcmp(mn, "lgdt") == 0 || strcmp(mn, "lidt") == 0 ||
+        strcmp(mn, "ltr") == 0 || strcmp(mn, "invlpg") == 0) {
+        int k, r, w; int64_t imm; char *sym = NULL;
+        if (!parse_operand(&p, &k, &r, &imm, &sym, &w)) { free(mn); return 0; }
+        int ext = 2;
+        if (strcmp(mn, "lidt") == 0) ext = 3;
+        else if (strcmp(mn, "ltr") == 0) ext = 3;
+        else if (strcmp(mn, "invlpg") == 0) ext = 7;
+        if (strcmp(mn, "ltr") == 0) {
+            if (k == 0) {
+                eb(b, 0x0F); eb(b, 0x00); modrm(b, 3, 3, r);
+                free(sym); free(mn); return 1;
+            }
+            if (k == 2) {
+                rex(b, 0, 0, 0, r); eb(b, 0x0F); eb(b, 0x00);
+                if ((r & 7) == 4) { modrm(b, 0, 3, 4); eb(b, 0x24); }
+                else modrm(b, 0, 3, r);
+                free(sym); free(mn); return 1;
+            }
+        } else if (k == 2) {
+            /* lgdt/lidt/invlpg m */
+            rex(b, 0, 0, 0, r); eb(b, 0x0F); eb(b, 0x01);
+            if ((r & 7) == 4) { modrm(b, 0, ext, 4); eb(b, 0x24); }
+            else if ((r & 7) == 5) { modrm(b, 1, ext, 5); eb(b, 0); }
+            else modrm(b, 0, ext, r);
+            free(sym); free(mn); return 1;
+        }
+        free(sym); free(mn); return 0;
+    }
+
     /* two-operand: mov, out, in, xchg, test, add, sub, xor, and, or, cmp */
     int k1, r1, w1, k2, r2, w2;
     int64_t imm1 = 0, imm2 = 0;
@@ -602,8 +669,8 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
         /* AT&T: mov src, dst */
         if (k1 == 0 && k2 == 0) { emit_mov_rr(b, r2, r1, w); handled = 1; }
         else if (k1 == 1 && k2 == 0) { emit_mov_ri(b, r2, imm1, w); handled = 1; }
-        else if (k1 == 0 && k2 == 2) { emit_mov_mr(b, r2, r1, w); handled = 1; }
-        else if (k1 == 2 && k2 == 0) { emit_mov_rm(b, r2, r1, w); handled = 1; }
+        else if (k1 == 0 && k2 == 2) { emit_mov_mr(b, r2, imm2, r1, w); handled = 1; }
+        else if (k1 == 2 && k2 == 0) { emit_mov_rm(b, r2, r1, imm1, w); handled = 1; }
         else if (k1 == 1 && k2 == 2) {
             /* mov $imm, (reg) */
             if (w == 1) {
@@ -696,8 +763,11 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
     } else if (strcmp(mn, "xor") == 0 || strcmp(mn, "xorl") == 0 ||
                strcmp(mn, "xorq") == 0) {
         if (k1 == 0 && k2 == 0) {
-            int w = (strcmp(mn, "xorl") == 0) ? 4 : 8;
-            if (w == 4) { rex(b, 0, r1, 0, r2); eb(b, 0x31); }
+            int w = 8;
+            if (strcmp(mn, "xorl") == 0) w = 4;
+            else if (strcmp(mn, "xorq") == 0) w = 8;
+            else w = (w1 < w2) ? w1 : w2;
+            if (w <= 4) { rex(b, 0, r1, 0, r2); eb(b, 0x31); }
             else { rex(b, 1, r1, 0, r2); eb(b, 0x31); }
             modrm(b, 3, r1, r2);
             handled = 1;
@@ -730,9 +800,66 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
     } else if (strcmp(mn, "lea") == 0) {
         if (k1 == 2 && k2 == 0) {
             rex(b, 1, r2, 0, r1); eb(b, 0x8D);
-            if ((r1 & 7) == 4) { modrm(b, 0, r2, 4); eb(b, 0x24); }
-            else if ((r1 & 7) == 5) { modrm(b, 1, r2, 5); eb(b, 0); }
-            else modrm(b, 0, r2, r1);
+            modrm_mem(b, r2, r1, imm1);
+            handled = 1;
+        } else if (k1 == 4 && k2 == 0 && sym1) {
+            /* lea sym(%rip), %reg */
+            rex(b, 1, r2, 0, 0); eb(b, 0x8D); modrm(b, 0, r2, 5);
+            size_t po = b->len; e32(b, 0);
+            if (out) {
+                int sym = emit_module_add_undefined(out, sym1);
+                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
+            }
+            handled = 1;
+        }
+    } else if ((strcmp(mn, "mov") == 0 || strcmp(mn, "movq") == 0 ||
+                strcmp(mn, "movl") == 0) &&
+               ((k1 == 4 && k2 == 0) || (k1 == 0 && k2 == 4))) {
+        /* movq sym(%rip), %reg  /  movq %reg, sym(%rip) */
+        int w = (strcmp(mn, "movl") == 0) ? 4 : 8;
+        if (k1 == 4 && k2 == 0 && sym1) {
+            rex(b, w == 8, r2, 0, 0); eb(b, 0x8B); modrm(b, 0, r2, 5);
+            size_t po = b->len; e32(b, 0);
+            if (out) {
+                int sym = emit_module_add_undefined(out, sym1);
+                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
+            }
+            handled = 1;
+        } else if (k1 == 0 && k2 == 4 && sym2) {
+            rex(b, w == 8, r1, 0, 0); eb(b, 0x89); modrm(b, 0, r1, 5);
+            size_t po = b->len; e32(b, 0);
+            if (out) {
+                int sym = emit_module_add_undefined(out, sym2);
+                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
+            }
+            handled = 1;
+        }
+    } else if (strcmp(mn, "lgdt") == 0 || strcmp(mn, "lidt") == 0) {
+        /* lgdt/lidt m16&64 — AT&T: lgdt (%rdi) */
+        int ext = (strcmp(mn, "lgdt") == 0) ? 2 : 3;
+        if (k1 == 2) {
+            rex(b, 0, 0, 0, r1); eb(b, 0x0F); eb(b, 0x01);
+            if ((r1 & 7) == 4) { modrm(b, 0, ext, 4); eb(b, 0x24); }
+            else if ((r1 & 7) == 5) { modrm(b, 1, ext, 5); eb(b, 0); }
+            else modrm(b, 0, ext, r1);
+            handled = 1;
+        }
+    } else if (strcmp(mn, "ltr") == 0) {
+        if (k1 == 0) {
+            /* ltr r16 */
+            eb(b, 0x0F); eb(b, 0x00); modrm(b, 3, 3, r1);
+            handled = 1;
+        } else if (k1 == 2) {
+            rex(b, 0, 0, 0, r1); eb(b, 0x0F); eb(b, 0x00);
+            if ((r1 & 7) == 4) { modrm(b, 0, 3, 4); eb(b, 0x24); }
+            else modrm(b, 0, 3, r1);
+            handled = 1;
+        }
+    } else if (strcmp(mn, "invlpg") == 0) {
+        if (k1 == 2) {
+            rex(b, 0, 0, 0, r1); eb(b, 0x0F); eb(b, 0x01);
+            if ((r1 & 7) == 4) { modrm(b, 0, 7, 4); eb(b, 0x24); }
+            else modrm(b, 0, 7, r1);
             handled = 1;
         }
     }
@@ -793,5 +920,86 @@ int iasm_emit_x86(Buffer *text, EmitModule *out,
     }
     for (int i = 0; i < nlab; i++) free(labs[i].name);
     free(expanded);
+    return 0;
+}
+
+
+/* Assemble a multi-line AT&T body (standalone .S / file asm).  Labels listed
+ * in `globals` become STB_GLOBAL STT_FUNC at their text offsets; `externs`
+ * become SHN_UNDEF.  Returns 0 on success. */
+int iasm_assemble_body(EmitModule *out, const char *body,
+                       const char **globals, int nglobals,
+                       const char **externs, int nexterns) {
+    if (!out || !body) return -1;
+    size_t text0 = out->text.len;
+
+    LocLab labs[MAX_LOCLAB];
+    LocFix fixes[MAX_LOCFIX];
+    int nlab = 0, nfix = 0;
+    memset(labs, 0, sizeof labs);
+    memset(fixes, 0, sizeof fixes);
+
+    size_t blen = strlen(body);
+    char *copy = malloc(blen + 1);
+    if (!copy) return -1;
+    memcpy(copy, body, blen + 1);
+    if (!copy) return -1;
+    char *buf = copy;
+    while (*buf) {
+        char *eol = buf;
+        while (*eol && *eol != '\n') eol++;
+        char save = *eol;
+        *eol = 0;
+        /* Allow ';' comments like gas */
+        char *sc = strchr(buf, '#');
+        if (sc) *sc = 0;
+        (void)emit_line(&out->text, out, buf, labs, &nlab, fixes, &nfix);
+        *eol = save;
+        if (save == 0) break;
+        buf = eol + 1;
+    }
+
+    for (int i = 0; i < nfix; i++) {
+        int li = lookup_lab(labs, nlab, fixes[i].name);
+        if (li >= 0 && labs[li].defined) {
+            int32_t rel = (int32_t)((int64_t)labs[li].off -
+                                    (int64_t)(fixes[i].patch_off + 4));
+            uint8_t *p = (uint8_t *)out->text.data + fixes[i].patch_off;
+            p[0] = (uint8_t)rel;
+            p[1] = (uint8_t)(rel >> 8);
+            p[2] = (uint8_t)(rel >> 16);
+            p[3] = (uint8_t)(rel >> 24);
+        } else {
+            int sym = emit_module_add_undefined(out, fixes[i].name);
+            uint32_t rty = fixes[i].is_call ? R_X86_64_PLT32 : R_X86_64_PC32;
+            emit_module_add_reloc(out, fixes[i].patch_off, rty, sym, -4);
+        }
+        free(fixes[i].name);
+    }
+
+    for (int g = 0; g < nglobals; g++) {
+        const char *gn = globals[g];
+        if (!gn || !gn[0]) continue;
+        int li = lookup_lab(labs, nlab, gn);
+        if (li < 0 || !labs[li].defined) continue;
+        size_t off = labs[li].off;
+        /* size: until next defined label or end */
+        size_t end = out->text.len;
+        for (int j = 0; j < nlab; j++) {
+            if (!labs[j].defined) continue;
+            if (labs[j].off > off && labs[j].off < end)
+                end = labs[j].off;
+        }
+        size_t sz = end >= off ? end - off : 0;
+        emit_module_add_symbol(out, gn, /*STB_GLOBAL*/1, /*STT_FUNC*/2,
+                               SECT_TEXT, off - text0, sz);
+    }
+    for (int e = 0; e < nexterns; e++) {
+        if (externs[e] && externs[e][0])
+            emit_module_add_undefined(out, externs[e]);
+    }
+    for (int i = 0; i < nlab; i++) free(labs[i].name);
+    free(copy);
+    (void)text0;
     return 0;
 }
