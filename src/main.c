@@ -103,6 +103,7 @@ static void module_free(EmitModule *m) {
 static void usage(void) {
     fprintf(stderr,
             "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mcmodel=small|kernel]\n"
+            "              [--image-base=ADDR]\n"
             "              [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
             "              [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
@@ -114,6 +115,7 @@ static void usage(void) {
             "  -O1             default: SSA promotion + folding + DCE\n"
             "  -mcmodel=small  default x86_64 small code model\n"
             "  -mcmodel=kernel x86_64 kernel / higher-half (see docs/elf-et-rel-higher-half.md)\n"
+            "  --image-base=A  static ELF link base (default 0x400000 = USER_VMA; S1)\n"
             "  -mno-avx        pass 32-byte vectors in memory (gcc -mno-avx)\n"
             "  -mavx           default: 32-byte vectors in one YMM\n"
             "  -mavx512f       pass 64-byte vectors in one ZMM (gcc -mavx512f)\n"
