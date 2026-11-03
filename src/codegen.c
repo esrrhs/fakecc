@@ -6247,6 +6247,27 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (cmp->b >= 0 && cmp->b < nvals_f && raw_uses[cmp->b] == 1)
                 needed[cmp->b] = 0;
         }
+        /* GP values whose sole use is a scalar IR_RETURN: leave the def in
+         * RAX and skip the home shuttle.  Only in functions with a jump
+         * table (switch case arms) — applying it broadly regressed fptr. */
+        char *ret_only = xmalloc(nvals_f ? nvals_f : 1);
+        memset(ret_only, 0, nvals_f ? nvals_f : 1);
+        int has_br_table = 0;
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            if (fn->insts.data[uj].op == IR_BR_TABLE) { has_br_table = 1; break; }
+        }
+        if (has_br_table) {
+            for (size_t uj = 0; uj < fn->insts.len; uj++) {
+                const IRInst *r = &fn->insts.data[uj];
+                if (r->op != IR_RETURN || skip_body[uj] || fused_skip[uj])
+                    continue;
+                if (r->a < 0 || r->a >= nvals_f || r->b != -1) continue;
+                if (raw_uses[r->a] != 1) continue;
+                if (value_is_float_class(fn, r->a) || value_is_ld(fn, r->a))
+                    continue;
+                ret_only[r->a] = 1;
+            }
+        }
         for (size_t uj = 0; uj + 3 < fn->insts.len; uj++) {
             if (skip_body[uj] || fused_skip[uj]) continue;
             int is_sub = 0, zero_hi = 0;
@@ -6539,6 +6560,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
          * Flushed at every block boundary / call so predecessors agree. */
         int x87_st0_v = -1;
         int x87_st1_v = -1;
+        /* SSA value left in RAX for a ret_only def (no home shuttle). */
+        int rax_holder = -1;
 
         /* ---- Instruction loop ---- */
         for (size_t j = 0; j < fn->insts.len; j++) {
@@ -6631,6 +6654,24 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 dr = (ra && inst->dst >= 0 && inst->dst < ra->num_values)
                      ? ra->reg[inst->dst] : -1;
             }
+            /* Only ALU ops that stage through finish_gp_dst/isel_arith honor
+             * dr=RAX safely.  CONST/SEXT/COPY coalescing can leave the value
+             * in its true home while still setting rax_holder (sizeof). */
+            int leave_in_rax = (inst->dst >= 0 && inst->dst < nvals_f
+                                && ret_only[inst->dst]
+                                && (inst->op == IR_ADD || inst->op == IR_SUB
+                                    || inst->op == IR_BAND || inst->op == IR_BOR
+                                    || inst->op == IR_BXOR || inst->op == IR_MUL
+                                    || inst->op == IR_NEG || inst->op == IR_BNOT
+                                    || inst->op == IR_SHL || inst->op == IR_SHR
+                                    || inst->op == IR_ROL
+                                    || inst->op == IR_EQ || inst->op == IR_NE
+                                    || inst->op == IR_LT || inst->op == IR_LE
+                                    || inst->op == IR_GT || inst->op == IR_GE));
+            if (leave_in_rax)
+                dr = REG_RAX; /* finish_gp_dst is a no-op into RAX */
+            else if (inst->op != IR_RETURN)
+                rax_holder = -1; /* other ops may clobber RAX */
 
             switch (inst->op) {
 
@@ -9695,9 +9736,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     } else if (value_is_float_class(fn, inst->a))
                         ensure_reg_xmm(&out->text, inst->a, 0, ra_xmm,
                                        gp_spill_area); /* XMM0 */
-                    else
+                    else if (rax_holder == inst->a) {
+                        /* Already in RAX from a ret_only def. */
+                    } else
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 }
+                rax_holder = -1;
                 emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca);
                 break;
             }
@@ -10196,6 +10240,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
 
             } /* switch */
+            if (leave_in_rax)
+                rax_holder = inst->dst;
         } /* for insts */
 
         /* Fallthrough guard: if the function body can fall off the end without
@@ -10370,6 +10416,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(fused_inv_at);
         free(fused_ovf_at);
         free(alu_setcc_at);
+        free(ret_only);
         free(ovf_keep_flags);
         free(fused_skip);
         free(carry_hi_at);
