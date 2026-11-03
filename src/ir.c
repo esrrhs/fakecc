@@ -11003,7 +11003,7 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
             }
             inst.asm_clobbers = cl;
         }
-        ir_inst_array_push(&fn->insts, inst);
+                ir_inst_array_push(&fn->insts, inst);
         break;
     }
     case ST_EXPR:

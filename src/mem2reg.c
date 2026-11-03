@@ -537,6 +537,18 @@ int opt_mem2reg(IRFunction *fn, int want_debug)
         if (ii->op == IR_ADDR && ii->a >= 0 && ii->a < fn->next_value_id)
             pinned[ii->a] = 1;
     }
+    /* Address-taken scalars must keep a frame slot: mem2reg skips promoting
+     * them, but codegen only lays out IR_ALLOCA with alloca_bytes > 0.
+     * Without this, IR_ADDR of an asm output / asm-goto temp aborts at -O1
+     * ("IR_ADDR on non-pinned alloca"). */
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        IRInst *ii = &fn->insts.data[i];
+        if (ii->op != IR_ALLOCA || ii->dst < 0) continue;
+        if (!pinned[ii->dst] || ii->alloca_bytes > 0) continue;
+        int w = ii->width > 0 ? ii->width : 4;
+        if (w < 1) w = 8;
+        ii->alloca_bytes = w;
+    }
     int *alloca_slots = NULL;
     size_t num_alloca = 0, cap_alloca = 0;
     for (size_t i = 0; i < insts->len; i++) {

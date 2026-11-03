@@ -4556,7 +4556,8 @@ static int asm_try_const(const IRFunction *fn, IRValue v, int64_t *out) {
 }
 
 static void emit_ir_asm(Buffer *text, EmitModule *out, const IRFunction *fn,
-                        const IRInst *inst, const RAResult *ra) {
+                        const IRInst *inst, const RAResult *ra,
+                        const int *ssa_def, const int *alloca_off) {
     int n_out = (int)inst->imm;
     int n_in = inst->call_nargs - n_out;
     if (n_out < 0) n_out = 0;
@@ -4594,7 +4595,19 @@ static void emit_ir_asm(Buffer *text, EmitModule *out, const IRFunction *fn,
         ops[i].sym = NULL;
 
         int addr_r = asm_pick_scratch(used | hard_demand);
-        ensure_reg(text, v, addr_r, ra);
+        {
+            int frame_off = 0;
+            /* Rematerialize &local: -O1 may skip emitting IR_ADDR when the
+             * address folds to [rbp+off], leaving ensure_reg reading a stale
+             * home. */
+            if (ssa_def && alloca_off
+                && fold_ptr_off(fn, ssa_def, alloca_off, v, &frame_off, 0)
+                && frame_off != 0) {
+                emit_lea_rbp(text, addr_r, frame_off);
+            } else {
+                ensure_reg(text, v, addr_r, ra);
+            }
+        }
         used |= 1 << addr_r;
         out_addr[i] = addr_r;
 
@@ -4685,22 +4698,35 @@ static void emit_ir_asm(Buffer *text, EmitModule *out, const IRFunction *fn,
             }
         }
 
-        /* Push inputs right-to-left so pop left-to-right restores order. */
+        /* Push inputs right-to-left so pop left-to-right restores order.
+         * Prefer rematerializing an IR_CONST into a scratch then push — at
+         * -O1 the const's SSA home may never have been written if folds
+         * kept it immediate-only. */
         for (i = n_in - 1; i >= 0; i--) {
-            if (kind_of[i] == 1) continue; /* imm: no push */
+            if (kind_of[i] == 1) continue; /* imm constraint: no push */
             int oi = n_out + i;
             IRValue v = inst->call_args[oi];
-            int home = gp_home(ra, v);
-            if (home >= 0) {
-                emit_push_r(text, home);
-            } else {
-                /* Spilled: load into a scratch that is not an out_addr, then push. */
-                int blocked = 0;
-                for (int j = 0; j < n_out; j++)
-                    if (out_addr[j] >= 0) blocked |= 1 << out_addr[j];
-                int tmp = asm_pick_scratch(blocked);
-                ensure_reg(text, v, tmp, ra);
+            int64_t cimm = 0;
+            int blocked = 0;
+            for (int j = 0; j < n_out; j++)
+                if (out_addr[j] >= 0) blocked |= 1 << out_addr[j];
+            if (asm_try_const(fn, v, &cimm)) {
+                int tmp = asm_pick_scratch(blocked | used | hard_demand);
+                /* movabs tmp, imm */
+                emit_rex_wrb(text, 1, 0, tmp);
+                emit_byte(text, (uint8_t)(0xB8 + (tmp & 7)));
+                for (int b = 0; b < 8; b++)
+                    emit_byte(text, (uint8_t)((cimm >> (8 * b)) & 0xFF));
                 emit_push_r(text, tmp);
+            } else {
+                int home = gp_home(ra, v);
+                if (home >= 0) {
+                    emit_push_r(text, home);
+                } else {
+                    int tmp = asm_pick_scratch(blocked);
+                    ensure_reg(text, v, tmp, ra);
+                    emit_push_r(text, tmp);
+                }
             }
             pushed[i] = 1;
         }
@@ -6184,7 +6210,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                  * [rbp+off] addresses and immediates encoded in ALU.  Do
                  * not skip COPY: mem2reg pointer selects are copies. */
                 if (inst->dst >= 0 && inst->dst < fn->next_value_id && !needed[inst->dst]) {
+                    /* Still emit IR_ADDR if any IR_ASM takes it as an operand:
+                     * asm lowering uses ensure_reg/lea on the address SSA and
+                     * cannot consume a folded [rbp+off] the way LOAD_PTR can. */
+                    int addr_used_by_asm = 0;
+                    if (inst->op == IR_ADDR) {
+                        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+                            const IRInst *u = &fn->insts.data[uj];
+                            if (u->op != IR_ASM) continue;
+                            for (int k = 0; k < u->call_nargs; k++) {
+                                if (u->call_args[k] == inst->dst) {
+                                    addr_used_by_asm = 1;
+                                    break;
+                                }
+                            }
+                            if (addr_used_by_asm) break;
+                        }
+                    }
                     if (inst->op == IR_ADDR
+                        && !addr_used_by_asm
                         && fold_ptr_off(fn, ssa_def, alloca_off, inst->dst, &fold_off, 0))
                         continue;
                     if (inst->op == IR_CONST && !inst->is_float && !value_is_ld(fn, inst->dst))
@@ -6675,6 +6719,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     emit_ld_store(&out->text, inst->dst, ld_off);
                     break;
                 }
+                /* Pinned alloca (address-taken / asm output): always reload
+                 * from the frame slot — asm storeback and IR_STORE write
+                 * memory, not a phantom SSA home for the alloca id. */
+                if (inst->a >= 0 && inst->a < fn->next_value_id
+                    && alloca_off[inst->a] != 0) {
+                    int off = alloca_off[inst->a];
+                    int w = inst->width > 0 ? inst->width : 8;
+                    int target = dr >= 0 ? dr : REG_RAX;
+                    emit_load_disp(&out->text, target, REG_RBP, off, w,
+                                   inst->is_unsigned);
+                    if (dr < 0)
+                        spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
+                    break;
+                }
                 if (value_is_float_class(fn, inst->dst) || (inst->a >= 0 && value_is_float_class(fn, inst->a))) {
                     int dr_xmm = (ra_xmm && inst->dst >= 0 && inst->dst < ra_xmm->num_values)
                                  ? ra_xmm->reg[inst->dst] : -1;
@@ -6686,13 +6744,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     spill_if_needed_xmm(&out->text, inst->dst, dr_xmm >= 0 ? dr_xmm : XMM_SCRATCH0, ra_xmm, gp_spill_area);
                     break;
                 }
-                /* Rarely reached: mem2reg usually eliminates LOAD.  If a LOAD
-                 * survives, it copies the SSA value `a` into `dst`.  With
-                 * regalloc, `a` may live in a register or a spill slot — both
-                 * must be handled, so materialize via ensure_reg (NOT old_load,
-                 * which assumes the pre-regalloc slot layout and would read
-                 * garbage when `a` is register-allocated).  Then move to dr or
-                 * spill dst. */
+                /* Rarely reached: mem2reg usually eliminates LOAD. */
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 if (dr >= 0) {
                     if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
@@ -6734,11 +6786,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                         REG_RAX, alloca_off[inst->a]);
                     break;
                 }
-                /* [a] = b.  Rarely reached — mem2reg normally removes it.
-                 * Route both operands through ensure_reg / spill_if_needed so
-                 * each is addressed at its real home; old_load/old_store
-                 * assume the pre-regalloc "one slot per SSA value" layout and
-                 * read or write outside the frame once regalloc is on. */
+                /* Pinned alloca: store into the frame slot. */
+                if (inst->a >= 0 && inst->a < fn->next_value_id
+                    && alloca_off[inst->a] != 0) {
+                    int off = alloca_off[inst->a];
+                    int w = inst->width > 0 ? inst->width : 8;
+                    ensure_reg(&out->text, inst->b, REG_RAX, ra);
+                    emit_store_disp(&out->text, REG_RBP, REG_RAX, off, w);
+                    break;
+                }
+                /* [a] = b.  Rarely reached — mem2reg normally removes it. */
                 int ar = (ra && inst->a >= 0 && inst->a < ra->num_values)
                          ? ra->reg[inst->a] : -1;
                 if (ar >= 0) {
@@ -8947,7 +9004,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
 
             case IR_ASM: {
-                emit_ir_asm(&out->text, out, fn, inst, ra);
+                emit_ir_asm(&out->text, out, fn, inst, ra, ssa_def, alloca_off);
                 break;
             }
 
