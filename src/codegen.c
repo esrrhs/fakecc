@@ -6895,7 +6895,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
         }
 
-        
+
         /* Sole-use frame LOAD → ADDO/SUBO/MULO operand: remat into ALU acc
          * (overflow hot path loads a/b without home bounce). */
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
@@ -6978,6 +6978,69 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
             if (!blocked) call_cbr_rax[cb->a] = 1;
+        }
+        /* Call result sole-use STORE to frame: movl %eax, off (fptr). */
+        int *call_store_off = xmalloc((size_t)nvals_f * sizeof(int));
+        int *call_store_w = xmalloc((size_t)nvals_f * sizeof(int));
+        memset(call_store_off, 0, (size_t)nvals_f * sizeof(int));
+        memset(call_store_w, 0, (size_t)nvals_f * sizeof(int));
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *st = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (st->op != IR_STORE && st->op != IR_STORE_PTR) continue;
+            if (st->width != 4 && st->width != 8) continue;
+            if (st->b < 0 || st->b >= nvals_f || raw_uses[st->b] != 1) continue;
+            if (!value_unique_def(fn, st->b) || ssa_def[st->b] < 0) continue;
+            int ci = ssa_def[st->b];
+            if (skip_body[ci] || fused_skip[ci]) continue;
+            if (fn->insts.data[ci].op != IR_CALL) continue;
+            if (value_is_float_class(fn, st->b) || value_is_ld(fn, st->b))
+                continue;
+            /* Indirect calls only (fptr).  Named calls often feed a ternary
+             * join temp whose home differs from the STORE we fold; fusing
+             * then skips the home spill and the join reloads garbage
+             * (gcc_torture_20121108_1).  Intrinsics also bypass call_store. */
+            if (fn->insts.data[ci].call_name != NULL)
+                continue;
+            /* ADDR/CONST/DBG between CALL and STORE are fine: they do not
+             * clobber RAX and the store target lea is usually here. */
+            int blocked = 0;
+            for (int k = ci + 1; k < (int)uj; k++) {
+                if (skip_body[k] || fused_skip[k]) continue;
+                int kop = (int)fn->insts.data[k].op;
+                if (kop == IR_DBG_VALUE || kop == IR_ADDR || kop == IR_CONST)
+                    continue;
+                /* Anything that consumes the call result forces a home. */
+                const IRInst *ki = &fn->insts.data[k];
+                if (ki->a == st->b || ki->b == st->b || ki->c == st->b) {
+                    blocked = 1; break;
+                }
+                if (kop == IR_CALL || kop == IR_STORE || kop == IR_STORE_PTR
+                    || kop == IR_LOAD || kop == IR_LOAD_PTR
+                    || kop == IR_BR || kop == IR_CBR || kop == IR_BR_TABLE
+                    || kop == IR_LABEL || kop == IR_RETURN) {
+                    blocked = 1; break;
+                }
+                /* Conservative: other ALU between call and store is rare and
+                 * may clobber RAX via codegen — block. */
+                blocked = 1;
+                break;
+            }
+            if (blocked) continue;
+            int off = 0;
+            int ok = 0;
+            if (st->op == IR_STORE && st->a >= 0 && st->a < nvals_f
+                && alloca_off[st->a] != 0) {
+                off = alloca_off[st->a];
+                ok = 1;
+            } else if (st->op == IR_STORE_PTR
+                       && fold_ptr_off(fn, ssa_def, alloca_off, st->a, &off, 0))
+                ok = 1;
+            if (!ok) continue;
+            call_store_off[st->b] = off;
+            call_store_w[st->b] = st->width > 0 ? st->width : 4;
+            fused_skip[uj] = 1;
+            call_cbr_rax[st->b] = 1;
         }
         /* GP values whose sole use is a scalar IR_RETURN: leave the def in
          * RAX and skip the home shuttle.  Jump-table functions get this for
@@ -9052,6 +9115,83 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int vec_sz = inst->width;
                 int elem_sz = (int)inst->imm;
                 int is_float = inst->is_float;
+                {
+                    int off_a = 0, off_b = 0, off_d = 0;
+                    int fa = fold_ptr_off(fn, ssa_def, alloca_off, inst->a,
+                                         &off_a, 0);
+                    int fb = fold_ptr_off(fn, ssa_def, alloca_off, inst->b,
+                                         &off_b, 0);
+                    int fd = 0;
+                    for (size_t k = 0; k < j; k++) {
+                        const IRInst *ad = &fn->insts.data[k];
+                        if (ad->op == IR_ADDR && ad->dst == inst->dst
+                            && ad->a >= 0 && ad->a < fn->next_value_id
+                            && alloca_off[ad->a] != 0) {
+                            off_d = alloca_off[ad->a];
+                            fd = 1;
+                            break;
+                        }
+                    }
+                    if (fa && fb && fd && vec_sz == 16
+                        && !(inst->op == IR_VDIV
+                             || (inst->op == IR_VMUL && !is_float
+                                 && (elem_sz == 1 || elem_sz >= 8)))) {
+                        emit_movups_load_disp(&out->text, XMM_SCRATCH0,
+                                              REG_RBP, off_a);
+                        emit_movups_load_disp(&out->text, XMM_SCRATCH1,
+                                              REG_RBP, off_b);
+                        if (is_float) {
+                            if (elem_sz >= 8) emit_byte(&out->text, 0x66);
+                            emit_rex_wrb(&out->text, 0, XMM_SCRATCH0,
+                                         XMM_SCRATCH1);
+                            emit_byte(&out->text, 0x0F);
+                            if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
+                            else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
+                            else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
+                            else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
+                            else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
+                            else if (inst->op == IR_VBOR) emit_byte(&out->text, 0x56);
+                            else emit_byte(&out->text, 0x57);
+                            emit_modrm(&out->text, 3, XMM_SCRATCH0, XMM_SCRATCH1);
+                        } else {
+                            emit_byte(&out->text, 0x66);
+                            emit_rex_wrb(&out->text, 0, XMM_SCRATCH0,
+                                         XMM_SCRATCH1);
+                            emit_byte(&out->text, 0x0F);
+                            if (inst->op == IR_VBAND)
+                                emit_byte(&out->text, 0xDB);
+                            else if (inst->op == IR_VBOR)
+                                emit_byte(&out->text, 0xEB);
+                            else if (inst->op == IR_VBXOR)
+                                emit_byte(&out->text, 0xEF);
+                            else if (elem_sz == 1)
+                                emit_byte(&out->text,
+                                          inst->op == IR_VSUB ? 0xF8 : 0xFC);
+                            else if (elem_sz == 2) {
+                                if (inst->op == IR_VADD)
+                                    emit_byte(&out->text, 0xFD);
+                                else if (inst->op == IR_VSUB)
+                                    emit_byte(&out->text, 0xF9);
+                                else
+                                    emit_byte(&out->text, 0xD5);
+                            } else if (elem_sz == 4) {
+                                if (inst->op == IR_VMUL) {
+                                    emit_byte(&out->text, 0x38);
+                                    emit_byte(&out->text, 0x40);
+                                } else
+                                    emit_byte(&out->text,
+                                              (inst->op == IR_VSUB) ? 0xFA
+                                                                     : 0xFE);
+                            } else
+                                emit_byte(&out->text,
+                                          (inst->op == IR_VSUB) ? 0xFB : 0xD4);
+                            emit_modrm(&out->text, 3, XMM_SCRATCH0, XMM_SCRATCH1);
+                        }
+                        emit_movups_store_disp(&out->text, REG_RBP,
+                                               XMM_SCRATCH0, off_d);
+                        break;
+                    }
+                }
                 ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 ensure_reg(&out->text, inst->b, REG_RCX, ra);
                 if (inst->op == IR_VDIV
@@ -9548,7 +9688,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_byte(&out->text, 0x05);
                     }
                     /* Result in RAX; move to dst or spill. */
-                    if (dr >= 0) {
+                    if (inst->dst >= 0 && inst->dst < nvals_f
+                        && call_store_off[inst->dst] != 0) {
+                        int sw = call_store_w[inst->dst] > 0
+                                 ? call_store_w[inst->dst] : 8;
+                        emit_store_disp(&out->text, REG_RBP, REG_RAX,
+                                        call_store_off[inst->dst], sw);
+                    } else if (dr >= 0) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                     } else {
                         spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
@@ -10447,7 +10593,14 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     /* Result is in RAX; move to dst home (or spill).  A void
                      * call has dst == -1 (no result) — leave RAX alone.
                      * Sole CBR use: keep RAX (sieve if (is_prime())). */
-                    if (inst->dst < nvals_f && call_cbr_rax[inst->dst]) {
+                    if (inst->dst < nvals_f && call_store_off[inst->dst] != 0) {
+                        /* Sole STORE to frame — movl %eax, off(%rbp). */
+                        int sw = call_store_w[inst->dst] > 0
+                                 ? call_store_w[inst->dst] : 4;
+                        emit_store_disp(&out->text, REG_RBP, REG_RAX,
+                                        call_store_off[inst->dst], sw);
+                        rax_holder = -1;
+                    } else if (inst->dst < nvals_f && call_cbr_rax[inst->dst]) {
                         rax_holder = inst->dst;
                     } else if (dr >= 0) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
@@ -11232,6 +11385,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(fused_inv_at);
         free(fused_ovf_at);
         free(alu_setcc_at);
+        free(call_store_off);
+        free(call_store_w);
         free(call_cbr_rax);
         free(ret_only);
         free(ovf_keep_flags);
