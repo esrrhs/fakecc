@@ -5573,9 +5573,21 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             const IRInst *inst = &fn->insts.data[j];
             if (inst->op == IR_ALLOCA && inst->alloca_bytes > 0 && inst->dst >= 0) {
                 int bytes = inst->alloca_bytes;
-                if (bytes % 8 != 0) bytes += 8 - (bytes % 8);
-                int aln = (inst->imm >= 16) ? (int)inst->imm : 8;
-                if (aln < 8) aln = 8;
+                int aln;
+                /* gcc -O0 packs scalar i8/i16/i32 to natural size/align.
+                 * Integer only (float packing broke ieee torture); exact
+                 * 1/2/4-byte slots; width must match bytes (not a 4-byte
+                 * array-of-char mistaken for int); no over-align. */
+                if ((bytes == 1 || bytes == 2 || bytes == 4)
+                    && !inst->is_float
+                    && inst->width == bytes
+                    && (int)inst->imm < 16) {
+                    aln = bytes;
+                } else {
+                    if (bytes % 8 != 0) bytes += 8 - (bytes % 8);
+                    aln = (inst->imm >= 16) ? (int)inst->imm : 8;
+                    if (aln < 8) aln = 8;
+                }
                 pinned_area += bytes;
                 int abs_off = cs_save_area + gp_spill_area + xmm_spill_area + pinned_area;
                 if (aln > 1 && (abs_off % aln) != 0)
@@ -5659,10 +5671,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         int aligned_call_saved_sp_rbp_off = (aligned_call_saved_sp_rsp_off >= 0)
             ? -(frame_down - aligned_call_saved_sp_rsp_off) : 0;
 
-        /* SysV red zone skipped: this backend still uses push/pop for
-         * SysV param materialization and several ALU temps; those writes
-         * sit in the 128B red zone and clobber rbp-relative locals when
-         * prologue omits `sub %rsp` (bitfield_packed_spill / unit prologue). */
+        /* prologue_stack may drop to 0 for gated SysV red-zone leaves
+         * (decided after param homes are known, just before sub rsp). */
         int prologue_stack = stack_size;
 
         emit_byte(&out->text, 0x55);              /* pushq %rbp */
@@ -7283,6 +7293,32 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int rel = (int)probe - (int)(out->text.len + 1);
                 emit_byte(&out->text, (uint8_t)rel);
             }
+        }
+        /* SysV red zone: leaf ≤128B omit sub/add rsp (gcc is_prime / op_*).
+         * Require pinned-home params (no push/pop dance) and no vector ops
+         * (scalarize uses push).  Unrestricted red-zone previously clobbered
+         * locals (bitfield_packed_spill). */
+        {
+            int is_leaf = 1, has_vec_op = 0, params_direct = 1;
+            for (size_t j = 0; j < fn->insts.len; j++) {
+                int op = fn->insts.data[j].op;
+                if (op == IR_CALL) { is_leaf = 0; break; }
+                if (op == IR_VADD || op == IR_VSUB || op == IR_VMUL
+                    || op == IR_VDIV || op == IR_VBAND || op == IR_VBOR
+                    || op == IR_VBXOR)
+                    has_vec_op = 1;
+            }
+            for (int p = 0; p < nparams; p++) {
+                if ((!param_home_off || param_home_off[p] == 0)
+                    && arrive_reg && arrive_reg[p] >= 0)
+                    params_direct = 0;
+            }
+            if (is_leaf && params_direct && !has_vec_op
+                && !fn->is_variadic && !fn->needs_apply_args && !fn->needs_apply
+                && !fn->has_dyn_alloca
+                && target_current()->os != TOS_WINDOWS
+                && stack_size > 0 && stack_size <= 128)
+                prologue_stack = 0;
         }
         if (prologue_stack != 0)
             emit_sub_rsp_imm32(&out->text, prologue_stack);
