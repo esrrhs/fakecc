@@ -2432,6 +2432,12 @@ static void finish_gp_dst(Buffer *b, int acc, int dr, int dst, const RAResult *r
 static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_t *imm);
 static int imm_fits_i32(int64_t imm);
 static int imm_fits_bitwise_u32(int64_t imm);
+static int remat_add_imm(Buffer *b, const IRFunction *fn, const int *def,
+                         const RAResult *ra, const int *alloca_off,
+                         IRValue v, int dst);
+static int materialize_stack_arg_gp(Buffer *b, const IRFunction *fn,
+                                    const int *def, const RAResult *ra,
+                                    const int *alloca_off, IRValue v);
 
 /* gcc -O0: *2/4/8 → shl; *3/5/9 → lea [acc+acc*2/4/8].  Larger
  * constants (e.g. array stride *160) stay as imul — one imul beats a
@@ -4060,6 +4066,55 @@ static int value_unique_def(const IRFunction *fn, IRValue v) {
         if (fn->insts.data[i].dst == v && ++n > 1) return 0;
     }
     return n == 1;
+}
+
+/* Rematerialize ADD+imm into dst via lea.  Prefer a live GP home of the
+ * non-imm operand; else reload a sole-use frame LOAD and lea (sret i+k
+ * after the ADD/LOAD were fused away at the push). */
+static int remat_add_imm(Buffer *b, const IRFunction *fn, const int *def,
+                         const RAResult *ra, const int *alloca_off,
+                         IRValue v, int dst) {
+    if (!fn || !def || !ra || v < 0 || v >= fn->next_value_id || def[v] < 0)
+        return 0;
+    if (!value_unique_def(fn, v)) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op != IR_ADD || d->is_float) return 0;
+    int width = d->width > 0 ? d->width : 8;
+    int64_t imm = 0;
+    IRValue base = -1;
+    if (ssa_const_imm(fn, def, d->b, &imm) && imm_fits_i32(imm))
+        base = d->a;
+    else if (ssa_const_imm(fn, def, d->a, &imm) && imm_fits_i32(imm))
+        base = d->b;
+    else
+        return 0;
+    int sh = gp_home(ra, base);
+    if (sh >= 0)
+        return emit_lea_reg_disp(b, dst, sh, (int32_t)imm, width);
+    if (!alloca_off || base < 0 || base >= fn->next_value_id || def[base] < 0
+        || !value_unique_def(fn, base))
+        return 0;
+    const IRInst *ld = &fn->insts.data[def[base]];
+    int off = 0;
+    if ((ld->op != IR_LOAD && ld->op != IR_LOAD_PTR)
+        || !fold_ptr_off(fn, def, alloca_off, ld->a, &off, 0) || off == 0)
+        return 0;
+    int lw = ld->width > 0 ? ld->width : width;
+    emit_load_disp(b, dst, REG_RBP, off, lw, ld->is_unsigned);
+    if (imm == 0) return 1;
+    return emit_lea_reg_disp(b, dst, dst, (int32_t)imm, width);
+}
+
+/* GP stack-arg materialization: push/store from the value's home when live,
+ * else rematerialize ADD+imm into RAX, else reload. */
+static int materialize_stack_arg_gp(Buffer *b, const IRFunction *fn,
+                                    const int *def, const RAResult *ra,
+                                    const int *alloca_off, IRValue v) {
+    int h = gp_home(ra, v);
+    if (h >= 0) return h;
+    if (remat_add_imm(b, fn, def, ra, alloca_off, v, REG_RAX)) return REG_RAX;
+    ensure_reg(b, v, REG_RAX, ra);
+    return REG_RAX;
 }
 
 /* GADDR (or COPY of one) with a unique def — safe for symb(%rip) memops. */
@@ -6332,6 +6387,94 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 mark_reg(needed, ssa_uses_f, nvals_f, alu->b);
             if (cmp->b >= 0 && cmp->b < nvals_f && raw_uses[cmp->b] == 1)
                 needed[cmp->b] = 0;
+        }
+        /* Sole-use spilled ADD+imm consumed only as a stack-passed call arg:
+         * skip the lea+spill and rematerialize at the push (sret i+3/i+4). */
+        {
+            int is_win_sa = (target_current()->os == TOS_WINDOWS);
+            for (size_t uj = 0; uj < fn->insts.len; uj++) {
+                const IRInst *c = &fn->insts.data[uj];
+                if (c->op != IR_CALL || skip_body[uj] || fused_skip[uj])
+                    continue;
+                int nargs = c->call_nargs;
+                if (nargs <= 0) continue;
+                if (nargs > IR_CALL_MAX_ARGS) nargs = IR_CALL_MAX_ARGS;
+                int n_gp = 0, n_xmm = 0;
+                for (int k = 0; k < nargs; k++) {
+                    IRValue av = c->call_args[k];
+                    int on_stack = 0;
+                    if (is_win_sa) {
+                        on_stack = (k >= 4);
+                    } else {
+                        int is_ld = value_is_ld(fn, av);
+                        int is_float = !is_ld && value_is_float_class(fn, av);
+                        unsigned char flags =
+                            (c->call_arg_on_stack && c->call_arg_on_stack[k])
+                            ? c->call_arg_on_stack[k] : 0;
+                        int force_stack = (flags & CALL_ARG_STACK) || is_ld;
+                        if (force_stack) {
+                            on_stack = 1;
+                        } else if (is_float) {
+                            if (n_xmm < 8) n_xmm++;
+                            else on_stack = 1;
+                        } else {
+                            if (n_gp < 6) n_gp++;
+                            else on_stack = 1;
+                        }
+                    }
+                    if (!on_stack) continue;
+                    if (av < 0 || av >= nvals_f || raw_uses[av] != 1) continue;
+                    if (value_is_float_class(fn, av) || value_is_ld(fn, av))
+                        continue;
+                    if (!value_unique_def(fn, av) || ssa_def[av] < 0) continue;
+                    if (gp_home(ra, av) >= 0) continue;
+                    int di = ssa_def[av];
+                    if (skip_body[di] || fused_skip[di]) continue;
+                    const IRInst *d = &fn->insts.data[di];
+                    if (d->op != IR_ADD || d->is_float) continue;
+                    int64_t imm = 0;
+                    IRValue base = -1;
+                    if (ssa_const_imm(fn, ssa_def, d->b, &imm) && imm_fits_i32(imm))
+                        base = d->a;
+                    else if (ssa_const_imm(fn, ssa_def, d->a, &imm)
+                             && imm_fits_i32(imm))
+                        base = d->b;
+                    else
+                        continue;
+                    /* Prefer dropping a sole-use frame LOAD of i: remat
+                     * reloads from the frame at the push (avoids a dead
+                     * mov into a private home). */
+                    int base_home = gp_home(ra, base);
+                    int base_frame = 0;
+                    int base_ldi = -1;
+                    if (base >= 0 && base < nvals_f
+                        && ssa_def[base] >= 0 && value_unique_def(fn, base)) {
+                        const IRInst *ld = &fn->insts.data[ssa_def[base]];
+                        int off = 0;
+                        if ((ld->op == IR_LOAD || ld->op == IR_LOAD_PTR)
+                            && fold_ptr_off(fn, ssa_def, alloca_off, ld->a,
+                                           &off, 0) && off != 0) {
+                            base_frame = 1;
+                            base_ldi = ssa_def[base];
+                        }
+                    }
+                    if (base_home < 0 && !base_frame) continue;
+                    fused_skip[di] = 1;
+                    if (base_frame && base >= 0 && base < nvals_f
+                        && raw_uses[base] == 1) {
+                        needed[base] = 0;
+                        if (base_ldi >= 0) fused_skip[base_ldi] = 1;
+                    } else {
+                        mark_reg(needed, ssa_uses_f, nvals_f, base);
+                    }
+                    if (base == d->a && d->b >= 0 && d->b < nvals_f
+                        && raw_uses[d->b] == 1)
+                        needed[d->b] = 0;
+                    if (base == d->b && d->a >= 0 && d->a < nvals_f
+                        && raw_uses[d->a] == 1)
+                        needed[d->a] = 0;
+                }
+            }
         }
         /* GP values whose sole use is a scalar IR_RETURN: leave the def in
          * RAX and skip the home shuttle.  Only in functions with a jump
@@ -9248,9 +9391,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             emit_sse_store_disp(&out->text, REG_RSP,
                                                 XMM_SCRATCH0, off, w == 4);
                         } else {
-                            ensure_reg(&out->text, inst->call_args[k],
-                                       REG_RAX, ra);
-                            emit_store_rsp_off(&out->text, REG_RAX, off);
+                            int sr = materialize_stack_arg_gp(
+                                &out->text, fn, ssa_def, ra, alloca_off,
+                                inst->call_args[k]);
+                            emit_store_rsp_off(&out->text, sr, off);
                         }
                     }
                 } else if (aligned_call) {
@@ -9301,9 +9445,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                 emit_sse_store_disp(&out->text, REG_RSP,
                                                     XMM_SCRATCH0, off, 0);
                         } else {
-                            ensure_reg(&out->text, inst->call_args[k],
-                                       REG_RAX, ra);
-                            emit_store_rsp_off(&out->text, REG_RAX, off);
+                            int sr = materialize_stack_arg_gp(
+                                &out->text, fn, ssa_def, ra, alloca_off,
+                                inst->call_args[k]);
+                            emit_store_rsp_off(&out->text, sr, off);
                         }
                     }
                 } else {
@@ -9356,8 +9501,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         emit_xmm_push(&out->text, XMM_SCRATCH0, vb);
                         slot -= vec_nslots(vb, 0);
                     } else {
-                        ensure_reg(&out->text, inst->call_args[found], REG_RAX, ra);
-                        emit_push_r(&out->text, REG_RAX);
+                        int sr = materialize_stack_arg_gp(
+                            &out->text, fn, ssa_def, ra, alloca_off,
+                            inst->call_args[found]);
+                        emit_push_r(&out->text, sr);
                         slot--;
                     }
                 }
