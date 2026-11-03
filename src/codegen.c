@@ -4680,6 +4680,17 @@ static int is_foldable_addr_copy(const IRFunction *fn, const int *def,
     return 0;
 }
 
+/* IR_CALL.a is the INTEGER-register sret destination (&agg).  When it folds
+ * to [rbp+off], RAX/RDX are stored via disp — no lea of &agg (sret). */
+static int call_integer_sret_folds(const IRFunction *fn, const int *def,
+                                   const int *alloca_off, const IRInst *inst) {
+    if (!inst || inst->op != IR_CALL || inst->x87_pair) return 0;
+    if (inst->dst >= 0 || inst->a < 0) return 0;
+    if (inst->imm < 1 || inst->imm > 2) return 0;
+    int off = 0;
+    return fold_ptr_off(fn, def, alloca_off, inst->a, &off, 0) && off != 0;
+}
+
 /* Local-abs GEPs rematerialize into R_X86_64_32S, so load+store of the same
  * address (bitfield RMW) can both fold even when the ADD has multiple uses
  * and is not adjacent to every memop.  Other GEPs still need adjacent
@@ -4958,6 +4969,14 @@ static void codegen_mark_inst_roots(char *needed, int *uses,
     if (inst->op == IR_CALL
         && mark_va_builtin(fn, def, alloca_off, inst, needed, uses, nv))
         return;
+    if (call_integer_sret_folds(fn, def, alloca_off, inst)) {
+        /* Folded &agg: mark args/callee only, not CALL.a. */
+        if (inst->call_callee >= 0)
+            mark_reg(needed, uses, nv, inst->call_callee);
+        for (int k = 0; k < inst->call_nargs; k++)
+            mark_reg(needed, uses, nv, inst->call_args[k]);
+        return;
+    }
     mark_inst_uses_needed(inst, needed, uses, nv);
 }
 
@@ -5526,6 +5545,41 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             skip_body[store_i] = 1;
         }
         int nvals_f = fn->next_value_id > 0 ? fn->next_value_id : 1;
+        /* Dead IR_STORE of ADDR into an alloca that is never LOADed — leftover
+         * from INTEGER sret lowering (sret &q).  Skip before raw_uses so the
+         * ADDR can fold away with the CALL.a sret dest. */
+        {
+            char *alloca_loaded = xmalloc((size_t)nvals_f);
+            memset(alloca_loaded, 0, (size_t)nvals_f);
+            for (size_t uj = 0; uj < fn->insts.len; uj++) {
+                if (skip_body[uj]) continue;
+                const IRInst *u = &fn->insts.data[uj];
+                if (u->op == IR_LOAD && u->a >= 0 && u->a < nvals_f)
+                    alloca_loaded[u->a] = 1;
+            }
+            for (size_t uj = 0; uj < fn->insts.len; uj++) {
+                if (skip_body[uj]) continue;
+                const IRInst *st = &fn->insts.data[uj];
+                if (st->op != IR_STORE || st->a < 0 || st->a >= nvals_f
+                    || st->b < 0 || st->b >= nvals_f)
+                    continue;
+                if (alloca_loaded[st->a]) continue;
+                if (ssa_def[st->a] < 0) continue;
+                if (fn->insts.data[ssa_def[st->a]].op != IR_ALLOCA) continue;
+                if (ssa_def[st->b] < 0) continue;
+                IRValue cur = st->b;
+                int is_addr = 0;
+                for (int d = 0; d < 4 && cur >= 0 && cur < nvals_f; d++) {
+                    if (ssa_def[cur] < 0) break;
+                    const IRInst *x = &fn->insts.data[ssa_def[cur]];
+                    if (x->op == IR_ADDR || x->op == IR_GADDR) { is_addr = 1; break; }
+                    if (x->op == IR_COPY) { cur = x->a; continue; }
+                    break;
+                }
+                if (is_addr) skip_body[uj] = 1;
+            }
+            free(alloca_loaded);
+        }
         int *ssa_uses_f = xmalloc((size_t)nvals_f * sizeof(int));
         memset(ssa_uses_f, 0, (size_t)nvals_f * sizeof(int));
         char *needed = xmalloc((size_t)nvals_f);
@@ -5566,6 +5620,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (skip_body[uj]) continue;
             const IRInst *u = &fn->insts.data[uj];
             if (deref_folds_addr(ir, fn, ssa_def, alloca_off, raw_uses, u, uj)
+                && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
+                uses_left[u->a]--;
+            if (call_integer_sret_folds(fn, ssa_def, alloca_off, u)
                 && u->a >= 0 && u->a < nvals_f && uses_left[u->a] > 0)
                 uses_left[u->a]--;
             /* Live lea-folded GEPs read the index, not GADDR/MUL SSA. */
