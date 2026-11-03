@@ -79,6 +79,38 @@ static int parse_xmm_name(const char *s, const char **end_out) {
     return n;
 }
 
+/* CR0..CR8 — mov %crN / mov to %crN (desc helpers). */
+static int parse_cr_name(const char *s, const char **end_out) {
+    if (!((s[0] == 'c' || s[0] == 'C') && (s[1] == 'r' || s[1] == 'R')))
+        return -1;
+    s += 2;
+    if (!isdigit((unsigned char)*s)) return -1;
+    int n = 0;
+    while (isdigit((unsigned char)*s)) {
+        n = n * 10 + (*s - '0');
+        s++;
+    }
+    if (n < 0 || n > 8) return -1;
+    if (isalnum((unsigned char)*s) || *s == '_') return -1;
+    if (end_out) *end_out = s;
+    return n;
+}
+
+/* Segment regs for mov %ax,%ds etc. Encoding: ES=0 CS=1 SS=2 DS=3 FS=4 GS=5. */
+static int parse_sreg_name(const char *s, const char **end_out) {
+    static const struct { const char *n; int r; } T[] = {
+        {"es",0},{"cs",1},{"ss",2},{"ds",3},{"fs",4},{"gs",5},
+    };
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) {
+        size_t n = strlen(T[i].n);
+        if (strncmp(s, T[i].n, n) == 0 && !isalnum((unsigned char)s[n]) && s[n] != '_') {
+            if (end_out) *end_out = s + n;
+            return T[i].r;
+        }
+    }
+    return -1;
+}
+
 /* Skip whitespace. */
 static const char *skip_ws(const char *p) {
     while (*p && isspace((unsigned char)*p) && *p != '\n') p++;
@@ -95,7 +127,7 @@ typedef struct {
 typedef struct {
     size_t patch_off;
     char *name;
-    int is_call; /* 1 = call (E8), 0 = jmp/jcc */
+    int is_call; /* 1=call(E8), 0=jmp/jcc, 2=RIP-rel displ32 (lea/mov/lgdt) */
     int jcc_op;  /* 0xEB short jmp, 0xE9 near, or 0x0F8x jcc */
 } LocFix;
 
@@ -386,6 +418,18 @@ not_mem:
             *pp = xend;
             return 1;
         }
+        int cr = parse_cr_name(p, &xend);
+        if (cr >= 0) {
+            *kind = 6; *reg = cr; *width = 8;
+            *pp = xend;
+            return 1;
+        }
+        int sr = parse_sreg_name(p, &xend);
+        if (sr >= 0) {
+            *kind = 7; *reg = sr; *width = 2;
+            *pp = xend;
+            return 1;
+        }
         int w = 8;
         int r = parse_reg_name(p, &w);
         if (r < 0) return 0;
@@ -432,6 +476,11 @@ static int emit_unary_no_op(Buffer *b, const char *mn) {
     if (strcmp(mn, "iret") == 0 || strcmp(mn, "iretq") == 0) {
         eb(b, 0x48); eb(b, 0xCF); return 1;
     }
+    if (strcmp(mn, "retfq") == 0 || strcmp(mn, "lretq") == 0 ||
+        strcmp(mn, "lret") == 0) {
+        /* REX.W far return: pops RIP then CS (gdt_flush) */
+        eb(b, 0x48); eb(b, 0xCB); return 1;
+    }
     if (strcmp(mn, "pushfq") == 0 || strcmp(mn, "pushf") == 0) { eb(b, 0x9C); return 1; }
     if (strcmp(mn, "popfq") == 0 || strcmp(mn, "popf") == 0) { eb(b, 0x9D); return 1; }
     if (strcmp(mn, "cqto") == 0 || strcmp(mn, "cqo") == 0) { eb(b, 0x48); eb(b, 0x99); return 1; }
@@ -459,6 +508,18 @@ static int jcc_opcode(const char *mn) {
     for (size_t i = 0; i < sizeof T / sizeof T[0]; i++)
         if (strcmp(mn, T[i].n) == 0) return 0x80 | T[i].cc;
     return -1;
+}
+
+/* Queue a RIP-relative displ32 patch (lea/mov/lgdt sym(%rip)).
+ * Resolved against LocLab if present; else becomes R_X86_64_PC32. */
+static int queue_rip_rel(LocFix *fixes, int *nfix, size_t patch_off, char *sym) {
+    if (*nfix >= MAX_LOCFIX) { free(sym); return 0; }
+    fixes[*nfix].patch_off = patch_off;
+    fixes[*nfix].name = sym;
+    fixes[*nfix].is_call = 2;
+    fixes[*nfix].jcc_op = 0;
+    (*nfix)++;
+    return 1;
 }
 
 static int emit_line(Buffer *b, EmitModule *out, const char *line,
@@ -577,6 +638,52 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
         free(sym); free(mn); return 1;
     }
 
+    /* shl/shr/sal/sar $imm, %reg  and  div/idiv %reg */
+    if (strcmp(mn, "shl") == 0 || strcmp(mn, "sal") == 0 ||
+        strcmp(mn, "shr") == 0 || strcmp(mn, "sar") == 0 ||
+        strcmp(mn, "shlq") == 0 || strcmp(mn, "shrq") == 0) {
+        int k1, r1, w1, k2, r2, w2;
+        int64_t imm1 = 0, imm2 = 0;
+        char *sym1 = NULL, *sym2 = NULL;
+        if (!parse_operand(&p, &k1, &r1, &imm1, &sym1, &w1)) { free(mn); return 0; }
+        p = skip_ws(p);
+        if (*p != ',') { free(sym1); free(mn); return 0; }
+        p++;
+        if (!parse_operand(&p, &k2, &r2, &imm2, &sym2, &w2)) {
+            free(sym1); free(mn); return 0;
+        }
+        int ext = 4; /* shl/sal */
+        if (strcmp(mn, "shr") == 0 || strcmp(mn, "shrq") == 0) ext = 5;
+        else if (strcmp(mn, "sar") == 0) ext = 7;
+        if (k1 == 1 && k2 == 0) {
+            int w = w2;
+            if (w == 4) rex(b, 0, 0, 0, r2);
+            else rex(b, 1, 0, 0, r2);
+            if (imm1 == 1) {
+                eb(b, 0xD1); modrm(b, 3, ext, r2);
+            } else {
+                eb(b, 0xC1); modrm(b, 3, ext, r2); eb(b, (uint8_t)imm1);
+            }
+            free(sym1); free(sym2); free(mn); return 1;
+        }
+        free(sym1); free(sym2); free(mn); return 0;
+    }
+    if (strcmp(mn, "div") == 0 || strcmp(mn, "idiv") == 0 ||
+        strcmp(mn, "divq") == 0 || strcmp(mn, "idivq") == 0 ||
+        strcmp(mn, "divl") == 0 || strcmp(mn, "idivl") == 0) {
+        int k, r, w; int64_t imm; char *sym = NULL;
+        if (!parse_operand(&p, &k, &r, &imm, &sym, &w) || k != 0) {
+            free(sym); free(mn); return 0;
+        }
+        int ext = (mn[0] == 'i') ? 7 : 6;
+        int use64 = !(strcmp(mn, "divl") == 0 || strcmp(mn, "idivl") == 0);
+        if (w == 4) use64 = 0;
+        if (use64) rex(b, 1, 0, 0, r);
+        else rex(b, 0, 0, 0, r);
+        eb(b, 0xF7); modrm(b, 3, ext, r);
+        free(sym); free(mn); return 1;
+    }
+
     /* jmp / call / jcc */
     int jcc = jcc_opcode(mn);
     if (strcmp(mn, "jmp") == 0 || strcmp(mn, "call") == 0 || jcc >= 0) {
@@ -663,6 +770,13 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
             else if ((r & 7) == 5) { modrm(b, 1, ext, 5); eb(b, 0); }
             else modrm(b, 0, ext, r);
             free(sym); free(mn); return 1;
+        } else if (k == 4 && sym &&
+                   (strcmp(mn, "lgdt") == 0 || strcmp(mn, "lidt") == 0)) {
+            /* lgdt/lidt sym(%rip) */
+            eb(b, 0x0F); eb(b, 0x01); modrm(b, 0, ext, 5);
+            size_t po = b->len; e32(b, 0);
+            if (!queue_rip_rel(fixes, nfix, po, sym)) { free(mn); return 0; }
+            free(mn); return 1;
         }
         free(sym); free(mn); return 0;
     }
@@ -729,10 +843,8 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
             else if (strcmp(mn, "movw") == 0) rw = 2;
             rex(b, rw == 8, r2, 0, 0); eb(b, rw == 1 ? 0x8A : 0x8B); modrm(b, 0, r2, 5);
             size_t po = b->len; e32(b, 0);
-            if (out) {
-                int sym = emit_module_add_undefined(out, sym1);
-                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
-            }
+            if (!queue_rip_rel(fixes, nfix, po, sym1)) { free(sym2); free(mn); return 0; }
+            sym1 = NULL;
             handled = 1;
         } else if (k1 == 0 && k2 == 4 && sym2) {
             /* mov %reg, sym(%rip) */
@@ -741,10 +853,26 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
             else if (strcmp(mn, "movw") == 0) rw = 2;
             rex(b, rw == 8, r1, 0, 0); eb(b, rw == 1 ? 0x88 : 0x89); modrm(b, 0, r1, 5);
             size_t po = b->len; e32(b, 0);
-            if (out) {
-                int sym = emit_module_add_undefined(out, sym2);
-                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
-            }
+            if (!queue_rip_rel(fixes, nfix, po, sym2)) { free(sym1); free(mn); return 0; }
+            sym2 = NULL;
+            handled = 1;
+        } else if ((k1 == 6 && k2 == 0) || (k1 == 0 && k2 == 6)) {
+            /* mov %crN, %r64  (0F 20 /r)  or  mov %r64, %crN (0F 22 /r) */
+            int cr, gp, load;
+            if (k1 == 6) { cr = r1; gp = r2; load = 1; }
+            else { cr = r2; gp = r1; load = 0; }
+            rex(b, 0, cr, 0, gp); /* REX.R/B for high regs; W not required */
+            /* Intel SDM: MOV from/to CR uses REX.W optional; encode 0F 20/22 */
+            eb(b, 0x0F); eb(b, load ? 0x20 : 0x22);
+            modrm(b, 3, cr, gp);
+            handled = 1;
+        } else if (k1 == 0 && k2 == 7) {
+            /* mov %r16/%r32/%r64, %sreg — 8E /r */
+            eb(b, 0x8E); modrm(b, 3, r2, r1);
+            handled = 1;
+        } else if (k1 == 7 && k2 == 0) {
+            /* mov %sreg, %reg — 8C /r */
+            eb(b, 0x8C); modrm(b, 3, r1, r2);
             handled = 1;
         }
     } else if (strcmp(mn, "out") == 0 || strcmp(mn, "outb") == 0 ||
@@ -856,13 +984,11 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
             modrm_mem(b, r2, r1, imm1);
             handled = 1;
         } else if (k1 == 4 && k2 == 0 && sym1) {
-            /* lea sym(%rip), %reg */
+            /* lea sym(%rip), %reg — resolve local labels; else PC32 reloc */
             rex(b, 1, r2, 0, 0); eb(b, 0x8D); modrm(b, 0, r2, 5);
             size_t po = b->len; e32(b, 0);
-            if (out) {
-                int sym = emit_module_add_undefined(out, sym1);
-                emit_module_add_reloc(out, po, R_X86_64_PC32, sym, -4);
-            }
+            if (!queue_rip_rel(fixes, nfix, po, sym1)) { free(sym2); free(mn); return 0; }
+            sym1 = NULL;
             handled = 1;
         }
     } else if (strcmp(mn, "lgdt") == 0 || strcmp(mn, "lidt") == 0) {
@@ -967,7 +1093,7 @@ int iasm_emit_x86(Buffer *text, EmitModule *out,
             p[3] = (uint8_t)(rel >> 24);
         } else if (out) {
             int sym = emit_module_add_undefined(out, fixes[i].name);
-            uint32_t rty = fixes[i].is_call ? R_X86_64_PLT32 : R_X86_64_PC32;
+            uint32_t rty = (fixes[i].is_call == 1) ? R_X86_64_PLT32 : R_X86_64_PC32;
             emit_module_add_reloc(out, fixes[i].patch_off, rty, sym, -4);
         }
         free(fixes[i].name);
@@ -1025,7 +1151,7 @@ int iasm_assemble_body(EmitModule *out, const char *body,
             p[3] = (uint8_t)(rel >> 24);
         } else {
             int sym = emit_module_add_undefined(out, fixes[i].name);
-            uint32_t rty = fixes[i].is_call ? R_X86_64_PLT32 : R_X86_64_PC32;
+            uint32_t rty = (fixes[i].is_call == 1) ? R_X86_64_PLT32 : R_X86_64_PC32;
             emit_module_add_reloc(out, fixes[i].patch_off, rty, sym, -4);
         }
         free(fixes[i].name);

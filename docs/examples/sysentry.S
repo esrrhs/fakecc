@@ -1,12 +1,13 @@
-/* gas-ish port sketch of fakeos arch/x86_64/sysentry.asm (S3).
- * Covers: XMM save/restore, syscall_user_rsp .data conduit, sysretq / .byte,
- * and RIP-relative conduit access. Still stubbed vs full fakeos:
- *   - user_iret_trampoline / fork_ret_trampoline omitted (same pattern)
- *   - needs linked syscall_dispatch + syscall_kstack_top from C
+/* gas port of fakeos arch/x86_64/sysentry.asm (S3).
+ * Drop-in layout: XMM save/restore, GPR frame, syscall_user_rsp conduit,
+ * sysretq, user_iret_trampoline, fork_ret_trampoline.
+ * Needs linked syscall_dispatch + syscall_kstack_top from C.
  * Assemble: fakecc -c docs/examples/sysentry.S -o sysentry.o
  */
     .text
-    .globl syscall_entry, syscall_epilogue, syscall_user_rsp
+    .globl syscall_entry, syscall_epilogue
+    .globl user_iret_trampoline, fork_ret_trampoline
+    .globl syscall_user_rsp
     .extern syscall_dispatch
     .extern syscall_kstack_top
 
@@ -85,8 +86,23 @@ syscall_epilogue:
     movdqa 0xe8(%rsp), %xmm14
     movdqa 0xf8(%rsp), %xmm15
     mov (%rsp), %rsp
-    /* sysretq mnemonic, or equivalent .byte 0x48, 0x0F, 0x07 */
+    /* mnemonic; equivalent .byte 0x48, 0x0F, 0x07 also works in .text */
     sysretq
+
+    .align 16
+user_iret_trampoline:
+    push $0x1B
+    push %rbx
+    push $0x202
+    push $0x23
+    push %r12
+    iretq
+
+    .align 16
+fork_ret_trampoline:
+    xor %eax, %eax
+    mov %r12, %rsp
+    jmp syscall_epilogue
 
     .data
     .align 8

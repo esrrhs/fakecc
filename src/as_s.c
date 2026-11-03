@@ -493,8 +493,20 @@ static void ingest_line(AsState *st, const char *line) {
         starts(lp, ".att_syntax") || starts(lp, ".set") || starts(lp, ".equ"))
         return;
 
-    /* .quad/.long/.byte/.zero (and dq/dd/db) — valid in any section */
+    /* .quad/.long/.byte/.zero (and dq/dd/db).
+     * In .text, buffer for iasm so mid-function .byte stays in insn order
+     * (iasm emit_line already encodes .byte/.long/.quad). Elsewhere emit now. */
     {
+        int is_data_dir =
+            starts(lp, ".quad") || starts(lp, ".long") || starts(lp, ".int") ||
+            starts(lp, ".word") || starts(lp, ".short") || starts(lp, ".byte") ||
+            starts(lp, ".zero") || starts(lp, ".space") ||
+            starts(lp, "dq") || starts(lp, "dd") || starts(lp, "dw") ||
+            starts(lp, "db");
+        if (is_data_dir && st->sect == 0) {
+            append_text(st, lp);
+            return;
+        }
         int dr = parse_data_directive(st, lp, "<asm>", 0);
         if (dr < 0) exit(1);
         if (dr > 0) return;

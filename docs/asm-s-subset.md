@@ -11,27 +11,30 @@ assembler (`iasm`).
 | `.text` / `.data` / `.bss` / `.section …` | Section select; code → `.text`, data dirs → `.data`/`.rodata`/`.bss` |
 | `.globl` / `.global` | Export label (`STT_FUNC` in `.text`, `STT_OBJECT` in data) |
 | `.extern` | `SHN_UNDEF` |
-| `.quad` / `.long` / `.word` / `.byte` (aliases `dq`/`dd`/`dw`/`db`) | Integers or symbol[+addend]; symbol → `R_X86_64_64` in `.data`/`.rodata` |
+| `.quad` / `.long` / `.word` / `.byte` (aliases `dq`/`dd`/`dw`/`db`) | Integers or symbol[+addend]; symbol → `R_X86_64_64` in `.data`/`.rodata`. In `.text`, `.byte`/`.long`/`.quad` stay in insn order |
 | `.zero` / `.space N` | Reserve N bytes (`.bss` grows; others write zeros) |
 | `.align` / `.p2align` | Honored in data/rodata/bss; ignored in `.text` |
 | `.type` / `.size` | Ignored |
 | `.macro name args…` / `.endm` | Expanded; `\arg` and `\()` |
-| `.rept N` / `.endr` | Repeat body N times (stub tables) |
+| `.rept N` / `.endr` | Repeat body N times (fixed count only — **no** `%assign`-style counters) |
 | `.incbin "path"` | Embed file bytes in `.rodata` (S5) |
 | `#` `//` `;` comments | Stripped |
 
 ## Instructions (non-exhaustive)
 
 `mov`/`movb`/`movw`/`movl`/`movq`, `lea`, `push`/`pop`, `add`/`sub`/`xor`/
-`and`/`or`/`cmp`/`test`/`xchg`, `jmp`/`call`/`jcc` (incl. indirect `call *%reg` /
-`jmp *%reg`), `ret`/`retq`,
+`and`/`or`/`cmp`/`test`/`xchg`, `shl`/`shr`/`sal`/`sar` `$imm,%reg`,
+`div`/`idiv`, `jmp`/`call`/`jcc` (incl. indirect `call *%reg` /
+`jmp *%reg`), `ret`/`retq`/`retfq`/`lretq`,
 `in`/`inb`/`inw`/`inl`, `out`/`outb`/`outw`/`outl`,
 `cli`/`sti`/`hlt`/`pause`/`nop`/`ud2`/`syscall`/`sysretq`/`iretq`,
 `pushfq`/`popfq`/`pushf`/`popf`,
-`lgdt`/`lidt`/`ltr`/`rdmsr`/`wrmsr`/`invlpg`,
+`lgdt`/`lidt` (mem or `sym(%rip)`) / `ltr` / `rdmsr`/`wrmsr`/`invlpg`,
+`mov` `%crN` ↔ GPR and `%reg` ↔ `%ds`/`%es`/`%ss`/`%fs`/`%gs`,
 `movdqa` `%xmmN` ↔ `disp(%reg)` (and `%xmm`↔`%xmm`) for sysentry/desc XMM
 save/restore,
-RIP-relative `sym(%rip)` for `lea`/`mov`.
+RIP-relative `sym(%rip)` for `lea`/`mov`/`lgdt`/`lidt` (local labels resolved
+in-file; externals → `R_X86_64_PC32`).
 
 Local labels and forward `jmp`/`call` work within one file; externals get
 `R_X86_64_PC32` / `PLT32`.
@@ -39,12 +42,22 @@ Local labels and forward `jmp`/`call` work within one file; externals get
 ## Priority migrate (fakeos)
 
 1. **io / usys / crt0** — see `docs/examples/io.S`, `usys.S`, `crt0.S`
-2. **switch.asm** — **example-ready**: `docs/examples/switch.S` (`fakecc -c`)
-3. **sysentry / desc** — `movdqa`, `.data` `.quad` conduit, and stub tables
-   work; see `docs/examples/sysentry.S` and `docs/examples/desc_stubs.S`
-   (plus older `sysentry_xmm.S`). Remaining gaps: full ISR error-code matrix /
-   `%assign`-style counters, `user_iret_trampoline` / `fork_ret_trampoline`,
-   and wiring to C `syscall_dispatch` / `isr_common` in a real fakeos link.
+2. **switch.asm** — **done (example-ready)**: `docs/examples/switch.S`
+3. **sysentry / desc** — **example-ready** for a Makefile nasm drop of those
+   objects (boot still out of scope):
+   - `docs/examples/sysentry.S` — full `syscall_entry` / `syscall_epilogue`
+     (GPR+XMM), `user_iret_trampoline`, `fork_ret_trampoline`,
+     `.data` `syscall_user_rsp` + RIP stores/loads, `sysretq`
+   - `docs/examples/desc_stubs.S` — ISR_NOERR / ISR_ERR macros for vectors
+     0..47 + 255, `isr_common` (GPR+XMM + `isr_dispatch` + `iretq`),
+     `isr_stub_table` `.quad`s, `gdt_flush`/`idt_load`/`tss_load`,
+     MSR/CR/`invlpg`/`exc_*` helpers
+   - Remaining gaps vs a one-shot Makefile swap: no `%assign` counters inside
+     `.rept` (vectors are listed explicitly); real fakeos link still needs C
+     `syscall_dispatch` / `syscall_kstack_top` / `isr_dispatch` / `gdt` / `idt`;
+     `.rela.*` for rodata abs symbols may appear under the data reloc stream
+     (same ET_REL contract). Prefer copying the examples into
+     `arch/x86_64/*.S` and dropping the matching nasm objects.
 4. boot.asm (32-bit — out of scope for this subset)
 
 ## C + M1/M2 alternative (no `.S`)

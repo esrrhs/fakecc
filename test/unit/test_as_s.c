@@ -354,6 +354,200 @@ static void test_byte_in_text_sysret(void) {
     emit_module_free(&em);
 }
 
+
+static void test_sysentry_trampolines(void) {
+    static const char src[] =
+        "    .text\n"
+        "    .globl syscall_entry, syscall_epilogue\n"
+        "    .globl user_iret_trampoline, fork_ret_trampoline, syscall_user_rsp\n"
+        "    .extern syscall_dispatch\n"
+        "    .extern syscall_kstack_top\n"
+        "syscall_entry:\n"
+        "    mov %rsp, syscall_user_rsp(%rip)\n"
+        "    mov syscall_kstack_top(%rip), %rsp\n"
+        "    sub $264, %rsp\n"
+        "    movdqa %xmm0, 0x08(%rsp)\n"
+        "    push %r11\n"
+        "    push %rcx\n"
+        "    push %rax\n"
+        "    mov syscall_user_rsp(%rip), %rax\n"
+        "    mov %rax, 120(%rsp)\n"
+        "    mov %rsp, %rdi\n"
+        "    cld\n"
+        "    call syscall_dispatch\n"
+        "syscall_epilogue:\n"
+        "    add $8, %rsp\n"
+        "    pop %rcx\n"
+        "    pop %r11\n"
+        "    movdqa 0x08(%rsp), %xmm0\n"
+        "    mov (%rsp), %rsp\n"
+        "    sysretq\n"
+        "user_iret_trampoline:\n"
+        "    push $0x1B\n"
+        "    push %rbx\n"
+        "    push $0x202\n"
+        "    push $0x23\n"
+        "    push %r12\n"
+        "    iretq\n"
+        "fork_ret_trampoline:\n"
+        "    xor %eax, %eax\n"
+        "    mov %r12, %rsp\n"
+        "    jmp syscall_epilogue\n"
+        "    .data\n"
+        "    .align 8\n"
+        "syscall_user_rsp:\n"
+        "    .quad 0\n";
+    EmitModule em;
+    emit_module_init(&em);
+    T_ASSERT_EQ_INT(assemble_s_file(src, "sysentry.S", &em), 0);
+    T_ASSERT(has_sym(&em, "syscall_entry"));
+    T_ASSERT(has_sym(&em, "syscall_epilogue"));
+    T_ASSERT(has_sym(&em, "user_iret_trampoline"));
+    T_ASSERT(has_sym(&em, "fork_ret_trampoline"));
+    T_ASSERT(has_sym(&em, "syscall_user_rsp"));
+    /* sysretq = 48 0F 07 ; iretq = 48 CF */
+    int found_sysret = 0, found_iret = 0;
+    const unsigned char *d = (const unsigned char *)em.text.data;
+    for (size_t i = 0; i + 2 < em.text.len; i++) {
+        if (d[i] == 0x48 && d[i + 1] == 0x0F && d[i + 2] == 0x07)
+            found_sysret = 1;
+        if (d[i] == 0x48 && d[i + 1] == 0xCF)
+            found_iret = 1;
+    }
+    T_ASSERT(found_sysret);
+    T_ASSERT(found_iret);
+    /* RIP mov + call dispatch */
+    T_ASSERT(em.num_relocs >= 3);
+    emit_module_free(&em);
+}
+
+static void test_desc_isr_and_helpers(void) {
+    static const char src[] =
+        "    .text\n"
+        "    .globl isr_stub_table, isr_common, gdt_flush, cr2_read, msr_read\n"
+        "    .extern isr_dispatch\n"
+        "    .extern gdt\n"
+        "    .macro ISR_NOERR n\n"
+        "    .globl isr_stub_\\n\n"
+        "isr_stub_\\n:\n"
+        "    push $0\n"
+        "    push $\\n\n"
+        "    jmp isr_common\n"
+        "    .endm\n"
+        "    .macro ISR_ERR n\n"
+        "    .globl isr_stub_\\n\n"
+        "isr_stub_\\n:\n"
+        "    push $\\n\n"
+        "    jmp isr_common\n"
+        "    .endm\n"
+        "    ISR_NOERR 0\n"
+        "    ISR_ERR 8\n"
+        "    ISR_NOERR 32\n"
+        "isr_common:\n"
+        "    push %rax\n"
+        "    sub $256, %rsp\n"
+        "    movdqa %xmm0, 0x00(%rsp)\n"
+        "    mov %rsp, %rdi\n"
+        "    add $256, %rdi\n"
+        "    call isr_dispatch\n"
+        "    movdqa 0x00(%rsp), %xmm0\n"
+        "    add $256, %rsp\n"
+        "    pop %rax\n"
+        "    add $16, %rsp\n"
+        "    iretq\n"
+        "gdt_flush:\n"
+        "    lgdt gdtr(%rip)\n"
+        "    push $0x08\n"
+        "    lea .reload_cs(%rip), %rax\n"
+        "    push %rax\n"
+        "    retfq\n"
+        ".reload_cs:\n"
+        "    mov $0x10, %ax\n"
+        "    mov %ax, %ds\n"
+        "    ret\n"
+        "cr2_read:\n"
+        "    mov %cr2, %rax\n"
+        "    ret\n"
+        "msr_read:\n"
+        "    rdmsr\n"
+        "    shl $32, %rdx\n"
+        "    or %rdx, %rax\n"
+        "    ret\n"
+        "    .data\n"
+        "    .align 8\n"
+        "isr_stub_table:\n"
+        "    .quad isr_stub_0\n"
+        "    .quad isr_stub_8\n"
+        "    .quad isr_stub_32\n"
+        "    .section .rodata\n"
+        "    .align 4\n"
+        "gdtr:\n"
+        "    .word 55\n"
+        "    .quad gdt\n";
+    EmitModule em;
+    emit_module_init(&em);
+    T_ASSERT_EQ_INT(assemble_s_file(src, "desc.S", &em), 0);
+    T_ASSERT(has_sym(&em, "isr_stub_0"));
+    T_ASSERT(has_sym(&em, "isr_stub_8"));
+    T_ASSERT(has_sym(&em, "isr_stub_32"));
+    T_ASSERT(has_sym(&em, "isr_common"));
+    T_ASSERT(has_sym(&em, "isr_stub_table"));
+    T_ASSERT(has_sym(&em, "gdt_flush"));
+    T_ASSERT(has_sym(&em, "cr2_read"));
+    T_ASSERT(has_sym(&em, "msr_read"));
+    /* retfq=48 CB, mov cr2=0F 20 /r, shl imm=C1 /4 */
+    int found_retfq = 0, found_cr2 = 0, found_shl = 0, found_sreg = 0;
+    const unsigned char *d = (const unsigned char *)em.text.data;
+    size_t n = em.text.len;
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (d[i] == 0x48 && d[i + 1] == 0xCB) found_retfq = 1;
+        if (d[i] == 0x0F && d[i + 1] == 0x20) found_cr2 = 1;
+        if (d[i] == 0x8E) found_sreg = 1;
+    }
+    for (size_t i = 0; i + 3 < n; i++) {
+        if (d[i] == 0x48 && d[i + 1] == 0xC1 && d[i + 2] == 0xE2 &&
+            d[i + 3] == 0x20)
+            found_shl = 1;
+    }
+    T_ASSERT(found_retfq);
+    T_ASSERT(found_cr2);
+    T_ASSERT(found_shl);
+    T_ASSERT(found_sreg);
+    /* stub table: 3x R_X86_64_64 ; gdtr RIP + gdt abs */
+    T_ASSERT(em.num_data_relocs >= 4);
+    T_ASSERT(em.num_relocs >= 2); /* lgdt gdtr(%rip), call isr_dispatch */
+    /* mid-function local lea .reload_cs must NOT leave an undef reloc */
+    int bad_reload = 0;
+    for (size_t i = 0; i < (size_t)em.num_syms; i++) {
+        if (em.syms[i].name && strcmp(em.syms[i].name, ".reload_cs") == 0 &&
+            em.syms[i].shndx == 0)
+            bad_reload = 1;
+    }
+    T_ASSERT(!bad_reload);
+    emit_module_free(&em);
+}
+
+static void test_byte_in_text_order(void) {
+    /* .byte mid-function must stay after preceding insns (not prepended). */
+    static const char src[] =
+        "    .text\n"
+        "    .globl midbyte\n"
+        "midbyte:\n"
+        "    nop\n"
+        "    .byte 0x48, 0x0F, 0x07\n"
+        "    ret\n";
+    EmitModule em;
+    emit_module_init(&em);
+    T_ASSERT_EQ_INT(assemble_s_file(src, "midbyte.S", &em), 0);
+    T_ASSERT(em.text.len >= 5);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[0], 0x90);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[1], 0x48);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[2], 0x0F);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[3], 0x07);
+    T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[4], 0xC3);
+    emit_module_free(&em);
+}
+
 int main(void) {
     target_set_current(target_x86_64_linux());
     test_assemble_io_subset();
@@ -365,5 +559,8 @@ int main(void) {
     test_movdqa_xmm();
     test_data_quad_byte();
     test_byte_in_text_sysret();
+    test_sysentry_trampolines();
+    test_desc_isr_and_helpers();
+    test_byte_in_text_order();
     return t_finalize();
 }
