@@ -115,3 +115,10 @@ fakecc --kernel-multiboot -nostdlib boot.o kmain.o … -o fakeos.elf
 
 Verification: `test_link_kernel`; fakeos `scripts/test_qemu.py` structural
 checks (ELF32 + MB1 magic + dual PHDRs).
+
+## Debugging (`-g`)
+
+DWARF PC ranges use the linked VMA (`KERNEL_VMA` / `--image-base`). For
+naked stubs and QEMU+gdb limits, see [`dwarf-qemu-gdb.md`](dwarf-qemu-gdb.md)
+(fakeos Nice N3).
+
