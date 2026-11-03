@@ -6476,26 +6476,56 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
             }
         }
+        /* Call results consumed only by a CBR: leave in RAX and test there
+         * (sieve `if (is_prime(i))`) instead of rax→home→test. */
+        char *call_cbr_rax = xmalloc(nvals_f ? nvals_f : 1);
+        memset(call_cbr_rax, 0, nvals_f ? nvals_f : 1);
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *cb = &fn->insts.data[uj];
+            if (cb->op != IR_CBR || skip_body[uj] || fused_skip[uj]) continue;
+            if (cb->a < 0 || cb->a >= nvals_f || raw_uses[cb->a] != 1) continue;
+            if (ssa_def[cb->a] < 0 || !value_unique_def(fn, cb->a)) continue;
+            int ci = ssa_def[cb->a];
+            if (skip_body[ci] || fused_skip[ci]) continue;
+            if (fn->insts.data[ci].op != IR_CALL) continue;
+            if (value_is_float_class(fn, cb->a) || value_is_ld(fn, cb->a))
+                continue;
+            int blocked = 0;
+            for (int k = ci + 1; k < (int)uj; k++) {
+                if (skip_body[k] || fused_skip[k]) continue;
+                if (fn->insts.data[k].op == IR_DBG_VALUE) continue;
+                blocked = 1;
+                break;
+            }
+            if (!blocked) call_cbr_rax[cb->a] = 1;
+        }
         /* GP values whose sole use is a scalar IR_RETURN: leave the def in
-         * RAX and skip the home shuttle.  Only in functions with a jump
-         * table (switch case arms) — applying it broadly regressed fptr. */
+         * RAX and skip the home shuttle.  Jump-table functions get this for
+         * any ALU (switch case arms).  Elsewhere only compare results
+         * (sieve is_prime) — broader ALU leave-in-RAX regressed fptr. */
         char *ret_only = xmalloc(nvals_f ? nvals_f : 1);
         memset(ret_only, 0, nvals_f ? nvals_f : 1);
         int has_br_table = 0;
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             if (fn->insts.data[uj].op == IR_BR_TABLE) { has_br_table = 1; break; }
         }
-        if (has_br_table) {
-            for (size_t uj = 0; uj < fn->insts.len; uj++) {
-                const IRInst *r = &fn->insts.data[uj];
-                if (r->op != IR_RETURN || skip_body[uj] || fused_skip[uj])
-                    continue;
-                if (r->a < 0 || r->a >= nvals_f || r->b != -1) continue;
-                if (raw_uses[r->a] != 1) continue;
-                if (value_is_float_class(fn, r->a) || value_is_ld(fn, r->a))
-                    continue;
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *r = &fn->insts.data[uj];
+            if (r->op != IR_RETURN || skip_body[uj] || fused_skip[uj])
+                continue;
+            if (r->a < 0 || r->a >= nvals_f || r->b != -1) continue;
+            if (raw_uses[r->a] != 1) continue;
+            if (value_is_float_class(fn, r->a) || value_is_ld(fn, r->a))
+                continue;
+            if (has_br_table) {
                 ret_only[r->a] = 1;
+                continue;
             }
+            if (ssa_def[r->a] < 0 || !value_unique_def(fn, r->a)) continue;
+            int dop = fn->insts.data[ssa_def[r->a]].op;
+            if (dop == IR_EQ || dop == IR_NE || dop == IR_LT || dop == IR_LE
+                || dop == IR_GT || dop == IR_GE)
+                ret_only[r->a] = 1;
         }
         for (size_t uj = 0; uj + 3 < fn->insts.len; uj++) {
             if (skip_body[uj] || fused_skip[uj]) continue;
@@ -6902,7 +6932,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                     || inst->op == IR_GT || inst->op == IR_GE));
             if (leave_in_rax)
                 dr = REG_RAX; /* finish_gp_dst is a no-op into RAX */
-            else if (inst->op != IR_RETURN)
+            else if (inst->op != IR_RETURN && inst->op != IR_CBR)
                 rax_holder = -1; /* other ops may clobber RAX */
 
             switch (inst->op) {
@@ -7205,7 +7235,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 uint8_t cc = ir_cmp_to_setcc(inst->op, inst->is_unsigned);
                 int cc_dst = (dr >= 0 && dr != REG_RAX && dr != REG_RCX)
                              ? dr : REG_RDX;
-                /* Sole-use ZF ALU feeding EQ/NE 0: xor; alu; setcc. */
+                /* Sole-use ZF ALU feeding EQ/NE 0: xor; alu; setcc.
+                 * ret_only compares (is_prime): setcc into %al + movzbl so
+                 * the return value is already in RAX (no rsi→rax shuttle). */
                 if ((inst->op == IR_EQ || inst->op == IR_NE)
                     && alu_setcc_at[j] >= 0) {
                     const IRInst *alu = &fn->insts.data[alu_setcc_at[j]];
@@ -7217,9 +7249,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                   || ((alu->op == IR_BAND || alu->op == IR_BOR
                                        || alu->op == IR_BXOR)
                                       && imm_fits_bitwise_u32(aimm)));
+                    int to_rax = leave_in_rax;
+                    int zd = to_rax ? REG_RAX : cc_dst;
                     if (alu->op == IR_NEG) {
                         ensure_reg(&out->text, alu->a, REG_RAX, ra);
-                        emit_xor_rr(&out->text, cc_dst);
+                        if (!to_rax) emit_xor_rr(&out->text, zd);
                         emit_unary_f7_w(&out->text, 3, REG_RAX, aw);
                     } else if (afb) {
                         int ext = 0;
@@ -7228,7 +7262,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         else if (alu->op == IR_BOR) ext = 1;
                         else if (alu->op == IR_BXOR) ext = 6;
                         ensure_reg(&out->text, alu->a, REG_RAX, ra);
-                        emit_xor_rr(&out->text, cc_dst);
+                        if (!to_rax) emit_xor_rr(&out->text, zd);
                         int ew = aw;
                         int32_t enc = (int32_t)aimm;
                         if ((alu->op == IR_BAND || alu->op == IR_BOR
@@ -7247,14 +7281,22 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         else if (alu->op == IR_BXOR) rr = 0x31;
                         ensure_reg(&out->text, alu->a, REG_RAX, ra);
                         ensure_reg(&out->text, alu->b, REG_RCX, ra);
-                        emit_xor_rr(&out->text, cc_dst);
+                        if (!to_rax) emit_xor_rr(&out->text, zd);
                         emit_arith_rr_w(&out->text, rr, REG_RAX, REG_RCX, aw);
                     }
-                    emit_setcc_r(&out->text, cc, cc_dst);
-                    if (dr >= 0) {
-                        if (dr != cc_dst) emit_mov_rr(&out->text, dr, cc_dst);
+                    if (to_rax) {
+                        emit_setcc_r(&out->text, cc, REG_RAX);
+                        /* movzbl %al, %eax — zero-extend the boolean. */
+                        emit_byte(&out->text, 0x0F);
+                        emit_byte(&out->text, 0xB6);
+                        emit_modrm(&out->text, 3, REG_RAX & 7, REG_RAX & 7);
                     } else {
-                        spill_if_needed(&out->text, inst->dst, cc_dst, ra);
+                        emit_setcc_r(&out->text, cc, zd);
+                        if (dr >= 0) {
+                            if (dr != zd) emit_mov_rr(&out->text, dr, zd);
+                        } else {
+                            spill_if_needed(&out->text, inst->dst, zd, ra);
+                        }
                     }
                     break;
                 }
@@ -8684,6 +8726,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     }
                     if (c_mem) {
                         emit_arith_imm32_disp(&out->text, 7, REG_RBP, 0, c_off);
+                    } else if (rax_holder == inst->a) {
+                        emit_test_r_w(&out->text, REG_RAX, cwidth);
+                        rax_holder = -1;
                     } else {
                         int ch = gp_home(ra, inst->a);
                         int tr = (ch >= 0) ? ch : REG_RAX;
@@ -9871,8 +9916,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                             ra_xmm, gp_spill_area);
                 } else if (inst->dst >= 0) {
                     /* Result is in RAX; move to dst home (or spill).  A void
-                     * call has dst == -1 (no result) — leave RAX alone. */
-                    if (dr >= 0) {
+                     * call has dst == -1 (no result) — leave RAX alone.
+                     * Sole CBR use: keep RAX (sieve if (is_prime())). */
+                    if (inst->dst < nvals_f && call_cbr_rax[inst->dst]) {
+                        rax_holder = inst->dst;
+                    } else if (dr >= 0) {
                         if (dr != REG_RAX) emit_mov_rr(&out->text, dr, REG_RAX);
                     } else {
                         spill_if_needed(&out->text, inst->dst, REG_RAX, ra);
@@ -10652,6 +10700,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(fused_inv_at);
         free(fused_ovf_at);
         free(alu_setcc_at);
+        free(call_cbr_rax);
         free(ret_only);
         free(ovf_keep_flags);
         free(fused_skip);
