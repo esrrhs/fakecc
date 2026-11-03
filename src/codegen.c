@@ -5390,7 +5390,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (field_off < 0 || al->alloca_bytes < field_off + store_w) continue;
             int off = alloca_off[slot];
             if (off == 0) continue;
-            param_home_off[p] = off + field_off;
+            /* Stack-passed scalars: reuse the incoming [rbp+16+8*k] slot
+             * (gcc -O0) instead of copying into a fresh alloca.  Only for
+             * whole-slot homes (field_off==0) so aggregate eightbyte peels
+             * keep their private storage. */
+            if (arrive_reg && arrive_reg[p] < 0 && field_off == 0
+                && stack_off && stack_off[p] != 0) {
+                alloca_off[slot] = stack_off[p];
+                param_home_off[p] = stack_off[p];
+            } else {
+                param_home_off[p] = off + field_off;
+            }
             skip_body[store_i] = 1;
         }
         int nvals_f = fn->next_value_id > 0 ? fn->next_value_id : 1;
@@ -6164,6 +6174,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             int vecb = is_float ? value_vec_bytes(fn, pi->dst) : 0;
             if (!vecb && is_float && (w == 16 || w == 32 || w == 64)) vecb = w;
             if (arrive_reg[p] < 0) {
+                /* Already living at the incoming slot — no copy. */
+                if (param_home_off[p] == stack_off[p])
+                    continue;
                 if (is_float) {
                     if (vecb >= 16) {
                         emit_xmm_load_spill(&out->text, XMM_SCRATCH0, stack_off[p], vecb);
