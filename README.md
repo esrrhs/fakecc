@@ -9,6 +9,8 @@
 
 [中文说明 (Chinese Documentation)](README_zh.md)
 
+Kernel / OS object contract: [docs/elf-et-rel-higher-half.md](docs/elf-et-rel-higher-half.md) (ELF `ET_REL` reloc set, `-mcmodel=kernel`, section names for higher-half link).
+
 A C-family systems programming language and optimizing self-hosting compiler that **fully supports the C99 standard and mainstream GCC language extensions**. It preserves C's direct, low-level execution model and predictable memory layout, while **completely eliminating the preprocessor (`#define`) and textual headers (`#include`) in favor of a modern, Go-inspired package module system** with a built-in, zero-dependency freestanding runtime.
 
 - **Fully Self-Hosting**: FakeCC compiles its own source code; two-stage bootstrap produces a byte-identical fixed point (`v0/fakecc-1` == `v0/fakecc-2`).

@@ -102,7 +102,8 @@ static void module_free(EmitModule *m) {
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
+            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mcmodel=small|kernel]\n"
+            "              [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
             "              [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
@@ -111,6 +112,8 @@ static void usage(void) {
             "                  independent of -O, never changes generated code\n"
             "  -O0             keep locals in memory (skip SSA promotion)\n"
             "  -O1             default: SSA promotion + folding + DCE\n"
+            "  -mcmodel=small  default x86_64 small code model\n"
+            "  -mcmodel=kernel x86_64 kernel / higher-half (see docs/elf-et-rel-higher-half.md)\n"
             "  -mno-avx        pass 32-byte vectors in memory (gcc -mno-avx)\n"
             "  -mavx           default: 32-byte vectors in one YMM\n"
             "  -mavx512f       pass 64-byte vectors in one ZMM (gcc -mavx512f)\n"
@@ -692,6 +695,16 @@ int main(int argc, char **argv) {
             target_arg = argv[i] + 9;
         } else if (strncmp(argv[i], "-target=", 8) == 0) {
             target_arg = argv[i] + 8;
+        } else if (strncmp(argv[i], "-mcmodel=", 9) == 0) {
+            const char *cm = argv[i] + 9;
+            if (strcmp(cm, "small") == 0 || strcmp(cm, "medany") == 0) {
+                codegen_set_code_model(0);
+            } else if (strcmp(cm, "kernel") == 0) {
+                codegen_set_code_model(1);
+            } else {
+                fprintf(stderr, "fakecc: unsupported -mcmodel=%s (use small or kernel)\n", cm);
+                return 1;
+            }
         } else if (strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {

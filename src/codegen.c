@@ -34,6 +34,17 @@ static void emit_modrm(Buffer *b, int mod, int reg, int rm) {
 }
 static void emit_modrm_disp(Buffer *b, int reg_field, int base, int off);
 static void emit_modrm_indirect(Buffer *b, int reg_field, int base);
+/* Code model: 0 = small (default), 1 = kernel (higher-half / -2GiB). */
+static int g_code_model_kernel = 0;
+
+void codegen_set_code_model(int kernel) {
+    g_code_model_kernel = kernel ? 1 : 0;
+}
+
+int codegen_code_model_is_kernel(void) {
+    return g_code_model_kernel;
+}
+
 static void ensure_reg(Buffer *b, int v, int dst_reg, const RAResult *ra);
 
 /* Emit REX prefix: 0x40 | (W<<3) | (R<<2) | (X<<1) | B.
