@@ -1620,6 +1620,15 @@ static void emit_arith_r32_disp(Buffer *b, int op, int base, int src, int off) {
     emit_modrm_disp(b, src, base, off);
 }
 
+/* Group-1 ALU: op off(%base), %dst  (r, r/m = primary op + 2).
+ * gcc -O0 `xor -0x8(%rbp), %eax` (fptr a^b both in frame). */
+static void emit_arith_rm_disp(Buffer *b, uint8_t op, int dst, int base,
+                               int off, int width) {
+    emit_rex_if(b, alu_w64(width), dst, 0, base);
+    emit_byte(b, (uint8_t)(op + 2));
+    emit_modrm_disp(b, dst, base, off);
+}
+
 /* andb/orb/… $imm8, off(%base) — byte RMW (sieve bit clear, bitfields). */
 static void emit_arith_imm8_disp(Buffer *b, int ext, int base, int32_t imm,
                                  int off) {
@@ -6037,6 +6046,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         int *fused_ovf_at = xmalloc(ninst_f * sizeof(int));
         /* EQ/NE vs 0 of a sole-use ZF ALU → xor; alu; setcc (no test). */
         int *alu_setcc_at = xmalloc(ninst_f * sizeof(int));
+        int *alu_mem_off = xmalloc(ninst_f * sizeof(int));
+        char *alu_mem_side = xmalloc(ninst_f); /* 0=none 1=b 2=a */
         char *ovf_keep_flags = xmalloc(ninst_f);
         int *ovf_wrap_off = xmalloc(ninst_f * sizeof(int));
         int *ovf_wrap_w = xmalloc(ninst_f * sizeof(int));
@@ -6055,6 +6066,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             fused_cmp_at[uj] = -1;
             fused_ovf_at[uj] = -1;
             alu_setcc_at[uj] = -1;
+            alu_mem_off[uj] = 0;
+            alu_mem_side[uj] = 0;
             carry_hi_at[uj] = -1;
             mul_hi_at[uj] = -1;
         }
@@ -6956,6 +6969,41 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 && raw_uses[ld->a] == 1 && ssa_def[ld->a] >= 0)
                 fused_skip[ssa_def[ld->a]] = 1;
         }
+        /* BXOR of two sole-use frame LOADs: `xor off(%rbp), %reg` (fptr). */
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *al = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (al->op != IR_BXOR || al->is_float) continue;
+            int off_a = 0, off_b = 0, ok_a = 0, ok_b = 0;
+            for (int side = 0; side < 2; side++) {
+                IRValue sv = side ? al->b : al->a;
+                int *out = side ? &off_b : &off_a;
+                int *ok = side ? &ok_b : &ok_a;
+                if (sv < 0 || sv >= nvals_f || raw_uses[sv] != 1) continue;
+                if (!value_unique_def(fn, sv) || ssa_def[sv] < 0) continue;
+                int64_t imm = 0;
+                if (ssa_const_imm(fn, ssa_def, sv, &imm)) continue;
+                int li = ssa_def[sv];
+                if (skip_body[li] || fused_skip[li]) continue;
+                const IRInst *ld = &fn->insts.data[li];
+                int off = 0;
+                if (ld->op == IR_LOAD && ld->a >= 0 && ld->a < nvals_f
+                    && alloca_off[ld->a] != 0)
+                    off = alloca_off[ld->a];
+                else if (ld->op == IR_LOAD_PTR
+                         && fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &off, 0))
+                    ;
+                else
+                    continue;
+                if (off == 0) continue;
+                *out = off;
+                *ok = 1;
+            }
+            if (!ok_a || !ok_b) continue;
+            /* Keep a in reg, xor from b's slot (gcc shape). */
+            alu_mem_off[uj] = off_b;
+            alu_mem_side[uj] = 1;
+        }
 /* Call results consumed only by a CBR: leave in RAX and test there
          * (sieve `if (is_prime(i))`) instead of rax→home→test. */
         char *call_cbr_rax = xmalloc(nvals_f ? nvals_f : 1);
@@ -7016,6 +7064,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 needed[v->a] = 0;
             if (v->b >= 0 && v->b < nvals_f && raw_uses[v->b] == 1)
                 needed[v->b] = 0;
+            /* Dst ADDR sole-use skipped: broke vec (SEGV) — leave needed. */
         }
         /* Call result sole-use STORE to frame: movl %eax, off (fptr). */
         int *call_store_off = xmalloc((size_t)nvals_f * sizeof(int));
@@ -7576,6 +7625,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             case IR_BAND:
             case IR_BOR:
             case IR_BXOR:
+                if (j < ninst_f && alu_mem_side[j] != 0) {
+                    int width = inst->width > 0 ? inst->width : 8;
+                    int moff = alu_mem_off[j];
+                    int mem_is_a = (alu_mem_side[j] == 2);
+                    IRValue other = mem_is_a ? inst->b : inst->a;
+                    int acc = pick_alu_acc(dr, -1);
+                    uint8_t rr_op = 0x01;
+                    if (inst->op == IR_SUB) rr_op = 0x29;
+                    else if (inst->op == IR_BAND) rr_op = 0x21;
+                    else if (inst->op == IR_BOR) rr_op = 0x09;
+                    else if (inst->op == IR_BXOR) rr_op = 0x31;
+                    if (!remat_sole_frame_load(&out->text, fn, ssa_def,
+                                               alloca_off, other, acc))
+                        ensure_reg(&out->text, other, acc, ra);
+                    emit_arith_rm_disp(&out->text, rr_op, acc, REG_RBP, moff,
+                                      width);
+                    finish_gp_dst(&out->text, acc, dr, inst->dst, ra, width,
+                                  inst->is_unsigned);
+                } else
                 isel_arith(&out->text, inst, fn, ssa_def, ra, alloca_off, dr, 0);
                 if ((inst->op == IR_ADD || inst->op == IR_SUB)
                     && carry_hi_at[j] >= 0) {
@@ -11421,6 +11489,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(fused_inv_at);
         free(fused_ovf_at);
         free(alu_setcc_at);
+        free(alu_mem_off);
+        free(alu_mem_side);
         free(call_store_off);
         free(call_store_w);
         free(call_cbr_rax);
