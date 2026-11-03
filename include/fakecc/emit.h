@@ -464,6 +464,11 @@ void emit_elf(const EmitModule *m, const char *path);
 void link_set_image_base(uint64_t base);
 uint64_t link_image_base(void);
 
+/* fakeos S1+S2: dual-segment higher-half layout + Multiboot ELF32 image
+ * (boot/linker.ld / ldfake semantics).  obj_paths are ELF64 ET_REL .o files. */
+int link_kernel_multiboot(const char **obj_paths, size_t npaths,
+                          const char *out_path);
+
 /* ELF relocation type constants (SysV AMD64 ABI). */
 #define R_X86_64_64        1  /* absolute 64-bit (pointer fixups in .data) */
 #define R_X86_64_PC32      2

@@ -92,21 +92,26 @@ itself; use GNU ld with `boot/linker.ld`, or fakeos `ldfake`, until
 - fakeos `docs/fakecc-support-requests.md` §2.1 **M4**, §2.2 **S1/S2**
 - fakeos `boot/linker.ld`, `user/ldfake.c`
 
-## Should S1 (in progress): dual PT_LOAD / fixed VMA
+## Should S1 / S2: dual PT_LOAD + Multiboot ELF32
 
-fakeos wants two layouts after `fakecc -c` objects exist:
+| Scene | Script / CLI | Base / PHDRs |
+|-------|--------------|--------------|
+| User | default link / `--image-base=` | `USER_VMA = 0x400000`; text=`PT_LOAD RX`, data=`PT_LOAD RW` |
+| Kernel | `fakecc --kernel-multiboot` | Low `.boot`/`.multiboot` at LMA `0x100000` + high `.text`/… at `KERNEL_VMA + LMA`; exports `_kernel_*` at link time; `ENTRY(_start)` |
 
-| Scene | Script | Base / PHDRs |
-|-------|--------|--------------|
-| User | `user/user.ld` | `USER_VMA = 0x400000`; text=`PT_LOAD RX`, data=`PT_LOAD RW` |
-| Kernel | `boot/linker.ld` | Low `.boot` at LMA `0x100000` + high `.text`/… at `KERNEL_VMA` |
-
-**User path (started):** fakecc’s static linker already uses image base
-`0x400000` (= `USER_VMA`) with dual `PT_LOAD` (RX then RW). Override with
+**User path:** static linker image base `0x400000` (= `USER_VMA`); override with
 `--image-base=ADDR` / `link_set_image_base()`.
 
-**Kernel path (remaining):** dual-segment higher-half (identity LMA for
-`.boot`, VMA = `KERNEL_VMA + LMA` for the rest, `_kernel_*` boundary
-symbols, `ENTRY(_start)`) still comes from GNU ld + `boot/linker.ld` or
-fakeos `ldfake`. A native fakecc mode or `-T` script subset is future S1
-work; S2 covers Multiboot / ELF32 boot image emit.
+**Kernel path (S1+S2):** `link_kernel_multiboot()` (host port of fakeos
+`user/ldfake.c`) reads ELF64 `ET_REL` inputs, places sections per
+`boot/linker.ld`, resolves `64`/`PC32`/`PLT32`/`GOTPCREL`/`32`/`32S`, and
+writes a **phdr-only Multiboot ELF32** image (ELFCLASS32, `EM_386`, two
+`PT_LOAD`s, Multiboot magic at file offset `0x1000`). No host `objcopy
+-O elf32-i386` required.
+
+```text
+fakecc --kernel-multiboot -nostdlib boot.o kmain.o … -o fakeos.elf
+```
+
+Verification: `test_link_kernel`; fakeos `scripts/test_qemu.py` structural
+checks (ELF32 + MB1 magic + dual PHDRs).

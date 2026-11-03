@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/stat.h>
 #if defined(_WIN32) && !defined(FAKECC_SELFHOST)
@@ -103,7 +104,7 @@ static void module_free(EmitModule *m) {
 static void usage(void) {
     fprintf(stderr,
             "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mcmodel=small|kernel]\n"
-            "              [--image-base=ADDR]\n"
+            "              [--image-base=ADDR] [--kernel-multiboot]\n"
             "              [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
             "              [-nostdlib] [-nodefaultlibs]\n"
             "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
@@ -116,6 +117,7 @@ static void usage(void) {
             "  -mcmodel=small  default x86_64 small code model\n"
             "  -mcmodel=kernel x86_64 kernel / higher-half (see docs/elf-et-rel-higher-half.md)\n"
             "  --image-base=A  static ELF link base (default 0x400000 = USER_VMA; S1)\n"
+"  --kernel-multiboot  fakeos S1+S2: dual-segment higher-half + Multiboot ELF32\n"
             "  -mno-avx        pass 32-byte vectors in memory (gcc -mno-avx)\n"
             "  -mavx           default: 32-byte vectors in one YMM\n"
             "  -mavx512f       pass 64-byte vectors in one ZMM (gcc -mavx512f)\n"
@@ -611,6 +613,7 @@ int main(int argc, char **argv) {
     int is_shared = 0;
     int nodefaultlibs = 0;
     int nostdlib = 0;
+    int kernel_multiboot = 0;
     int want_debug = 0;
     int opt_level = 1;
     const char *output_path = NULL;
@@ -716,6 +719,9 @@ int main(int argc, char **argv) {
                 return 1;
             }
             link_set_image_base((uint64_t)v);
+        } else if (strcmp(argv[i], "--kernel-multiboot") == 0) {
+            kernel_multiboot = 1;
+            nostdlib = 1;
         } else if (strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
@@ -1172,11 +1178,54 @@ int main(int argc, char **argv) {
     }
     free(rt_cache_dir);
 
-    emit_link(mod_ptrs, (size_t)nmods, output_path,
-              (const char **)needed, (size_t)num_needed,
-              nodefaultlibs || nostdlib,
-              (const char **)lib_paths, (size_t)num_lib_paths, want_debug,
-              is_shared);
+    if (kernel_multiboot) {
+        /* S1+S2: write relocatable temps (or reuse .o inputs) and run the
+         * dual-segment Multiboot ELF32 linker (boot/linker.ld / ldfake). */
+        if (is_shared) {
+            fprintf(stderr, "fakecc: --kernel-multiboot incompatible with -shared\n");
+            exit(1);
+        }
+        char **kpaths = calloc((size_t)nmods, sizeof(char *));
+        char **temps = calloc((size_t)nmods, sizeof(char *));
+        if (!kpaths || !temps) {
+            fprintf(stderr, "fakecc: out of memory\n");
+            exit(1);
+        }
+        int nk = 0;
+        for (int i = 0; i < nmods; i++) {
+            if (i < ninputs && is_obj_input(inputs[i])) {
+                kpaths[nk++] = (char *)inputs[i];
+                continue;
+            }
+{
+                char buf[64];
+                snprintf(buf, sizeof buf, "/tmp/fakecc_kmb_%d_%d.o",
+                         (int)getpid(), i);
+                temps[i] = xstrdup(buf);
+                if (!temps[i]) exit(1);
+            }
+            emit_set_object_mode(1);
+            emit_obj(mod_ptrs[i], temps[i]);
+            emit_set_object_mode(0);
+            kpaths[nk++] = temps[i];
+        }
+        if (link_kernel_multiboot((const char **)kpaths, (size_t)nk, output_path) != 0)
+            exit(1);
+        for (int i = 0; i < nmods; i++) {
+            if (temps[i]) {
+                remove(temps[i]);
+                free(temps[i]);
+            }
+        }
+        free(temps);
+        free(kpaths);
+    } else {
+        emit_link(mod_ptrs, (size_t)nmods, output_path,
+                  (const char **)needed, (size_t)num_needed,
+                  nodefaultlibs || nostdlib,
+                  (const char **)lib_paths, (size_t)num_lib_paths, want_debug,
+                  is_shared);
+    }
 
     for (int i = 0; i < nmods; i++) module_free(&mods[i]);
     free(mod_ptrs);
