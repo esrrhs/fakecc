@@ -25,7 +25,15 @@ FAKECC=${FAKECC:-$ROOT/build/fakecc}
 # hardcoded list silently drops a newly added module from the bootstrap while
 # the Stage 0 build picks it up.  LC_ALL=C fixes the order across locales,
 # which keeps the linked binary byte-reproducible.
-MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | tr '\n' ' ')
+# hoststub.c and macho.c are mutually exclusive (CMake FAKECC_NO_MACHO).
+# Linking both makes the Mach-O/PE linker report duplicate macho_text_offset.
+if [ "${FAKECC_NO_MACHO:-}" = "1" ] || [ "${FAKECC_NO_MACHO:-}" = "ON" ]; then
+    _drop=macho
+else
+    _drop=hoststub
+fi
+MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | grep -v "^${_drop}$" | tr '\n' ' ')
+unset _drop
 [ -n "$MODULES" ] || { echo "no sources found in $ROOT/src" >&2; exit 1; }
 
 TRANSLATE=1

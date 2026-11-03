@@ -23,7 +23,15 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # Derived from src/, not listed here — see v0/build_bootstrap.sh for why.
-MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | tr '\n' ' ')
+# hoststub.c and macho.c are mutually exclusive (CMake FAKECC_NO_MACHO).
+# Linking both makes the Mach-O/PE linker report duplicate macho_text_offset.
+if [ "${FAKECC_NO_MACHO:-}" = "1" ] || [ "${FAKECC_NO_MACHO:-}" = "ON" ]; then
+    _drop=macho
+else
+    _drop=hoststub
+fi
+MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | grep -v "^${_drop}$" | tr '\n' ' ')
+unset _drop
 [ -n "$MODULES" ] || { echo "no sources found in $ROOT/src" >&2; exit 1; }
 PROBE=""
 TRANSLATE=0
