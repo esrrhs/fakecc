@@ -10077,15 +10077,9 @@ IRValue hi;
         }
         if (lv->type.kind == TY_STRUCT && lv->type.tag && runtime.strncmp(lv->type.tag, "__complex_", 10) == 0) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
-            Expr fake_bin;
-            runtime.memset(&fake_bin, 0, sizeof(fake_bin));
-            fake_bin.kind = EX_BINOP;
-            fake_bin.type = lv->type;
-            fake_bin.loc = e->loc;
-            fake_bin.u.bin.op = op;
-            fake_bin.u.bin.l = lv;
-            fake_bin.u.bin.r = e->u.comp.rvalue;
-            return lower_complex_binop(fn, st, &fake_bin, lv->type,
+            Expr *rhs = expr_new_binop(op, lv, e->u.comp.rvalue, e->loc);
+            rhs->type = lv->type;
+            return lower_complex_binop(fn, st, rhs, lv->type,
                                        e->u.comp.rvalue->type, op,
                                        addr, addr);
         }

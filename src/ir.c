@@ -10116,16 +10116,14 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if (lv->type.kind == TY_STRUCT && lv->type.tag && strncmp(lv->type.tag, "__complex_", 10) == 0) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
-            Expr fake_bin;
-            memset(&fake_bin, 0, sizeof(fake_bin));
-            fake_bin.kind = EX_BINOP;
-            fake_bin.type = lv->type;
-            fake_bin.loc = e->loc;
-            fake_bin.u.bin.op = op;
-            fake_bin.u.bin.l = lv;
-            fake_bin.u.bin.r = e->u.comp.rvalue;
-            /* Write the product/sum straight into the lvalue. */
-            return lower_complex_binop(fn, st, &fake_bin, lv->type,
+            /* Expand `x op= y` like `x = x op y`: heap EX_BINOP + dest-pass.
+             * A stack `Expr fake_bin` here made the self-hosted compiler
+             * SIGSEGV (CI: 300s timeout) on every complex compound-assign
+             * (gcc_torture_complex_2, pr86122, pr99787-1); the EX_ASSIGN
+             * dest-pass that uses a real AST binop was fine. */
+            Expr *rhs = expr_new_binop(op, lv, e->u.comp.rvalue, e->loc);
+            rhs->type = lv->type;
+            return lower_complex_binop(fn, st, rhs, lv->type,
                                        e->u.comp.rvalue->type, op,
                                        addr, addr);
         }
