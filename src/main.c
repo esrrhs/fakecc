@@ -117,7 +117,7 @@ static void usage(void) {
             "  -O0             keep locals in memory (skip SSA promotion)\n"
             "  -O1             default: SSA promotion + folding + DCE\n"
             "  -mcmodel=small  default x86_64 small code model\n"
-            "  -mcmodel=kernel x86_64 kernel / higher-half (see docs/elf-et-rel-higher-half.md)\n"
+            "  -mcmodel=kernel x86_64 kernel / higher-half code model\n"
             "  --image-base=A  static ELF link base (default 0x400000 = USER_VMA; S1)\n"
 "  --kernel-multiboot  fakeos S1+S2: dual-segment higher-half + Multiboot ELF32\n"
             "  -T script / --script=path\n"
