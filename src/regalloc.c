@@ -357,7 +357,8 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
             liv_add_use(&liv[inst->dst], (int)i);
         /* IR_CALL.b/c/d are return eightbytes (defs), not uses.  c and d
          * carry the third and fourth eightbyte of a wide HFA result, which
-         * AAPCS64 returns in v2/v3; other calls leave them at -1. */
+         * AAPCS64 returns in v2/v3; other calls leave them at -1.
+         * IR_ADDO/SUBO/MULO define the overflow flag in c. */
         if (inst->op == IR_CALL) {
             if (inst->b >= 0 && inst->b < nv)
                 liv[inst->b].def_point = (int)i;
@@ -365,6 +366,9 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
                 liv[inst->c].def_point = (int)i;
             if (inst->d >= 0 && inst->d < nv)
                 liv[inst->d].def_point = (int)i;
+        } else if (ir_op_with_overflow(inst->op)) {
+            if (inst->c >= 0 && inst->c < nv)
+                liv[inst->c].def_point = (int)i;
         }
 
         /* Uses */
@@ -600,7 +604,8 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                     bs_set(&def_b[bi], inst->dst);
                 }
             }
-            /* IR_CALL.b/c/d: second, third and fourth return eightbyte. */
+            /* IR_CALL.b/c/d: second, third and fourth return eightbyte.
+             * IR_*O.c: overflow flag. */
             if (inst->op == IR_CALL) {
                 if (inst->b >= 0 && inst->b < def_b[bi].nv)
                     bs_set(&def_b[bi], inst->b);
@@ -608,6 +613,9 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                     bs_set(&def_b[bi], inst->c);
                 if (inst->d >= 0 && inst->d < def_b[bi].nv)
                     bs_set(&def_b[bi], inst->d);
+            } else if (ir_op_with_overflow(inst->op)) {
+                if (inst->c >= 0 && inst->c < def_b[bi].nv)
+                    bs_set(&def_b[bi], inst->c);
             }
         }
     }
@@ -680,6 +688,22 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
     for (int v = 0; v < nv; v++) forbid_mask[v] = 0;
 
     int *ssa_def = ra_build_defs(fn);
+    /* ADDR/ALLOCA never need a callee-saved home. */
+    if (!float_class && cls->nregs > 0) {
+        uint32_t all = cls->nregs >= 32 ? 0xffffffffu
+                                        : (1u << cls->nregs) - 1u;
+        uint32_t cs_only = all & ~(uint32_t)cls->caller_saved;
+        if (cs_only) {
+            for (size_t j = 0; j < fn->insts.len; j++) {
+                const IRInst *in = &fn->insts.data[j];
+                if ((in->op == IR_ALLOCA || in->op == IR_ADDR)
+                    && in->dst >= 0 && in->dst < nv
+                    && value_in_class(fn, in->dst, float_class,
+                                      cls->exclude_16byte_ld))
+                    forbid_mask[in->dst] |= cs_only;
+            }
+        }
+    }
 
     BitSet *use_b = xmalloc(cfg->num * sizeof(BitSet));
     BitSet *def_b = xmalloc(cfg->num * sizeof(BitSet));
@@ -734,6 +758,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                         value_in_class(fn, dv[q], float_class, cls->exclude_16byte_ld))
                         bs_clr(&live, dv[q]);
                 }
+            } else if (ir_op_with_overflow(inst->op) && inst->c >= 0 && inst->c < nv
+                       && value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld)) {
+                bs_clr(&live, inst->c);
             }
 
             if (inst->a >= 0 && inst->a < nv &&
@@ -865,6 +892,20 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                                        cls->exclude_16byte_ld))
                         bs_clr(&live, rv[r]);
                 }
+            } else if (ir_op_with_overflow(inst->op) && inst->c >= 0 && inst->c < nv
+                       && value_in_class(fn, inst->c, float_class,
+                                         cls->exclude_16byte_ld)) {
+                /* Overflow flag is a second def of ADDO/SUBO/MULO. */
+                BS_FOREACH(&live, other) {
+                    if (!value_in_class(fn, (int)other, float_class,
+                                        cls->exclude_16byte_ld))
+                        continue;
+                    if ((int)other != inst->c)
+                        ig_add_edge(g, inst->c, (int)other);
+                }
+                if (inst->dst >= 0 && inst->dst < nv)
+                    ig_add_edge(g, inst->c, inst->dst);
+                bs_clr(&live, inst->c);
             }
 
             if (inst->a >= 0 && inst->a < nv &&

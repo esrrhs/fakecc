@@ -250,7 +250,9 @@ int scalar_dce(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (!inst_has_side_effect(inst) && inst->dst >= 0 &&
-            inst->dst < fn->next_value_id && !used[inst->dst]) {
+            inst->dst < fn->next_value_id && !used[inst->dst]
+            && !(ir_op_with_overflow(inst->op) && inst->c >= 0
+                 && inst->c < fn->next_value_id && used[inst->c])) {
             changed = 1;
             continue;
         }
@@ -331,7 +333,8 @@ void scalar_renumber(IRFunction *fn) {
         if (inst->dst >= max_vid) max_vid = inst->dst + 1;
         if (inst->a >= max_vid) max_vid = inst->a + 1;
         if (inst->op != IR_CBR && inst->b >= max_vid) max_vid = inst->b + 1;
-        if ((inst->op == IR_CALL || inst->op == IR_RETURN) && inst->c >= 0) {
+        if ((inst->op == IR_CALL || inst->op == IR_RETURN
+             || ir_op_with_overflow(inst->op)) && inst->c >= 0) {
             if (inst->c >= max_vid) max_vid = inst->c + 1;
             if (inst->d >= max_vid) max_vid = inst->d + 1;
         }
@@ -366,7 +369,8 @@ void scalar_renumber(IRFunction *fn) {
             map[inst->b] = next++;
         /* IR_CALL's c/d are wide-HFA result eightbytes (defs); IR_RETURN's
          * c/d are the matching uses.  Both must be kept in the compaction. */
-        if (inst->op == IR_CALL || inst->op == IR_RETURN) {
+        if (inst->op == IR_CALL || inst->op == IR_RETURN
+            || ir_op_with_overflow(inst->op)) {
             if (inst->c >= 0 && inst->c < max_vid && map[inst->c] == -1)
                 map[inst->c] = next++;
             if (inst->d >= 0 && inst->d < max_vid && map[inst->d] == -1)
@@ -401,7 +405,8 @@ void scalar_renumber(IRFunction *fn) {
         /* IR_RETURN reads c/d (the third/fourth wide-HFA eightbytes); IR_CALL
          * defines them.  Leaving them on pre-compaction ids made them alias
          * unrelated values, which then shared a register. */
-        if (inst->op == IR_RETURN || inst->op == IR_CALL) {
+        if (inst->op == IR_RETURN || inst->op == IR_CALL
+            || ir_op_with_overflow(inst->op)) {
             if (inst->c >= 0 && inst->c < max_vid) inst->c = map[inst->c];
             if (inst->d >= 0 && inst->d < max_vid) inst->d = map[inst->d];
         }
