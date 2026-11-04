@@ -58,6 +58,9 @@ enum IROpcode {
     IR_SUB,
     IR_MUL,
     IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -912,6 +915,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 struct CFGBlock {
     int id;
     int label;

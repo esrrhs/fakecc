@@ -324,6 +324,9 @@ enum IROpcode {
     IR_SUB,
     IR_MUL,
     IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -1178,6 +1181,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug);
 enum {
     A64_EQ = 0, A64_NE = 1, A64_CS = 2, A64_CC = 3,
@@ -5078,6 +5084,67 @@ static int fold_page_addend(C64 *c, const IRInst *s) {
     commit(c, s->dst, d);
     return 1;
 }
+static void emit_ovf(C64 *c, const IRInst *s) {
+    A64Asm *a = c->as;
+    int d = dst_reg(c, s->dst);
+    int ov = dst_reg(c, s->c);
+    int is64 = s->width == 8;
+    int ra = load_op(c, s->a, -1);
+    int rb = load_op(c, s->b, ra);
+    int tu = s->is_unsigned;
+    if (s->op == IR_ADDO) {
+        a64_add_reg(a, d, ra, rb, A64_LSL, 0, is64, 1 );
+        a64_cset(a, ov, tu ? A64_CS : A64_VS, 0);
+    } else if (s->op == IR_SUBO) {
+        a64_sub_reg(a, d, ra, rb, A64_LSL, 0, is64, 1);
+        a64_cset(a, ov, tu ? A64_CC : A64_VS, 0);
+    } else {
+        if (tu) {
+            if (is64) {
+                int hi = safe_tmp(ra, rb, d, ov);
+                a64_umulh(a, hi, ra, rb);
+                a64_cmp_imm12(a, hi, 0, 0, 1);
+                a64_cset(a, ov, A64_NE, 0);
+                a64_mul(a, d, ra, rb, 1);
+            } else {
+                int wide = safe_tmp(ra, rb, d, ov);
+                a64_word(a, 0x9BA07C00u
+                         | ((uint32_t)(rb & 31) << 16)
+                         | ((uint32_t)(ra & 31) << 5)
+                         | (uint32_t)(wide & 31));
+                a64_lsr_imm(a, wide, wide, 32, 1);
+                a64_cmp_imm12(a, wide, 0, 0, 1);
+                a64_cset(a, ov, A64_NE, 0);
+                a64_mul(a, d, ra, rb, 0);
+            }
+        } else if (is64) {
+            int hi = safe_tmp(ra, rb, d, ov);
+            a64_word(a, 0x9B407C00u
+                     | ((uint32_t)(rb & 31) << 16)
+                     | ((uint32_t)(ra & 31) << 5)
+                     | (uint32_t)(hi & 31));
+            a64_mul(a, d, ra, rb, 1);
+            int exp = safe_tmp(hi, d, ov, ra);
+            a64_asr_imm(a, exp, d, 63, 1);
+            a64_cmp_reg(a, hi, exp, 1);
+            a64_cset(a, ov, A64_NE, 0);
+        } else {
+            int wide = safe_tmp(ra, rb, d, ov);
+            a64_word(a, 0x9B207C00u
+                     | ((uint32_t)(rb & 31) << 16)
+                     | ((uint32_t)(ra & 31) << 5)
+                     | (uint32_t)(wide & 31));
+            a64_mov_reg(a, d, wide, 0);
+            int exp = safe_tmp(wide, d, ov, ra);
+            a64_asr_imm(a, exp, d, 31, 0);
+            a64_lsr_imm(a, wide, wide, 32, 1);
+            a64_cmp_reg(a, wide, exp, 1);
+            a64_cset(a, ov, A64_NE, 0);
+        }
+    }
+    commit(c, s->dst, d);
+    commit(c, s->c, ov);
+}
 static void emit_binop(C64 *c, const IRInst *s) {
     if (fold_page_addend(c, s)) return;
     A64Asm *a = c->as;
@@ -5876,6 +5943,9 @@ static void emit_function(C64 *c, int fi) {
             commit(c, s->dst, d);
             break;
         }
+        case IR_ADDO: case IR_SUBO: case IR_MULO:
+            emit_ovf(c, s);
+            break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_UMULH:
         case IR_DIV: case IR_MOD:
         case IR_BAND: case IR_BOR: case IR_BXOR: case IR_SHL: case IR_SHR:

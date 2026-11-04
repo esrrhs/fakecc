@@ -527,6 +527,9 @@ enum IROpcode {
     IR_SUB,
     IR_MUL,
     IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -1381,6 +1384,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 enum Reg {
     REG_RAX = 0,
     REG_RCX = 1,
@@ -2085,7 +2091,8 @@ Buffer trieblob;
     seg.initprot = 1 | 4;
     seg.nsects = (uint32_t)n_text_secs;
     buffer_append(&out, (const char *)(&seg), (sizeof seg));
-    section_64 sec = {0};
+    section_64 sec;
+    runtime.memset(&sec, 0, sizeof sec);
     runtime.memcpy(sec.sectname, "__text", 6);
     runtime.memcpy(sec.segname, "__TEXT", 6);
     sec.addr = 0x100000000ull + text_off;
@@ -2095,7 +2102,8 @@ Buffer trieblob;
     sec.flags = 0x80000000u | 0x00000400u;
     buffer_append(&out, (const char *)(&sec), (sizeof sec));
     if (has_const_sec) {
-        section_64 csec = {0};
+        section_64 csec;
+        runtime.memset(&csec, 0, sizeof csec);
         runtime.memcpy(csec.sectname, "__const", 7);
         runtime.memcpy(csec.segname, "__TEXT", 6);
         csec.addr = 0x100000000ull + ro_off;
@@ -2119,7 +2127,8 @@ Buffer trieblob;
         ds.nsects = (uint32_t)n_data_secs;
         buffer_append(&out, (const char *)(&ds), (sizeof ds));
         if (has_data_sec) {
-            section_64 dsec = {0};
+            section_64 dsec;
+            runtime.memset(&dsec, 0, sizeof dsec);
             runtime.memcpy(dsec.sectname, "__data", 6);
             runtime.memcpy(dsec.segname, "__DATA", 6);
             dsec.addr = 0x100000000ull + data_page;
@@ -2129,7 +2138,8 @@ Buffer trieblob;
             buffer_append(&out, (const char *)(&dsec), (sizeof dsec));
         }
         if (has_bss_sec) {
-            section_64 bsec = {0};
+            section_64 bsec;
+            runtime.memset(&bsec, 0, sizeof bsec);
             runtime.memcpy(bsec.sectname, "__bss", 5);
             runtime.memcpy(bsec.segname, "__DATA", 6);
             bsec.addr = 0x100000000ull + data_page + data_file;
@@ -2140,7 +2150,8 @@ Buffer trieblob;
             buffer_append(&out, (const char *)(&bsec), (sizeof bsec));
         }
         if (has_tvar_sec) {
-            section_64 tsec = {0};
+            section_64 tsec;
+            runtime.memset(&tsec, 0, sizeof tsec);
             runtime.memcpy(tsec.sectname, "__thread_vars", 13);
             runtime.memcpy(tsec.segname, "__DATA", 6);
             tsec.addr = 0x100000000ull + tv_off;
@@ -2152,7 +2163,8 @@ Buffer trieblob;
             buffer_append(&out, (const char *)(&tsec), (sizeof tsec));
         }
         if (has_tdata_sec) {
-            section_64 tsec = {0};
+            section_64 tsec;
+            runtime.memset(&tsec, 0, sizeof tsec);
             runtime.memcpy(tsec.sectname, "__thread_data", 13);
             runtime.memcpy(tsec.segname, "__DATA", 6);
             tsec.addr = 0x100000000ull + td_off;
@@ -2163,7 +2175,8 @@ Buffer trieblob;
             buffer_append(&out, (const char *)(&tsec), (sizeof tsec));
         }
         if (has_tbss_sec) {
-            section_64 tsec = {0};
+            section_64 tsec;
+            runtime.memset(&tsec, 0, sizeof tsec);
             runtime.memcpy(tsec.sectname, "__thread_bss", 12);
             runtime.memcpy(tsec.segname, "__DATA", 6);
             tsec.addr = 0x100000000ull + data_page + data_file + bss_vm;
@@ -2189,7 +2202,8 @@ Buffer trieblob;
         dw.nsects = (uint32_t)ndsec;
         buffer_append(&out, (const char *)(&dw), (sizeof dw));
         for (size_t i = 0; i < ndsec; i++) {
-            section_64 s = {0};
+            section_64 s;
+            runtime.memset(&s, 0, sizeof s);
             runtime.memcpy(s.sectname, dwsec[i].name, runtime.strlen(dwsec[i].name));
             runtime.memcpy(s.segname, "__DWARF", 7);
             s.addr = 0x100000000ull + dwarf_off + dwsec[i].off;
@@ -4230,6 +4244,15 @@ int macho_link_objects(EmitModule **mods, size_t n, const char *path,
                     emit_module_dbg_func_end(
                         &dm, fi, text_base[i] + f->end_pc,
                         text_base[i] + f->prologue_end_pc);
+                    if (f->after_push_rbp_pc > f->start_pc ||
+                        f->after_mov_rbp_pc > f->start_pc) {
+                        emit_module_dbg_func_frame(
+                            &dm, fi,
+                            text_base[i] + f->after_push_rbp_pc,
+                            text_base[i] + f->after_mov_rbp_pc);
+                        if (f->frame_size)
+                            dm.dbg_funcs[fi].frame_size = f->frame_size;
+                    }
                     for (size_t k = 0; k < f->num_vars; k++) {
                         emit_module_add_dbg_var(&dm, fi, &f->vars[k]);
                         DebugVar *dv =

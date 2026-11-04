@@ -2749,6 +2749,15 @@ Buffer debug_loc;
                 emit_module_dbg_func_end(
                     &dbg, fi, mod_text[i] + f->end_pc,
                     mod_text[i] + f->prologue_end_pc);
+                if (f->after_push_rbp_pc > f->start_pc ||
+                    f->after_mov_rbp_pc > f->start_pc) {
+                    emit_module_dbg_func_frame(
+                        &dbg, fi,
+                        mod_text[i] + f->after_push_rbp_pc,
+                        mod_text[i] + f->after_mov_rbp_pc);
+                    if (f->frame_size)
+                        dbg.dbg_funcs[fi].frame_size = f->frame_size;
+                }
                 for (size_t k = 0; k < f->num_vars; k++) {
                     emit_module_add_dbg_var(&dbg, fi, &f->vars[k]);
                     DebugVar *dv = &dbg.dbg_funcs[fi].vars[

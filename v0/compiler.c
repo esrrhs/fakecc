@@ -981,6 +981,9 @@ enum IROpcode {
     IR_SUB,
     IR_MUL,
     IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -1212,6 +1215,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 void codegen_set_code_model(int kernel);
 int codegen_code_model_is_kernel(void);
@@ -1583,6 +1589,7 @@ int fakecc_compile_files(const char **input_paths,
     int opt_level = opts ? opts->opt_level : 1;
     int want_debug = opts ? opts->want_debug : 0;
     int nostdlib = opts ? opts->nostdlib : (is_shared ? 1 : 0);
+    g_tls_local_exec = is_shared ? 0 : 1;
     const char **needed = opts ? opts->needed : ((void*)0);
     size_t num_needed = opts ? opts->num_needed : 0;
     const char **lib_paths = opts ? opts->lib_paths : ((void*)0);

@@ -58,6 +58,9 @@ enum IROpcode {
     IR_SUB,
     IR_MUL,
     IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -912,6 +915,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 int scalar_constfold(IRFunction *fn);
 int scalar_dce(IRFunction *fn);
 int scalar_peephole(IRFunction *fn);
@@ -1114,7 +1120,9 @@ int scalar_dce(IRFunction *fn) {
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
         if (!inst_has_side_effect(inst) && inst->dst >= 0 &&
-            inst->dst < fn->next_value_id && !used[inst->dst]) {
+            inst->dst < fn->next_value_id && !used[inst->dst]
+            && !(ir_op_with_overflow(inst->op) && inst->c >= 0
+                 && inst->c < fn->next_value_id && used[inst->c])) {
             changed = 1;
             continue;
         }
@@ -1186,7 +1194,8 @@ void scalar_renumber(IRFunction *fn) {
         if (inst->dst >= max_vid) max_vid = inst->dst + 1;
         if (inst->a >= max_vid) max_vid = inst->a + 1;
         if (inst->op != IR_CBR && inst->b >= max_vid) max_vid = inst->b + 1;
-        if ((inst->op == IR_CALL || inst->op == IR_RETURN) && inst->c >= 0) {
+        if ((inst->op == IR_CALL || inst->op == IR_RETURN
+             || ir_op_with_overflow(inst->op)) && inst->c >= 0) {
             if (inst->c >= max_vid) max_vid = inst->c + 1;
             if (inst->d >= max_vid) max_vid = inst->d + 1;
         }
@@ -1212,7 +1221,8 @@ void scalar_renumber(IRFunction *fn) {
             map[inst->a] = next++;
         if (inst->op != IR_CBR && inst->b >= 0 && inst->b < max_vid && map[inst->b] == -1)
             map[inst->b] = next++;
-        if (inst->op == IR_CALL || inst->op == IR_RETURN) {
+        if (inst->op == IR_CALL || inst->op == IR_RETURN
+            || ir_op_with_overflow(inst->op)) {
             if (inst->c >= 0 && inst->c < max_vid && map[inst->c] == -1)
                 map[inst->c] = next++;
             if (inst->d >= 0 && inst->d < max_vid && map[inst->d] == -1)
@@ -1240,7 +1250,8 @@ void scalar_renumber(IRFunction *fn) {
         if (inst->dst >= 0 && inst->dst < max_vid) inst->dst = map[inst->dst];
         if (inst->a >= 0 && inst->a < max_vid) inst->a = map[inst->a];
         if (inst->op != IR_CBR && inst->b >= 0 && inst->b < max_vid) inst->b = map[inst->b];
-        if (inst->op == IR_RETURN || inst->op == IR_CALL) {
+        if (inst->op == IR_RETURN || inst->op == IR_CALL
+            || ir_op_with_overflow(inst->op)) {
             if (inst->c >= 0 && inst->c < max_vid) inst->c = map[inst->c];
             if (inst->d >= 0 && inst->d < max_vid) inst->d = map[inst->d];
         }

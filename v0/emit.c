@@ -448,6 +448,7 @@ const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
 typedef struct FILE FILE;
 typedef long fpos_t;
+int g_tls_local_exec = 0;
 void emit_module_init(EmitModule *m) {
     m->is_user_tu = 0;
     buffer_init(&m->text);

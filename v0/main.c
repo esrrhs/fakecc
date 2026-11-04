@@ -324,6 +324,9 @@ enum IROpcode {
     IR_SUB,
     IR_MUL,
     IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -1178,6 +1181,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 void codegen_set_code_model(int kernel);
 int codegen_code_model_is_kernel(void);
@@ -2066,6 +2072,11 @@ int main(int argc, char **argv) {
         pkg_ctx_add_path(&pkg, d);
         runtime.free(d);
     }
+    if (!compile_only && !is_shared
+        && target_current()->objfmt == TARGET_OBJFMT_ELF)
+        g_tls_local_exec = 1;
+    else
+        g_tls_local_exec = 0;
     if (compile_only) {
         if (ninputs != 1) {
             runtime.fprintf(runtime.stderr, "fakecc: -c requires exactly one input\n");

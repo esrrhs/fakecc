@@ -58,6 +58,9 @@ enum IROpcode {
     IR_SUB,
     IR_MUL,
     IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -912,6 +915,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 enum Reg {
     REG_RAX = 0,
     REG_RCX = 1,
@@ -1319,6 +1325,9 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
                 liv[inst->c].def_point = (int)i;
             if (inst->d >= 0 && inst->d < nv)
                 liv[inst->d].def_point = (int)i;
+        } else if (ir_op_with_overflow(inst->op)) {
+            if (inst->c >= 0 && inst->c < nv)
+                liv[inst->c].def_point = (int)i;
         }
         if (inst->a >= 0 && inst->a < nv) liv_add_use(&liv[inst->a], (int)i);
         if (inst->op != IR_CBR && inst->op != IR_CALL &&
@@ -1503,6 +1512,9 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                     bs_set(&def_b[bi], inst->c);
                 if (inst->d >= 0 && inst->d < def_b[bi].nv)
                     bs_set(&def_b[bi], inst->d);
+            } else if (ir_op_with_overflow(inst->op)) {
+                if (inst->c >= 0 && inst->c < def_b[bi].nv)
+                    bs_set(&def_b[bi], inst->c);
             }
         }
     }
@@ -1547,6 +1559,21 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
     ig_init(g, nv);
     for (int v = 0; v < nv; v++) forbid_mask[v] = 0;
     int *ssa_def = ra_build_defs(fn);
+    if (!float_class && cls->nregs > 0) {
+        uint32_t all = cls->nregs >= 32 ? 0xffffffffu
+                                        : (1u << cls->nregs) - 1u;
+        uint32_t cs_only = all & ~(uint32_t)cls->caller_saved;
+        if (cs_only) {
+            for (size_t j = 0; j < fn->insts.len; j++) {
+                const IRInst *in = &fn->insts.data[j];
+                if ((in->op == IR_ALLOCA || in->op == IR_ADDR)
+                    && in->dst >= 0 && in->dst < nv
+                    && value_in_class(fn, in->dst, float_class,
+                                      cls->exclude_16byte_ld))
+                    forbid_mask[in->dst] |= cs_only;
+            }
+        }
+    }
     BitSet *use_b = xmalloc(cfg->num * sizeof(BitSet));
     BitSet *def_b = xmalloc(cfg->num * sizeof(BitSet));
     BitSet *in_b = xmalloc(cfg->num * sizeof(BitSet));
@@ -1589,6 +1616,9 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                         value_in_class(fn, dv[q], float_class, cls->exclude_16byte_ld))
                         bs_clr(&live, dv[q]);
                 }
+            } else if (ir_op_with_overflow(inst->op) && inst->c >= 0 && inst->c < nv
+                       && value_in_class(fn, inst->c, float_class, cls->exclude_16byte_ld)) {
+                bs_clr(&live, inst->c);
             }
             if (inst->a >= 0 && inst->a < nv &&
                 value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
@@ -1697,6 +1727,19 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                                        cls->exclude_16byte_ld))
                         bs_clr(&live, rv[r]);
                 }
+            } else if (ir_op_with_overflow(inst->op) && inst->c >= 0 && inst->c < nv
+                       && value_in_class(fn, inst->c, float_class,
+                                         cls->exclude_16byte_ld)) {
+                for (int other = 0; other < (&live)->nv; other++) if (bs_test((&live), other)) {
+                    if (!value_in_class(fn, (int)other, float_class,
+                                        cls->exclude_16byte_ld))
+                        continue;
+                    if ((int)other != inst->c)
+                        ig_add_edge(g, inst->c, (int)other);
+                }
+                if (inst->dst >= 0 && inst->dst < nv)
+                    ig_add_edge(g, inst->c, inst->dst);
+                bs_clr(&live, inst->c);
             }
             if (inst->a >= 0 && inst->a < nv &&
                 value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
