@@ -882,7 +882,8 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     seg.nsects = (uint32_t)n_text_secs;
     APPEND_BYTES(&seg, sizeof seg);
 
-    section_64 sec = {0};
+    section_64 sec;
+    memset(&sec, 0, sizeof sec);
     memcpy(sec.sectname, "__text", 6);
     memcpy(sec.segname, "__TEXT", 6);
     sec.addr = MACHO_BASE_VA + text_off;
@@ -893,7 +894,8 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     APPEND_BYTES(&sec, sizeof sec);
 
     if (has_const_sec) {
-        section_64 csec = {0};
+        section_64 csec;
+        memset(&csec, 0, sizeof csec);
         memcpy(csec.sectname, "__const", 7);
         memcpy(csec.segname, "__TEXT", 6);
         csec.addr = MACHO_BASE_VA + ro_off;
@@ -920,7 +922,8 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         APPEND_BYTES(&ds, sizeof ds);
 
         if (has_data_sec) {
-            section_64 dsec = {0};
+            section_64 dsec;
+            memset(&dsec, 0, sizeof dsec);
             memcpy(dsec.sectname, "__data", 6);
             memcpy(dsec.segname, "__DATA", 6);
             dsec.addr = MACHO_BASE_VA + data_page;
@@ -931,7 +934,8 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         }
 
         if (has_bss_sec) {
-            section_64 bsec = {0};
+            section_64 bsec;
+            memset(&bsec, 0, sizeof bsec);
             memcpy(bsec.sectname, "__bss", 5);
             memcpy(bsec.segname, "__DATA", 6);
             /* bss starts after the page-rounded file-backed data image. */
@@ -944,7 +948,8 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         }
 
         if (has_tvar_sec) {
-            section_64 tsec = {0};
+            section_64 tsec;
+            memset(&tsec, 0, sizeof tsec);
             memcpy(tsec.sectname, "__thread_vars", 13);
             memcpy(tsec.segname, "__DATA", 6);
             tsec.addr = MACHO_BASE_VA + tv_off;
@@ -957,7 +962,8 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         }
 
         if (has_tdata_sec) {
-            section_64 tsec = {0};
+            section_64 tsec;
+            memset(&tsec, 0, sizeof tsec);
             memcpy(tsec.sectname, "__thread_data", 13);
             memcpy(tsec.segname, "__DATA", 6);
             tsec.addr = MACHO_BASE_VA + td_off;
@@ -969,7 +975,8 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         }
 
         if (has_tbss_sec) {
-            section_64 tsec = {0};
+            section_64 tsec;
+            memset(&tsec, 0, sizeof tsec);
             memcpy(tsec.sectname, "__thread_bss", 12);
             memcpy(tsec.segname, "__DATA", 6);
             /* After __data and the descriptor/template sections, then
@@ -1006,7 +1013,8 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
         dw.nsects = (uint32_t)ndsec;
         APPEND_BYTES(&dw, sizeof dw);
         for (size_t i = 0; i < ndsec; i++) {
-            section_64 s = {0};
+            section_64 s;
+            memset(&s, 0, sizeof s);
             memcpy(s.sectname, dwsec[i].name, strlen(dwsec[i].name));
             memcpy(s.segname, "__DWARF", 7);
             s.addr = MACHO_BASE_VA + dwarf_off + dwsec[i].off;

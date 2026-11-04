@@ -829,6 +829,16 @@ int main(int argc, char **argv) {
         free(d);
     }
 
+    /* Local-Exec TPOFF32 only for final ELF executables.  Relocatable
+     * objects (-c) may later link into a DSO, and ld.so rejects dynamic
+     * TPOFF32 in shared objects (-shared).  Unit tests / library snippets
+     * keep the default (IE) unless fakecc_compile_files opts into LE. */
+    if (!compile_only && !is_shared
+        && target_current()->objfmt == TARGET_OBJFMT_ELF)
+        g_tls_local_exec = 1;
+    else
+        g_tls_local_exec = 0;
+
     if (compile_only) {
         if (ninputs != 1) {
             fprintf(stderr, "fakecc: -c requires exactly one input\n");

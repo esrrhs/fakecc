@@ -4265,6 +4265,83 @@ static int fold_page_addend(C64 *c, const IRInst *s) {
     return 1;
 }
 
+/* IR_ADDO/SUBO/MULO: result in dst, overflow flag in c. */
+static void emit_ovf(C64 *c, const IRInst *s) {
+    A64Asm *a = c->as;
+    int d = dst_reg(c, s->dst);
+    int ov = dst_reg(c, s->c);
+    int is64 = s->width == 8;
+    int ra = load_op(c, s->a, -1);
+    int rb = load_op(c, s->b, ra);
+    int tu = s->is_unsigned;
+
+    if (s->op == IR_ADDO) {
+        a64_add_reg(a, d, ra, rb, A64_LSL, 0, is64, 1 /* sets NZCV */);
+        a64_cset(a, ov, tu ? A64_CS : A64_VS, 0);
+    } else if (s->op == IR_SUBO) {
+        a64_sub_reg(a, d, ra, rb, A64_LSL, 0, is64, 1);
+        /* Unsigned sub overflow = borrow = C clear; signed = V set. */
+        a64_cset(a, ov, tu ? A64_CC : A64_VS, 0);
+    } else {
+        /* MULO: widen/high-half first so ra/rb stay live, then write the
+         * wrapped product.  The old order (MUL into d then UMULH/SMULL)
+         * clobbered an operand when d aliased ra/rb, and the signed-i32
+         * path used a 64-bit ASR on a W product (zero-extended), so the
+         * expected high half was 0/1 instead of 0/-1 — aborting the
+         * gcc_torture mul_overflow cases on arm64. */
+        if (tu) {
+            if (is64) {
+                int hi = safe_tmp(ra, rb, d, ov);
+                a64_umulh(a, hi, ra, rb);
+                a64_cmp_imm12(a, hi, 0, 0, 1);
+                a64_cset(a, ov, A64_NE, 0);
+                a64_mul(a, d, ra, rb, 1);
+            } else {
+                int wide = safe_tmp(ra, rb, d, ov);
+                /* UMULL Xd, Wn, Wm */
+                a64_word(a, 0x9BA07C00u
+                         | ((uint32_t)(rb & 31) << 16)
+                         | ((uint32_t)(ra & 31) << 5)
+                         | (uint32_t)(wide & 31));
+                a64_lsr_imm(a, wide, wide, 32, 1);
+                a64_cmp_imm12(a, wide, 0, 0, 1);
+                a64_cset(a, ov, A64_NE, 0);
+                a64_mul(a, d, ra, rb, 0);
+            }
+        } else if (is64) {
+            int hi = safe_tmp(ra, rb, d, ov);
+            /* SMULH Xd, Xn, Xm */
+            a64_word(a, 0x9B407C00u
+                     | ((uint32_t)(rb & 31) << 16)
+                     | ((uint32_t)(ra & 31) << 5)
+                     | (uint32_t)(hi & 31));
+            a64_mul(a, d, ra, rb, 1);
+            int exp = safe_tmp(hi, d, ov, ra);
+            a64_asr_imm(a, exp, d, 63, 1);
+            a64_cmp_reg(a, hi, exp, 1);
+            a64_cset(a, ov, A64_NE, 0);
+        } else {
+            int wide = safe_tmp(ra, rb, d, ov);
+            /* SMULL Xd, Wn, Wm — full signed 64-bit product. */
+            a64_word(a, 0x9B207C00u
+                     | ((uint32_t)(rb & 31) << 16)
+                     | ((uint32_t)(ra & 31) << 5)
+                     | (uint32_t)(wide & 31));
+            /* Wrapped i32 result = low half (W move zero-extends). */
+            a64_mov_reg(a, d, wide, 0);
+            /* Expected high half = ASR of the i32 product (W ASR so a
+             * negative low yields 0xffffffff, matching LSR of SMULL). */
+            int exp = safe_tmp(wide, d, ov, ra);
+            a64_asr_imm(a, exp, d, 31, 0);
+            a64_lsr_imm(a, wide, wide, 32, 1);
+            a64_cmp_reg(a, wide, exp, 1);
+            a64_cset(a, ov, A64_NE, 0);
+        }
+    }
+    commit(c, s->dst, d);
+    commit(c, s->c, ov);
+}
+
 static void emit_binop(C64 *c, const IRInst *s) {
     if (fold_page_addend(c, s)) return;
     A64Asm *a = c->as;
@@ -5288,6 +5365,9 @@ static void emit_function(C64 *c, int fi) {
             commit(c, s->dst, d);
             break;
         }
+        case IR_ADDO: case IR_SUBO: case IR_MULO:
+            emit_ovf(c, s);
+            break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_UMULH:
         case IR_DIV: case IR_MOD:
         case IR_BAND: case IR_BOR: case IR_BXOR: case IR_SHL: case IR_SHR:

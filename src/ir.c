@@ -25,6 +25,11 @@ static int g_ir_pin_locals = 0;              /* -O0: keep scalars in memory */
 /* When set, a register-returned struct call stores into this address
  * instead of allocating a temporary and copying. */
 static IRValue g_call_ret_into = -1;
+/* When set, a register-returned INTEGER struct call leaves the ABI return
+ * registers alone (no stack slot).  Used for `return f(...);` so the
+ * epilogue can fall through with RAX(/RDX) still holding the callee result
+ * — matching gcc -O0 (`call; leave; ret`). */
+static int g_call_ret_forward = 0;
 /* When ≥0, EX_TERNARY stores each arm into this alloca instead of a temp
  * (gcc -O0: `a = c ? a+b : …` writes `a` on both sides). */
 static IRValue g_tern_store_into = -1;
@@ -2545,6 +2550,61 @@ static IRValue i128_from_scalar(IRFunction *fn, IRValue v, int src_w, int src_u,
     return dst;
 }
 
+
+/* When both operands and the result share the same non-i128 integer type
+ * (width + signedness), infinite-precision overflow into that type is exactly
+ * native-width wraparound.  Prefer that over the general i128 lift — the
+ * latter dominates __builtin_*_overflow microbenchmarks (~2.6x vs gcc -O0).
+ * Mixed signedness / mismatched widths still take the i128 path below. */
+static int overflow_same_type(Type a, Type b, Type res, int *pw, int *pu) {
+    if (type_is_i128(a) || type_is_i128(b) || type_is_i128(res)) return 0;
+    if (a.kind != TY_INT || b.kind != TY_INT || res.kind != TY_INT) return 0;
+    int aw = a.width ? a.width : 4;
+    int bw = b.width ? b.width : 4;
+    int tw = res.width ? res.width : 4;
+    if (aw != bw || aw != tw) return 0;
+    if (aw <= 0 || aw > 8) return 0;
+    if (a.is_unsigned != b.is_unsigned || a.is_unsigned != res.is_unsigned)
+        return 0;
+    *pw = tw;
+    *pu = res.is_unsigned;
+    return 1;
+}
+
+/* Returns i32 overflow flag; stores wrapped result through rptr when rptr >= 0.
+ * is_add / is_sub select the op (else mul).  Emits IR_ADDO/SUBO/MULO so
+ * codegen can use add;setc / imul;seto (gcc -O0) instead of a compare tree. */
+static IRValue overflow_native(IRFunction *fn, IRValue a, IRValue b,
+                               int tw, int tu, int is_add, int is_sub,
+                               IRValue rptr, SourceLoc loc) {
+    a = coerce(fn, a, get_value_width(fn, a), get_value_is_unsigned(fn, a),
+               tw, tu, loc);
+    b = coerce(fn, b, get_value_width(fn, b), get_value_is_unsigned(fn, b),
+               tw, tu, loc);
+    IRValue res = new_value(fn);
+    IRValue ov = new_value(fn);
+    IROpcode op = is_add ? IR_ADDO : (is_sub ? IR_SUBO : IR_MULO);
+    IRInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = op;
+    inst.dst = res;
+    inst.a = a;
+    inst.b = b;
+    inst.c = ov;
+    inst.d = -1;
+    inst.imm = 0;
+    inst.loc = loc;
+    inst.width = tw;
+    inst.is_unsigned = tu;
+    inst.call_callee = -1;
+    ir_inst_array_push(&fn->insts, inst);
+    set_value_type(fn, res, tw, tu);
+    set_value_type(fn, ov, 4, 0);
+    if (rptr >= 0)
+        emit_inst_w(fn, IR_STORE_PTR, -1, rptr, res, 0, tw, tu, loc);
+    return ov;
+}
+
 /* Lift an overflow-builtin operand to a 128-bit slot using *its own*
  * signedness (GCC: both operands are promoted to infinite precision). */
 static IRValue overflow_lift_i128(IRFunction *fn, IRValue v, Type ty,
@@ -4899,7 +4959,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e);
 
 static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e,
                                   Type lt, Type rt, BinOp bop,
-                                  IRValue forced_l_addr) {
+                                  IRValue forced_l_addr, IRValue dest_addr) {
     if (fakecc_had_error()) return FAKECC_ERR;
     int lt_is_cplx = (lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0);
     int rt_is_cplx = (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0);
@@ -5024,30 +5084,70 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
     IROpcode div_op = is_float ? IR_FDIV : IR_DIV;
     
     if (bop == BOP_ADD) {
-        out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
-        out_i = emit_bin_w(fn, add_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        /* complex ± real: imag is unchanged / just copied — skip the
+         * add-with-zero that the real-promoted imag path would emit. */
+        if (!rt_is_cplx) {
+            out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = l_imag;
+        } else if (!lt_is_cplx) {
+            out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = r_imag;
+        } else {
+            out_r = emit_bin_w(fn, add_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = emit_bin_w(fn, add_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        }
     } else if (bop == BOP_SUB) {
-        out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
-        out_i = emit_bin_w(fn, sub_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        if (!rt_is_cplx) {
+            out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = l_imag;
+        } else if (!lt_is_cplx) {
+            out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
+            /* real - complex: imag = -r_imag */
+            if (is_float) {
+                IRValue z = emit_float_const(fn, elem_sz, 0, e->loc);
+                out_i = emit_bin_w(fn, sub_op, z, r_imag, elem_sz, 1, e->loc);
+            } else {
+                IRValue z = new_value(fn);
+                emit_inst_w(fn, IR_CONST, z, -1, -1, 0, elem_sz, 1, e->loc);
+                out_i = emit_bin_w(fn, sub_op, z, r_imag, elem_sz, 1, e->loc);
+            }
+        } else {
+            out_r = emit_bin_w(fn, sub_op, l_real, r_real, elem_sz, 1, e->loc);
+            out_i = emit_bin_w(fn, sub_op, l_imag, r_imag, elem_sz, 1, e->loc);
+        }
     } else if (bop == BOP_MUL) {
-        /* (ac-bd) + (ad+bc)i.  Float intermediates must be marked so RA
-         * homes them in XMM; otherwise the FMUL/FSUB results never land. */
-        IRValue r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
-        IRValue r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
-        if (is_float) {
-            set_value_float(fn, r1, 1);
-            set_value_float(fn, r2, 1);
-        }
-        out_r = emit_bin_w(fn, sub_op, r1, r2, elem_sz, 1, e->loc);
-        if (is_float) set_value_float(fn, out_r, 1);
+        /* Real×complex / complex×real: two real multiplies (covers the hot
+         * `z * 0.5` scale).  Full complex×complex stays the classic
+         * (ac-bd)+(ad+bc)i product — a libcall was tried and lost at -O0
+         * because marshalling six args into the SysV XMM ABI dominated. */
+        int r_is_real = !rt_is_cplx;
+        int l_is_real = !lt_is_cplx;
+        if (is_float && (r_is_real || l_is_real)) {
+            IRValue scale = r_is_real ? r_real : l_real;
+            IRValue ar = r_is_real ? l_real : r_real;
+            IRValue ai = r_is_real ? l_imag : r_imag;
+            out_r = emit_bin_w(fn, mul_op, ar, scale, elem_sz, 1, e->loc);
+            set_value_float(fn, out_r, 1);
+            out_i = emit_bin_w(fn, mul_op, ai, scale, elem_sz, 1, e->loc);
+            set_value_float(fn, out_i, 1);
+        } else {
+            IRValue r1 = emit_bin_w(fn, mul_op, l_real, r_real, elem_sz, 1, e->loc);
+            IRValue r2 = emit_bin_w(fn, mul_op, l_imag, r_imag, elem_sz, 1, e->loc);
+            if (is_float) {
+                set_value_float(fn, r1, 1);
+                set_value_float(fn, r2, 1);
+            }
+            out_r = emit_bin_w(fn, sub_op, r1, r2, elem_sz, 1, e->loc);
+            if (is_float) set_value_float(fn, out_r, 1);
 
-        IRValue i1 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
-        IRValue i2 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
-        if (is_float) {
-            set_value_float(fn, i1, 1);
-            set_value_float(fn, i2, 1);
+            IRValue i1 = emit_bin_w(fn, mul_op, l_real, r_imag, elem_sz, 1, e->loc);
+            IRValue i2 = emit_bin_w(fn, mul_op, l_imag, r_real, elem_sz, 1, e->loc);
+            if (is_float) {
+                set_value_float(fn, i1, 1);
+                set_value_float(fn, i2, 1);
+            }
+            out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
         }
-        out_i = emit_bin_w(fn, add_op, i1, i2, elem_sz, 1, e->loc);
     } else if (bop == BOP_DIV) {
         if (is_float && elem_sz <= 8 && type_long_double_width() < 16) {
             /* The platform has no float wider than double (arm64 Darwin's
@@ -5236,15 +5336,21 @@ static IRValue lower_complex_binop(IRFunction *fn, IRSymTable *st, const Expr *e
         set_value_float(fn, out_i, 1);
     }
     
-    /* Allocate stack slot for result struct */
+    /* Store into caller-provided dest when present — avoids a temp slot
+     * and a later struct_copy for `z = z * w` / `z *= w`. */
     int total_sz = elem_sz * 2;
-    IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
-    IRValue addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    IRValue addr = dest_addr;
+    if (addr < 0) {
+        IRValue slot = emit_alloca(fn, total_sz, 8, 1, e->loc);
+        addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
+    }
     emit_inst_w(fn, IR_STORE_PTR, -1, addr, out_r, 0, elem_sz, 1, e->loc);
+    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
     IRValue off = new_value(fn);
     emit_inst_w(fn, IR_CONST, off, -1, -1, elem_sz, 8, 1, e->loc);
     IRValue iaddr = emit_bin_w(fn, IR_ADD, addr, off, 8, 1, e->loc);
     emit_inst_w(fn, IR_STORE_PTR, -1, iaddr, out_i, 0, elem_sz, 1, e->loc);
+    if (is_float) fn->insts.data[fn->insts.len - 1].is_float = 1;
     return addr;
 }
 
@@ -6752,7 +6858,7 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
         }
         if ((lt.kind == TY_STRUCT && lt.tag && strncmp(lt.tag, "__complex_", 10) == 0) ||
             (rt.kind == TY_STRUCT && rt.tag && strncmp(rt.tag, "__complex_", 10) == 0)) {
-            return lower_complex_binop(fn, st, e, lt, rt, bop, -1);
+            return lower_complex_binop(fn, st, e, lt, rt, bop, -1, -1);
         }
         if (type_is_i128(lt) || type_is_i128(rt) || type_is_i128(e->type)) {
             if (type_is_i128(e->type) && i128_pair_shape(e)) {
@@ -7181,6 +7287,32 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                                          e->u.assign.rvalue->u.bin.r->type,
                                          e->u.assign.rvalue->u.bin.op, dst);
             }
+        }
+        /* `z = z * w` / `z = a + b` on a complex lvalue: lower the binop
+         * straight into z (avoids a temp + struct_copy). Loads happen
+         * before the final store, so a self-update is safe. */
+        if (lv->type.kind == TY_STRUCT && lv->type.tag
+            && strncmp(lv->type.tag, "__complex_", 10) == 0
+            && e->u.assign.rvalue && e->u.assign.rvalue->kind == EX_BINOP
+            && e->u.assign.rvalue->type.kind == TY_STRUCT
+            && e->u.assign.rvalue->type.tag
+            && strcmp(lv->type.tag, e->u.assign.rvalue->type.tag) == 0
+            && (lv->kind == EX_VAR || lv->kind == EX_DEREF
+                || lv->kind == EX_INDEX || lv->kind == EX_MEMBER)) {
+            IRValue dst = lower_lvalue_addr(fn, st, lv);
+            if (dst < 0) return dst;
+            Expr *rhs = e->u.assign.rvalue;
+            /* When the binop's left operand is the same EX_VAR, share the
+             * address so we do not re-materialize it for the load. */
+            IRValue forced = -1;
+            if (rhs->u.bin.l && rhs->u.bin.l->kind == EX_VAR
+                && lv->kind == EX_VAR
+                && lv->u.var.name && rhs->u.bin.l->u.var.name
+                && strcmp(lv->u.var.name, rhs->u.bin.l->u.var.name) == 0)
+                forced = dst;
+            return lower_complex_binop(fn, st, rhs, rhs->u.bin.l->type,
+                                       rhs->u.bin.r->type, rhs->u.bin.op,
+                                       forced, dst);
         }
         /* `p = f();` with a register-returned struct: store into p. */
         if (e->u.assign.rvalue && e->u.assign.rvalue->kind == EX_CALL
@@ -8370,12 +8502,17 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             int tu = res_ty.is_unsigned;
             IRValue a = lower_expr(fn, st, arg0);
             IRValue b = lower_expr(fn, st, arg1);
-            /* GCC: promote each operand to infinite precision using its own
-             * signedness, compute, then ask whether the mathematical result
-             * fits in the last argument's type.  64-bit dest-type arithmetic
-             * cannot represent both "signed * unsigned → unsigned long"
-             * (pr30314: 42 * ~0UL/42 fits) and "signed * signed → unsigned
-             * long long" (pr91450: -2 * 1 is negative and overflows). */
+            /* Same-type operands+result: native-width wrap + cheap ov check.
+             * Else GCC infinite-precision via i128 (needed for mixed
+             * signedness: pr30314 / pr91450). */
+            int fw = 0, fu = 0;
+            if (overflow_same_type(arg0->type, arg1->type, res_ty, &fw, &fu)) {
+                IRValue rptr = -1;
+                if (!is_p)
+                    rptr = lower_expr(fn, st, arg2);
+                return overflow_native(fn, a, b, fw, fu, is_add, is_sub,
+                                       rptr, e->loc);
+            }
             IRValue a128 = overflow_lift_i128(fn, a, arg0->type, e->loc);
             IRValue b128 = overflow_lift_i128(fn, b, arg1->type, e->loc);
             IRValue prod = i128_alloc(fn, e->loc);
@@ -9151,7 +9288,16 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             sret_addr = emit_bin_w(fn, IR_ADDR, slot, -1, 8, 1, e->loc);
         }
         IRValue slot_addr = -1;
-        if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
+        int forward_abi_ret = 0;
+        if (g_call_ret_forward && is_ret_struct && ret_nreg > 0
+            && ret_nreg <= 2 && !is_x87_st0 && !ret_in_mem
+            && !abi_is_hfa(e->type) && type_size(e->type) <= 16) {
+            int all_int = 1;
+            for (int k = 0; k < ret_nreg; k++)
+                if (ret_cls[k] != SYSV_CLS_INTEGER) all_int = 0;
+            forward_abi_ret = all_int;
+        }
+        if (is_ret_struct && (ret_nreg > 0 || is_x87_st0) && !forward_abi_ret) {
             if (g_call_ret_into >= 0) {
                 slot_addr = g_call_ret_into;
                 g_call_ret_into = -1;
@@ -9163,7 +9309,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             }
         }
         IRValue v;
-        if (ret_in_mem) {
+        if (forward_abi_ret) {
+            v = -1;
+        } else if (ret_in_mem) {
             v = sret_addr;
         } else if (is_ret_struct && (ret_nreg > 0 || is_x87_st0)) {
             v = slot_addr;
@@ -9341,6 +9489,22 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             free(arg_on_stack);
             free(arg_nbytes);
             return v;
+        }
+        if (forward_abi_ret) {
+            /* Leave RAX(/RDX) as the expression result; caller is about to
+             * IR_RETURN with no operands (epilogue only). */
+            inst.dst = -1;
+            inst.a = -1;
+            inst.b = -1;
+            inst.imm = 0;
+            inst.width = 0;
+            inst.is_unsigned = 0;
+            ir_inst_array_push(&fn->insts, inst);
+            restore_big_copy(fn, big_copy_sp, e->loc);
+            free(arg_vals);
+            free(arg_on_stack);
+            free(arg_nbytes);
+            return -1;
         }
         if (is_ret_struct && ret_nreg > 0) {
             if (direct_ret_slot) {
@@ -9925,11 +10089,10 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             fake_bin.u.bin.op = op;
             fake_bin.u.bin.l = lv;
             fake_bin.u.bin.r = e->u.comp.rvalue;
-            IRValue res_addr = lower_complex_binop(fn, st, &fake_bin, lv->type,
-                                                   e->u.comp.rvalue->type, op,
-                                                   addr);
-            emit_struct_copy(fn, addr, res_addr, type_size(lv->type), e->loc);
-            return res_addr;
+            /* Write the product/sum straight into the lvalue. */
+            return lower_complex_binop(fn, st, &fake_bin, lv->type,
+                                       e->u.comp.rvalue->type, op,
+                                       addr, addr);
         }
         if (lv->type.is_decimal) {
             IRValue addr = lower_lvalue_addr(fn, st, lv);
@@ -10966,6 +11129,28 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
                 emit_inst_w(fn, IR_RETURN, -1, z, -1, 0, dw, du, s->loc);
             }
         } else if (fn->ret_is_struct) {
+            /* `return f(...);` of an INTEGER-class register struct: leave the
+             * callee's RAX(/RDX) in place and emit a bare epilogue.  Avoids
+             * the -O0 temp slot + reload that dominated fl_closure. */
+            Expr *ev = s->u.value;
+            if (ev && ev->kind == EX_CALL && fn->ret_reg_n > 0
+                && fn->ret_reg_n <= 2 && fn->ret_x87_bytes == 0
+                && !fn->ret_is_complex_ld && g_ir_cur_fd
+                && type_size(ev->type) <= 16
+                && !abi_is_hfa(g_ir_cur_fd->ret_type)
+                && same_aggregate_type(&ev->type, &g_ir_cur_fd->ret_type)) {
+                int all_int = 1;
+                for (int k = 0; k < fn->ret_reg_n; k++)
+                    if ((SysVRegClass)fn->ret_reg_cls[k] != SYSV_CLS_INTEGER)
+                        all_int = 0;
+                if (all_int) {
+                    g_call_ret_forward = 1;
+                    lower_expr(fn, st, ev);
+                    g_call_ret_forward = 0;
+                    emit_inst_w(fn, IR_RETURN, -1, -1, -1, 0, 0, 0, s->loc);
+                    break;
+                }
+            }
             IRValue v = lower_expr(fn, st, s->u.value);
             if (fn->ret_is_complex_ld || fn->ret_x87_bytes > 0) {
                 emit_inst_w(fn, IR_RETURN, -1, v, -1,
