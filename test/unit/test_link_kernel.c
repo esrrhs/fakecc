@@ -221,7 +221,7 @@ static void test_kernel_capacity_stress(void) {
         "global marker\n"
         "marker:\n"
         "    dq 0\n"));
-    /* ~900 KiB PROGBITS — exceeds legacy OBJ_ARENA (786432). */
+    /* ~900 KiB PROGBITS — exceeds the old fixed 768 KiB object arena. */
     T_ASSERT(write_file(blob_asm,
         "section .rodata\n"
         "global bigblob\n"

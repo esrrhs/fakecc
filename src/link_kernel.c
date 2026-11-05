@@ -25,12 +25,11 @@ enum {
     R_32 = 10, R_32S = 11, R_GOTPCRELX = 41, R_PLT32X = 42,
     PT_LOAD = 1,
     O_RDWR_CREAT = 0x42,
-    /* Capacity sized for a full fakeos host kernel link: ~50+ ET_RELs
-     * including large .incbin blobs (userblob ~20 MiB, m5blob ~24 MiB). */
+    /* Object slot table: enough for a full fakeos host kernel link
+     * (~50+ ET_RELs). Object bytes and the Multiboot image buffer are
+     * heap-allocated and grow with the link (no fixed MiB caps). */
     MAX_OBJS = 128,
     MAX_BUCKET = 256,
-    OBJ_ARENA = 100663296,   /* 96 MiB object arena */
-    OUT_CAP = 100663296,     /* 96 MiB Multiboot image buffer */
     KERNEL_LMA = 0x100000,
     SHN_ABS_SPC = 0xfff1,
     HDR_PAD = 0x1000
@@ -174,12 +173,19 @@ static uint64_t sym_global_vma(const char *name);
 static uint64_t sym_vma(struct obj *o, unsigned int symidx,
                        const char **name_out);
 
-static unsigned char obj_arena[OBJ_ARENA];
-static uint64_t arena_used;
-/* File scope (not function-static): fakecc emits zero-init file-scope
- * arrays into NOBITS .bss; a 2 MiB function-scope static would
- * otherwise land in PROGBITS and bloat the embedded ELF. */
-static unsigned char outbuf[OUT_CAP];
+/* Object file bytes are malloc'd per ET_REL; the Multiboot image is
+ * calloc'd to layout's file_end. No fixed MiB arenas. */
+
+static void free_loaded_objs(void) {
+    unsigned int i;
+    for (i = 0; i < n_objs; i++) {
+        free(objs[i].data);
+        objs[i].data = NULL;
+        objs[i].size = 0;
+        objs[i].nsec = 0;
+    }
+    n_objs = 0;
+}
 
 static int read_obj(const char *path) {
     FILE *fp;
@@ -197,29 +203,32 @@ static int read_obj(const char *path) {
     flen = ftell(fp);
     if (flen < 0) { fclose(fp); return 0; }
     if (fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return 0; }
-    if (arena_used + (uint64_t)flen > OBJ_ARENA) {
-        fprintf(stderr, "fakecc --kernel-multiboot: object arena full\n");
+    if (n_objs >= (unsigned)MAX_OBJS) {
+        fprintf(stderr, "fakecc --kernel-multiboot: too many objects (max %d)\n",
+                MAX_OBJS);
         fclose(fp);
         return 0;
     }
-    buf = obj_arena + arena_used;
+    buf = (unsigned char *)malloc((size_t)flen > 0 ? (size_t)flen : 1);
+    if (!buf) {
+        fprintf(stderr, "fakecc --kernel-multiboot: out of memory reading %s (%ld bytes)\n",
+                path, flen);
+        fclose(fp);
+        return 0;
+    }
     len = (uint64_t)fread(buf, 1, (size_t)flen, fp);
     fclose(fp);
     if (len < 64 || buf[0] != 0x7f || buf[1] != 'E' ||
         buf[2] != 'L' || buf[3] != 'F' || buf[4] != ELFCLASS64 ||
         rd16(buf + 16) != ET_REL || rd16(buf + 18) != EM_X86_64) {
         fprintf(stderr, "fakecc --kernel-multiboot: %s not x86-64 reloc ELF\n", path);
+        free(buf);
         return 0;
     }
-    if (n_objs >= (unsigned)MAX_OBJS) {
-        fprintf(stderr, "fakecc --kernel-multiboot: too many objects (max %d)\n",
-                MAX_OBJS);
-        return 0;
-    }
-    arena_used += len;
     o = &objs[n_objs++];
     o->data = buf;
     o->size = len;
+    o->nsec = 0;
     o->shoff = rd64(buf + 40);
     o->shentsize = rd16(buf + 58);
     o->shnum = rd16(buf + 60);
@@ -712,8 +721,7 @@ static int read_atfile(const char *path) {
 
 static void reset_state(void) {
     unsigned int b;
-    n_objs = 0;
-    arena_used = 0;
+    free_loaded_objs();
     got_count = 0;
     memset(bcount, 0, sizeof(bcount));
     memset(&got_sec, 0, sizeof(got_sec));
@@ -728,12 +736,13 @@ static void reset_state(void) {
 
 int link_kernel_multiboot(const char **obj_paths, size_t npaths,
                           const char *out_path) {
-    unsigned char *out;
+    unsigned char *out = NULL;
     uint64_t mem_lma, entry;
     FILE *fp;
     size_t written;
     size_t pi;
     int i;
+    int rc = 1;
 
     if (!out_path || !obj_paths) return 1;
     reset_state();
@@ -742,16 +751,16 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
         const char *p = obj_paths[pi];
         if (!p || !p[0]) continue;
         if (p[0] == '@') {
-            if (!read_atfile(p + 1)) return 1;
+            if (!read_atfile(p + 1)) goto done;
         } else if (!read_obj(p)) {
-            return 1;
+            goto done;
         }
     }
     if (n_objs == 0) {
         fprintf(stderr, "fakecc --kernel-multiboot: no inputs\n");
-        return 1;
+        goto done;
     }
-    if (!scan_got()) return 1;
+    if (!scan_got()) goto done;
     memset(&got_sec, 0, sizeof(got_sec));
     if (got_count) {
         got_sec.size = (uint64_t)got_count * 8;
@@ -759,11 +768,9 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
         buckets[B_GOT][bcount[B_GOT]++] = &got_sec;
     }
     layout();
-    if (file_end > OUT_CAP) {
-        fprintf(stderr,
-                "fakecc --kernel-multiboot: output image too large (%llu > %d)\n",
-                (unsigned long long)file_end, OUT_CAP);
-        return 1;
+    if (file_end == 0) {
+        fprintf(stderr, "fakecc --kernel-multiboot: empty output image\n");
+        goto done;
     }
 
     for (i = 0; i < (int)got_count; i++) {
@@ -783,7 +790,7 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
             fprintf(stderr,
                     "fakecc --kernel-multiboot: GOT symbol '%s' undefined\n",
                     got_names[i]);
-            return 1;
+            goto done;
         }
         got_slots[i] = v;
     }
@@ -791,15 +798,20 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
     entry = sym_global_vma("_start");
     if (entry == 0) {
         fprintf(stderr, "fakecc --kernel-multiboot: no _start symbol\n");
-        return 1;
+        goto done;
     }
     if (entry > 0xFFFFFFFFULL) {
         fprintf(stderr, "fakecc --kernel-multiboot: entry outside low 4 GiB\n");
-        return 1;
+        goto done;
     }
 
-    out = outbuf;
-    memset(out, 0, OUT_CAP);
+    out = (unsigned char *)calloc(1, (size_t)file_end);
+    if (!out) {
+        fprintf(stderr,
+                "fakecc --kernel-multiboot: out of memory for output image (%llu bytes)\n",
+                (unsigned long long)file_end);
+        goto done;
+    }
 
     for (i = 0; i < (int)n_objs; i++) {
         struct obj *o = &objs[i];
@@ -817,7 +829,7 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
         for (i = 0; i < (int)got_count; i++)
             wr64(out + gbase + (uint64_t)i * 8, got_slots[i]);
     }
-    if (!apply_relocs(out)) return 1;
+    if (!apply_relocs(out)) goto done;
 
     mem_lma = bss_end - text_lma;
 
@@ -865,13 +877,13 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
     fp = fopen(out_path, "wb");
     if (!fp) {
         fprintf(stderr, "fakecc --kernel-multiboot: cannot create %s\n", out_path);
-        return 1;
+        goto done;
     }
     written = fwrite(out, 1, (size_t)file_end, fp);
     fclose(fp);
     if (written != (size_t)file_end) {
         fprintf(stderr, "fakecc --kernel-multiboot: short write\n");
-        return 1;
+        goto done;
     }
     fprintf(stderr,
             "[fakecc kernel-multiboot] wrote %s: entry 0x%llx text 0x%llx "
@@ -881,5 +893,9 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
             (unsigned long long)text_vma,
             (unsigned long long)file_end,
             (unsigned long long)(KERNEL_VMA + bss_end));
-    return 0;
+    rc = 0;
+done:
+    free(out);
+    free_loaded_objs();
+    return rc;
 }
