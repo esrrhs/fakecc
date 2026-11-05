@@ -1293,10 +1293,6 @@ static int write_elf64(As *as, const char *path) {
         buf_u64(&rela_bufs[r->sect], (uint64_t)(int64_t)r->addend);
     }
 
-    int nsh = 1 + as->nsects; /* + null */
-    for (int i=0;i<as->nsects;i++) if (has_rela[i]) nsh++;
-    nsh += 3; /* symtab strtab shstrtab */
-
     /* layout: ehdr | section data | shstrtab | symtab | strtab | rela* | shdrs */
     buf_z(&out, 64); /* ehdr filled later */
 
