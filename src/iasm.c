@@ -358,8 +358,52 @@ static void emit_mov_mr(Buffer *b, int base, int64_t disp, int src, int w) {
     modrm_mem(b, src, base, disp);
 }
 
+/* Absolute [disp32] ModRM+SIB used by %fs:disp / %gs:disp. */
+static void emit_abs_disp32(Buffer *b, int reg) {
+    modrm(b, 0, reg, 4); /* mod=00 rm=4 → SIB */
+    eb(b, 0x25);         /* scale=0 index=4 base=5 → [disp32] */
+}
+
+static void emit_seg_override(Buffer *b, int sreg) {
+    if (sreg == 4) eb(b, 0x64);      /* %fs */
+    else if (sreg == 5) eb(b, 0x65); /* %gs */
+}
+
+/* mov dst, %fs/%gs:disp32 */
+static void emit_mov_seg_abs_load(Buffer *b, int dst, int sreg, int64_t disp, int w) {
+    emit_seg_override(b, sreg);
+    if (w == 1) {
+        rex(b, 0, dst, 0, 0); eb(b, 0x8A);
+    } else if (w == 2) {
+        eb(b, 0x66); rex(b, 0, dst, 0, 0); eb(b, 0x8B);
+    } else if (w == 4) {
+        rex(b, 0, dst, 0, 0); eb(b, 0x8B);
+    } else {
+        rex(b, 1, dst, 0, 0); eb(b, 0x8B);
+    }
+    emit_abs_disp32(b, dst);
+    e32(b, (int32_t)disp);
+}
+
+/* mov %fs/%gs:disp32, src */
+static void emit_mov_seg_abs_store(Buffer *b, int src, int sreg, int64_t disp, int w) {
+    emit_seg_override(b, sreg);
+    if (w == 1) {
+        rex(b, 0, src, 0, 0); eb(b, 0x88);
+    } else if (w == 2) {
+        eb(b, 0x66); rex(b, 0, src, 0, 0); eb(b, 0x89);
+    } else if (w == 4) {
+        rex(b, 0, src, 0, 0); eb(b, 0x89);
+    } else {
+        rex(b, 1, src, 0, 0); eb(b, 0x89);
+    }
+    emit_abs_disp32(b, src);
+    e32(b, (int32_t)disp);
+}
+
 /* Parse a single operand token into kind/reg/imm/sym. Consumes from *pp.
- * kind 0=reg 1=imm 2=mem(reg[+disp in *imm]) 3=symbol 4=sym(%rip) 5=xmm. */
+ * kind 0=reg 1=imm 2=mem(reg[+disp in *imm]) 3=symbol 4=sym(%rip) 5=xmm
+ * 6=cr 7=sreg 8=seg:disp32 (absolute mem with FS/GS override; *reg=sreg). */
 static int parse_operand(const char **pp, int *kind, int *reg, int64_t *imm,
                          char **sym, int *width) {
     const char *p = skip_ws(*pp);
@@ -426,6 +470,16 @@ not_mem:
         }
         int sr = parse_sreg_name(p, &xend);
         if (sr >= 0) {
+            const char *q = skip_ws(xend);
+            /* %gs:disp / %fs:disp — absolute disp32 with segment override */
+            if (*q == ':') {
+                int64_t disp = 0;
+                q = skip_ws(q + 1);
+                if (!parse_imm(&q, &disp)) return 0;
+                *kind = 8; *reg = sr; *width = 8; *imm = disp;
+                *pp = q;
+                return 1;
+            }
             *kind = 7; *reg = sr; *width = 2;
             *pp = xend;
             return 1;
@@ -865,6 +919,14 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
             /* Intel SDM: MOV from/to CR uses REX.W optional; encode 0F 20/22 */
             eb(b, 0x0F); eb(b, load ? 0x20 : 0x22);
             modrm(b, 3, cr, gp);
+            handled = 1;
+        } else if (k1 == 8 && k2 == 0) {
+            /* mov %gs:disp / %fs:disp, %reg */
+            emit_mov_seg_abs_load(b, r2, r1, imm1, w);
+            handled = 1;
+        } else if (k1 == 0 && k2 == 8) {
+            /* mov %reg, %gs:disp / %fs:disp */
+            emit_mov_seg_abs_store(b, r1, r2, imm2, w);
             handled = 1;
         } else if (k1 == 0 && k2 == 7) {
             /* mov %r16/%r32/%r64, %sreg — 8E /r */

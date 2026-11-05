@@ -25,8 +25,12 @@ enum {
     R_32 = 10, R_32S = 11, R_GOTPCRELX = 41, R_PLT32X = 42,
     PT_LOAD = 1,
     O_RDWR_CREAT = 0x42,
-    OBJ_ARENA = 786432,      /* all inputs total ~400 KiB */
-    OUT_CAP = 2097152,
+    /* Capacity sized for a full fakeos host kernel link: ~50+ ET_RELs
+     * including large .incbin blobs (userblob ~4 MiB, m5blob ~8 MiB). */
+    MAX_OBJS = 128,
+    MAX_BUCKET = 256,
+    OBJ_ARENA = 33554432,    /* 32 MiB object arena */
+    OUT_CAP = 33554432,      /* 32 MiB Multiboot image buffer */
     KERNEL_LMA = 0x100000,
     SHN_ABS_SPC = 0xfff1,
     HDR_PAD = 0x1000
@@ -97,7 +101,7 @@ struct obj {
     unsigned int nsec;
 };
 
-static struct obj objs[40];
+static struct obj objs[MAX_OBJS];
 static unsigned int n_objs;
 
 /* Output buckets, in placement order (must match boot/linker.ld). */
@@ -106,7 +110,7 @@ enum {
     B_TEXT, B_RODATA, B_GOT, B_DATA, B_BSS,
     NBUCKETS
 };
-static struct isec *buckets[NBUCKETS][80];
+static struct isec *buckets[NBUCKETS][MAX_BUCKET];
 static unsigned int bcount[NBUCKETS];
 static struct isec got_sec;      /* synthetic .got placed in B_GOT */
 
@@ -207,6 +211,11 @@ static int read_obj(const char *path) {
         fprintf(stderr, "fakecc --kernel-multiboot: %s not x86-64 reloc ELF\n", path);
         return 0;
     }
+    if (n_objs >= (unsigned)MAX_OBJS) {
+        fprintf(stderr, "fakecc --kernel-multiboot: too many objects (max %d)\n",
+                MAX_OBJS);
+        return 0;
+    }
     arena_used += len;
     o = &objs[n_objs++];
     o->data = buf;
@@ -227,7 +236,7 @@ static int read_obj(const char *path) {
         if (b < 0) {
             continue;
         }
-        if (bcount[b] >= 80 || o->nsec >= 48) {
+        if (bcount[b] >= (unsigned)MAX_BUCKET || o->nsec >= 48) {
             fprintf(stderr, "fakecc --kernel-multiboot: section tables full\n");
             return 0;
         }
@@ -750,6 +759,12 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
         buckets[B_GOT][bcount[B_GOT]++] = &got_sec;
     }
     layout();
+    if (file_end > OUT_CAP) {
+        fprintf(stderr,
+                "fakecc --kernel-multiboot: output image too large (%llu > %d)\n",
+                (unsigned long long)file_end, OUT_CAP);
+        return 1;
+    }
 
     for (i = 0; i < (int)got_count; i++) {
         uint64_t v;
