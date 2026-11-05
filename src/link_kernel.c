@@ -26,11 +26,11 @@ enum {
     PT_LOAD = 1,
     O_RDWR_CREAT = 0x42,
     /* Capacity sized for a full fakeos host kernel link: ~50+ ET_RELs
-     * including large .incbin blobs (userblob ~4 MiB, m5blob ~8 MiB). */
+     * including large .incbin blobs (userblob ~20 MiB, m5blob ~24 MiB). */
     MAX_OBJS = 128,
     MAX_BUCKET = 256,
-    OBJ_ARENA = 33554432,    /* 32 MiB object arena */
-    OUT_CAP = 33554432,      /* 32 MiB Multiboot image buffer */
+    OBJ_ARENA = 100663296,   /* 96 MiB object arena */
+    OUT_CAP = 100663296,     /* 96 MiB Multiboot image buffer */
     KERNEL_LMA = 0x100000,
     SHN_ABS_SPC = 0xfff1,
     HDR_PAD = 0x1000

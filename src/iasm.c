@@ -1081,24 +1081,26 @@ static int emit_line(Buffer *b, EmitModule *out, const char *line,
             else modrm(b, 0, 7, r1);
             handled = 1;
         }
-    } else if (strcmp(mn, "movdqa") == 0) {
+    } else if (strcmp(mn, "movdqa") == 0 || strcmp(mn, "movdqu") == 0) {
         /* AT&T movdqa %xmmN, disp(%reg)  -> 66 0F 7F /r (store)
          *       movdqa disp(%reg), %xmmN -> 66 0F 6F /r (load)
-         *       movdqa %xmmA, %xmmB      -> 66 0F 6F /r (xmm<-xmm) */
+         *       movdqu uses F3 prefix (unaligned); needed by fakeos isr_common
+         *       when same-privilege faults leave RSP only 8-byte aligned. */
+        uint8_t pref = (strcmp(mn, "movdqu") == 0) ? 0xF3 : 0x66;
         if (k1 == 5 && k2 == 2) {
-            eb(b, 0x66);
+            eb(b, pref);
             rex(b, 0, r1, 0, r2);
             eb(b, 0x0F); eb(b, 0x7F);
             modrm_mem(b, r1, r2, imm2);
             handled = 1;
         } else if (k1 == 2 && k2 == 5) {
-            eb(b, 0x66);
+            eb(b, pref);
             rex(b, 0, r2, 0, r1);
             eb(b, 0x0F); eb(b, 0x6F);
             modrm_mem(b, r2, r1, imm1);
             handled = 1;
         } else if (k1 == 5 && k2 == 5) {
-            eb(b, 0x66);
+            eb(b, pref);
             rex(b, 0, r2, 0, r1);
             eb(b, 0x0F); eb(b, 0x6F);
             modrm(b, 3, r2, r1);
