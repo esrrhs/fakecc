@@ -2637,6 +2637,18 @@ int pe_link_ex(EmitModule **mods, size_t nmods, const char *path,
                 emit_module_dbg_func_end(
                     &dbg, fi, mod_text[i] + f->end_pc,
                     mod_text[i] + f->prologue_end_pc);
+                /* Preserve prologue CFA landmarks (N3: QEMU+gdb unwind).
+                 * Without these, DW_AT_frame_base falls back to rsp while
+                 * locals stay fbreg-off-rbp -- breaks Windows gdb. */
+                if (f->after_push_rbp_pc > f->start_pc ||
+                    f->after_mov_rbp_pc > f->start_pc) {
+                    emit_module_dbg_func_frame(
+                        &dbg, fi,
+                        mod_text[i] + f->after_push_rbp_pc,
+                        mod_text[i] + f->after_mov_rbp_pc);
+                    if (f->frame_size)
+                        dbg.dbg_funcs[fi].frame_size = f->frame_size;
+                }
                 for (size_t k = 0; k < f->num_vars; k++) {
                     emit_module_add_dbg_var(&dbg, fi, &f->vars[k]);
                     DebugVar *dv = &dbg.dbg_funcs[fi].vars[

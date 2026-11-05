@@ -21,6 +21,11 @@ int __fakecc_host_windows = 0;
 long __fakecc_map_private_anon = 0x0002 | 0x1000;                    /* malloc */
 long __fakecc_map_fixed_anon = 0x0002 | 0x1000 | 0x0010 | 0x0040;   /* asan shadow */
 
+/* open(2) flags for fopen() — Darwin sys/fcntl.h (NOT Linux). */
+int __fakecc_o_creat = 0x200;
+int __fakecc_o_trunc = 0x400;
+int __fakecc_o_append = 0x008;
+
 void __fakecc_va_copy(void *dst, void *src) {
     char *d = (char *)dst;
     char *s = (char *)src;

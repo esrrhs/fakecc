@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -245,6 +246,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -433,7 +435,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -460,6 +467,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -475,6 +492,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -519,6 +546,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -705,7 +733,6 @@ const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
 char **pkg_list_sources(const char *dir, size_t *n_out);
 typedef struct FILE FILE;
 typedef long fpos_t;
-
 static TranslationUnit *g_parser_tu = ((void*)0);
 const StructRegistry *get_parser_structs(void) {
     return g_parser_tu ? &g_parser_tu->structs : ((void*)0);
@@ -735,6 +762,7 @@ struct Parser {
     ParserLocalArray locals;
     int scope_depth;
     int stmt_depth;
+    int expr_depth;
 };typedef struct Parser Parser;
 static const Token *synthesized_eof(void) {
     static Token eof_tok;
@@ -792,6 +820,7 @@ static int g_parsed_hidden = 0;
 static int g_parsed_used = 0;
 static int g_parsed_mode_size = 0;
 static int g_parsed_no_instrument = 0;
+static int g_parsed_naked = 0;
 static int g_parsed_constructor = 0;
 static int g_parsed_destructor = 0;
 static int g_parsed_ctor_prio = 65535;
@@ -1023,6 +1052,10 @@ static int parse_attribute(Parser *p, int *align, int *packed, int *sso, int *ve
                 continue;
             } else if (runtime.strcmp(name, "no_instrument_function") == 0 || runtime.strcmp(name, "__no_instrument_function__") == 0) {
                 g_parsed_no_instrument = 1;
+                advance(p);
+                continue;
+            } else if (runtime.strcmp(name, "naked") == 0 || runtime.strcmp(name, "__naked__") == 0) {
+                g_parsed_naked = 1;
                 advance(p);
                 continue;
             } else if (runtime.strcmp(name, "constructor") == 0 || runtime.strcmp(name, "__constructor__") == 0) {
@@ -1764,6 +1797,8 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
             advance(p);
         }
         EnumDef *ed = ((void*)0);
+        size_t ed_idx = 0;
+        int have_ed = 0;
         if (peek(p)->kind == TK_LBRACE || peek(p)->kind == TK_COLON) {
             char anon_tag[64];
             const char *reg_tag = tag ? tag->text : ((void*)0);
@@ -1773,11 +1808,18 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
                 reg_tag = anon_tag;
             }
             ed = enum_registry_add(&p->tu->enums, reg_tag, reg_loc);
+            ed_idx = (size_t)(ed - p->tu->enums.data);
+            have_ed = 1;
             parse_enum_underlying_opt(p, ed);
+            ed = &p->tu->enums.data[ed_idx];
             if (peek(p)->kind == TK_LBRACE)
                 parse_enum_body(p, ed);
         } else if (tag) {
             ed = enum_registry_find(&p->tu->enums, tag->text);
+            if (ed) {
+                ed_idx = (size_t)(ed - p->tu->enums.data);
+                have_ed = 1;
+            }
         } else {
             const Token *t = peek(p);
             die_at(t->loc.file, t->loc.line, t->loc.col,
@@ -1785,8 +1827,13 @@ static Type parse_specifiers_full(Parser *p, int *storage_class) {
             return type_make_void();
         }
         parse_trailing_qualifiers(p, &is_const, &is_volatile, &is_restrict, &is_complex, storage_class, &attr_vec);
-        Type t = ed ? enum_def_as_type(ed, (int)(ed - p->tu->enums.data + 1))
-                    : type_default_int();
+        Type t;
+        if (have_ed) {
+            ed = &p->tu->enums.data[ed_idx];
+            t = enum_def_as_type(ed, (int)ed_idx + 1);
+        } else {
+            t = type_default_int();
+        }
         return finish_specifiers(t, is_const, is_volatile, is_restrict, is_complex, attr_vec, p);
     }
     if (peek(p)->kind == TK_IDENT) {
@@ -1911,10 +1958,11 @@ static Type parse_specifiers(Parser *p) {
 }
 static Type parse_type(Parser *p, char **name_out);
 static void parse_struct_body(Parser *p, StructDef *sd) {
-    if (fakecc_had_error()) return;
-    const char *tag = sd->tag;
+    if (fakecc_had_error() || !sd) return;
+    size_t sd_idx = (size_t)(sd - p->tu->structs.data);
     advance(p);
     while (!fakecc_had_error() && peek(p)->kind != TK_RBRACE) {
+        sd = &p->tu->structs.data[sd_idx];
         int base_align = 0, base_packed = 0, base_sso = 0, base_vec = 0;
         while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, ((void*)0))) {}
         g_parsed_align = 0;
@@ -1922,13 +1970,12 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         if (g_parsed_align > base_align) base_align = g_parsed_align;
         g_parsed_align = 0;
         while (parse_attribute(p, &base_align, &base_packed, &base_sso, &base_vec, ((void*)0))) {}
-        sd = struct_registry_find(&p->tu->structs, tag);
+        sd = &p->tu->structs.data[sd_idx];
         if (peek(p)->kind == TK_SEMICOLON) {
             if (base.kind == TY_STRUCT && base.tag
                 && runtime.strncmp(base.tag, "__anon_", 7) == 0) {
-                sd = struct_registry_find(&p->tu->structs, tag);
-                if (sd)
-                    struct_def_push_member_aligned(sd, "", type_clone(base), -1, base_align);
+                sd = &p->tu->structs.data[sd_idx];
+                struct_def_push_member_aligned(sd, "", type_clone(base), -1, base_align);
             }
             advance(p);
             type_free(&base);
@@ -1943,7 +1990,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
             if (g_parsed_align > align) align = g_parsed_align;
             g_parsed_align = 0;
             while (parse_attribute(p, &align, &packed, &sso, &vec, ((void*)0))) {}
-            sd = struct_registry_find(&p->tu->structs, tag);
+            sd = &p->tu->structs.data[sd_idx];
             if (!mname) {
                 if (peek(p)->kind == TK_COLON) {
                     mname = xstrdup("");
@@ -1952,6 +1999,8 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                     if (!is_name_token(mn->kind)) {
                         die_at(mn->loc.file, mn->loc.line, mn->loc.col,
                                "expected member name but got '%s'", mn->text);
+                        type_free(&mty);
+                        type_free(&base);
                         return;
                     }
                     mname = xstrdup(mn->text);
@@ -1963,9 +2012,14 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                 advance(p);
                 const Token *wtok = peek(p);
                 Expr *we = parse_ternary(p);
+                sd = &p->tu->structs.data[sd_idx];
                 long long wval = 0;
-                if (!we)
+                if (!we) {
+                    type_free(&mty);
+                    runtime.free(mname);
+                    type_free(&base);
                     return;
+                }
                 if (fold_const_int(we, &wval)) {
                     bit_width = (int)wval;
                 } else if (we->kind == EX_VAR) {
@@ -1978,19 +2032,29 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
                     die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
                            "expected constant bitfield width but got '%s'",
                            wtok->text);
+                    type_free(&mty);
+                    runtime.free(mname);
+                    type_free(&base);
                     return;
                 }
                 if (mty.kind != TY_INT && !mty.is_bool) {
                     die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
                            "bit-field has non-integral type");
+                    type_free(&mty);
+                    runtime.free(mname);
+                    type_free(&base);
                     return;
                 }
                 if (bit_width > (int)type_size(mty) * 8) {
                     die_at(wtok->loc.file, wtok->loc.line, wtok->loc.col,
                            "width of bit-field exceeds its type");
+                    type_free(&mty);
+                    runtime.free(mname);
+                    type_free(&base);
                     return;
                 }
             }
+            sd = &p->tu->structs.data[sd_idx];
             struct_def_push_member_aligned(sd, mname, mty, bit_width, align);
             type_free(&mty);
             runtime.free(mname);
@@ -2004,6 +2068,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
         type_free(&base);
     }
     expect_kind(p, TK_RBRACE, "'}'");
+    sd = &p->tu->structs.data[sd_idx];
     int align = 0, packed = 0, sso = 0, vec = 0;
     while (parse_attribute(p, &align, &packed, &sso, &vec, ((void*)0))) {}
     if (align > sd->align) sd->align = align;
@@ -2032,7 +2097,7 @@ static void parse_struct_body(Parser *p, StructDef *sd) {
     if (sso == 1) struct_def_apply_sso(sd, 1);
     else if (sso == 2) struct_def_apply_sso(sd, 0);
     struct_def_finish(sd);
-    sd = struct_registry_find(&p->tu->structs, tag);
+    sd = &p->tu->structs.data[sd_idx];
     if (sd) struct_def_fixup_self_types(sd);
 }
 static Type parse_enum_underlying_type(Parser *p) {
@@ -2087,9 +2152,11 @@ static void parse_enum_underlying_opt(Parser *p, EnumDef *ed) {
     ed->underlying_type = ut;
 }
 static void parse_enum_body(Parser *p, EnumDef *ed) {
-    if (fakecc_had_error()) return;
+    if (fakecc_had_error() || !ed) return;
+    size_t ed_idx = (size_t)(ed - p->tu->enums.data);
     advance(p);
     while (!fakecc_had_error() && peek(p)->kind != TK_RBRACE) {
+        ed = &p->tu->enums.data[ed_idx];
         const Token *cn = peek(p);
         if (cn->kind != TK_IDENT) {
             die_at(cn->loc.file, cn->loc.line, cn->loc.col,
@@ -2108,6 +2175,7 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
         if (peek(p)->kind == TK_ASSIGN) {
             advance(p);
             Expr *e = parse_ternary(p);
+            ed = &p->tu->enums.data[ed_idx];
             long long val = 0;
             if (!e)
                 return;
@@ -2119,16 +2187,19 @@ static void parse_enum_body(Parser *p, EnumDef *ed) {
                 if (!ec) {
                     die_at(cn->loc.file, cn->loc.line, cn->loc.col,
                            "enum value '%s' is not a constant", e->u.var.name);
+                    expr_free(e);
                     return;
                 }
                 has_value = 1; value = ec->value;
             } else {
                 die_at(cn->loc.file, cn->loc.line, cn->loc.col,
                        "expected integer value for enum constant '%s'", cn->text);
+                expr_free(e);
                 return;
             }
             expr_free(e);
         }
+        ed = &p->tu->enums.data[ed_idx];
         enum_def_push_constant(ed, cn->text, has_value, value, cn->loc);
         if (peek(p)->kind == TK_COMMA) advance(p);
     }
@@ -2751,44 +2822,105 @@ static int types_compatible_unqual(const Type *a, const Type *b) {
     }
     return 1;
 }
+enum {
+    PRE_REAL = 1,
+    PRE_IMAG,
+    PRE_POS,
+    PRE_NEG,
+    PRE_BITNOT,
+    PRE_NOT,
+    PRE_INC,
+    PRE_DEC,
+    PRE_ADDR,
+    PRE_DEREF
+};
+struct PrefixOp {
+    int kind;
+    SourceLoc loc;
+};typedef struct PrefixOp PrefixOp;
+static Expr *apply_prefix_ops(Expr *e, PrefixOp *ops, int n) {
+    int i;
+    for (i = n - 1; i >= 0; i--) {
+        switch (ops[i].kind) {
+        case PRE_REAL: e = expr_new_member(e, "__real", ops[i].loc); break;
+        case PRE_IMAG: e = expr_new_member(e, "__imag", ops[i].loc); break;
+        case PRE_POS: e = expr_new_unary(UOP_POS, e, ops[i].loc); break;
+        case PRE_NEG: e = expr_new_unary(UOP_NEG, e, ops[i].loc); break;
+        case PRE_BITNOT: e = expr_new_unary(UOP_BITNOT, e, ops[i].loc); break;
+        case PRE_NOT: e = expr_new_unary(UOP_NOT, e, ops[i].loc); break;
+        case PRE_INC: e = expr_new_inc_dec(e, 1, 1, ops[i].loc); break;
+        case PRE_DEC: e = expr_new_inc_dec(e, 0, 1, ops[i].loc); break;
+        case PRE_ADDR: e = expr_new_addr(e, ops[i].loc); break;
+        case PRE_DEREF: e = expr_new_deref(e, ops[i].loc); break;
+        default: break;
+        }
+    }
+    return e;
+}
+static Expr *finish_unary(Parser *p, Expr *e, PrefixOp *ops, int ops_heap, int nops) {
+    e = apply_prefix_ops(e, ops, nops);
+    if (ops_heap) runtime.free(ops);
+    p->expr_depth--;
+    return e;
+}
 static Expr *parse_unary(Parser *p) {
     if (fakecc_had_error()) return ((void*)0);
+    if (p->expr_depth >= 512) {
+        const Token *t = peek(p);
+        die_at(t->loc.file, t->loc.line, t->loc.col,
+               "expression nesting level exceeded maximum of %d", 512);
+        return ((void*)0);
+    }
+    p->expr_depth++;
+    PrefixOp ops_stack[8];
+    PrefixOp *ops = ops_stack;
+    int ops_cap = 8;
+    int nops = 0;
+    int ops_heap = 0;
+    for (;;) {
+        TokenKind pk = peek(p)->kind;
+        int pre = 0;
+        if (pk == TK_KW_REAL) pre = PRE_REAL;
+        else if (pk == TK_KW_IMAG) pre = PRE_IMAG;
+        else if (pk == TK_PLUS) pre = PRE_POS;
+        else if (pk == TK_MINUS) pre = PRE_NEG;
+        else if (pk == TK_TILDE) pre = PRE_BITNOT;
+        else if (pk == TK_NOT) pre = PRE_NOT;
+        else if (pk == TK_INC) pre = PRE_INC;
+        else if (pk == TK_DEC) pre = PRE_DEC;
+        else if (pk == TK_AMP) pre = PRE_ADDR;
+        else if (pk == TK_STAR) pre = PRE_DEREF;
+        else if (pk == TK_KW_INLINE ||
+                 (pk == TK_IDENT &&
+                  (runtime.strcmp(peek(p)->text, "__extension__") == 0 ||
+                   runtime.strcmp(peek(p)->text, "__extension") == 0))) {
+            advance(p);
+            continue;
+        } else {
+            break;
+        }
+        if (nops >= 512) {
+            const Token *t = peek(p);
+            die_at(t->loc.file, t->loc.line, t->loc.col,
+                   "expression nesting level exceeded maximum of %d", 512);
+            return finish_unary(p, ((void*)0), ops, ops_heap, nops);
+        }
+        if (nops >= ops_cap) {
+            int ncap = ops_cap * 2;
+            PrefixOp *np = (PrefixOp *)runtime.malloc((size_t)ncap * sizeof(PrefixOp));
+            if (!np) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            runtime.memcpy(np, ops, (size_t)nops * sizeof(PrefixOp));
+            if (ops_heap) runtime.free(ops);
+            ops = np;
+            ops_cap = ncap;
+            ops_heap = 1;
+        }
+        ops[nops].kind = pre;
+        ops[nops].loc = peek(p)->loc;
+        nops++;
+        advance(p);
+    }
     TokenKind k = peek(p)->kind;
-    if (k == TK_KW_REAL) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        Expr *op = parse_unary(p);
-        return expr_new_member(op, "__real", loc);
-    }
-    if (k == TK_KW_IMAG) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        Expr *op = parse_unary(p);
-        return expr_new_member(op, "__imag", loc);
-    }
-    if (k == TK_PLUS || k == TK_MINUS) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        Expr *operand = parse_unary(p);
-        UnaryOp op = (k == TK_MINUS) ? UOP_NEG : UOP_POS;
-        return expr_new_unary(op, operand, loc);
-    }
-    if (k == TK_TILDE) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        return expr_new_unary(UOP_BITNOT, parse_unary(p), loc);
-    }
-    if (k == TK_NOT) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        return expr_new_unary(UOP_NOT, parse_unary(p), loc);
-    }
-    if (k == TK_INC || k == TK_DEC) {
-        SourceLoc loc = peek(p)->loc;
-        int is_inc = (k == TK_INC);
-        advance(p);
-        return expr_new_inc_dec(parse_unary(p), is_inc, 1 , loc);
-    }
     if (k == TK_ANDAND) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
@@ -2796,24 +2928,10 @@ static Expr *parse_unary(Parser *p) {
         if (!is_name_token(lbl->kind)) {
             die_at(lbl->loc.file, lbl->loc.line, lbl->loc.col,
                    "expected label name after '&&' but got '%s'", lbl->text ? lbl->text : "NULL");
-            return ((void*)0);
+            return finish_unary(p, ((void*)0), ops, ops_heap, nops);
         }
         advance(p);
-        return expr_new_label_addr(lbl->text, loc);
-    }
-    if (k == TK_KW_INLINE || (k == TK_IDENT && (runtime.strcmp(peek(p)->text, "__extension__") == 0 || runtime.strcmp(peek(p)->text, "__extension") == 0))) {
-        advance(p);
-        return parse_unary(p);
-    }
-    if (k == TK_AMP) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        return expr_new_addr(parse_unary(p), loc);
-    }
-    if (k == TK_STAR) {
-        SourceLoc loc = peek(p)->loc;
-        advance(p);
-        return expr_new_deref(parse_unary(p), loc);
+        return finish_unary(p, expr_new_label_addr(lbl->text, loc), ops, ops_heap, nops);
     }
     if (k == TK_KW_SIZEOF) {
         SourceLoc loc = peek(p)->loc;
@@ -2826,13 +2944,15 @@ static Expr *parse_unary(Parser *p) {
                 Expr *init = parse_init_list(p);
                 Expr *cl = expr_new_compound_literal(t, init, loc);
                 type_free(&t);
-                return expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+                Expr *result = expr_new_sizeof_expr(parse_postfix(p, cl), loc);
+                return finish_unary(p, result, ops, ops_heap, nops);
             }
             Expr *e = expr_new_sizeof_type(t, loc);
             type_free(&t);
-            return e;
+            return finish_unary(p, e, ops, ops_heap, nops);
         }
-        return expr_new_sizeof_expr(parse_unary(p), loc);
+        Expr *operand = parse_unary(p);
+        return finish_unary(p, expr_new_sizeof_expr(operand, loc), ops, ops_heap, nops);
     }
     if (k == TK_KW_ALIGNOF) {
         SourceLoc loc = peek(p)->loc;
@@ -2841,7 +2961,7 @@ static Expr *parse_unary(Parser *p) {
             {
                 die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                    "expected '(' after '_Alignof'");
-                return ((void*)0);
+                return finish_unary(p, ((void*)0), ops, ops_heap, nops);
             }
         advance(p);
         if (is_type_start(p, p->pos)) {
@@ -2849,11 +2969,11 @@ static Expr *parse_unary(Parser *p) {
             expect_kind(p, TK_RPAREN, "')'");
             Expr *e = expr_new_alignof_type(t, loc);
             type_free(&t);
-            return e;
+            return finish_unary(p, e, ops, ops_heap, nops);
         }
         Expr *sub = parse_expr(p);
         expect_kind(p, TK_RPAREN, "')'");
-        return expr_new_alignof_expr(sub, loc);
+        return finish_unary(p, expr_new_alignof_expr(sub, loc), ops, ops_heap, nops);
     }
     if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_types_compatible_p") == 0) {
         SourceLoc loc = peek(p)->loc;
@@ -2866,7 +2986,7 @@ static Expr *parse_unary(Parser *p) {
         int compat = types_compatible_unqual(&t1, &t2);
         type_free(&t1);
         type_free(&t2);
-        return expr_new_int(compat ? 1 : 0, loc);
+        return finish_unary(p, expr_new_int(compat ? 1 : 0, loc), ops, ops_heap, nops);
     }
     if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_constant_p") == 0) {
         SourceLoc loc = peek(p)->loc;
@@ -2878,7 +2998,7 @@ static Expr *parse_unary(Parser *p) {
         int is_const = arg && (fold_const_int(arg, &v) ||
                                arg->kind == EX_STR || arg->kind == EX_FLOAT_LIT);
         expr_free(arg);
-        return expr_new_int(is_const ? 1 : 0, loc);
+        return finish_unary(p, expr_new_int(is_const ? 1 : 0, loc), ops, ops_heap, nops);
     }
     if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_choose_expr") == 0) {
         advance(p);
@@ -2893,22 +3013,22 @@ static Expr *parse_unary(Parser *p) {
             expr_free(cond);
             expr_free(then);
             expr_free(else_);
-            return ((void*)0);
+            return finish_unary(p, ((void*)0), ops, ops_heap, nops);
         }
         long long v;
         if (cond->kind == EX_FLOAT_LIT || cond->kind == EX_STR
             || !fold_const_int(cond, &v)) {
             die_at(cond->loc.file, cond->loc.line, cond->loc.col,
                    "first argument to '__builtin_choose_expr' not a constant");
-            return ((void*)0);
+            return finish_unary(p, ((void*)0), ops, ops_heap, nops);
         }
         expr_free(cond);
         if (v != 0) {
             expr_free(else_);
-            return then;
+            return finish_unary(p, then, ops, ops_heap, nops);
         } else {
             expr_free(then);
-            return else_;
+            return finish_unary(p, else_, ops, ops_heap, nops);
         }
     }
     if (k == TK_IDENT && runtime.strcmp(peek(p)->text, "__builtin_offsetof") == 0) {
@@ -2936,7 +3056,7 @@ static Expr *parse_unary(Parser *p) {
                         } else {
                             die_at(peek(p)->loc.file, peek(p)->loc.line, peek(p)->loc.col,
                                    "no member named '%s'", mname);
-                            return ((void*)0);
+                            return finish_unary(p, ((void*)0), ops, ops_heap, nops);
                         }
                     }
                 }
@@ -2969,9 +3089,9 @@ static Expr *parse_unary(Parser *p) {
         expect_kind(p, TK_RPAREN, "')'");
         type_free(&cur_type);
         type_free(&t);
-        return expr_new_int(offset, loc);
+        return finish_unary(p, expr_new_int(offset, loc), ops, ops_heap, nops);
     }
-    return parse_primary(p);
+    return finish_unary(p, parse_primary(p), ops, ops_heap, nops);
 }
 static Expr *parse_postfix(Parser *p, Expr *lhs) {
     if (fakecc_had_error()) return ((void*)0);
@@ -3202,8 +3322,10 @@ static void int_literal_typed(const char *text, SourceLoc loc,
             return;
         }
         if (u128_mul_add(&lo, &hi, (unsigned)base, d)) {
-            runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant is too large "
-                    "for its type\n", loc.file, loc.line, loc.col);
+            if (!fakecc_is_quiet()) {
+                runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant is too large "
+                        "for its type\n", loc.file, loc.line, loc.col);
+            }
             lo = 0; hi = 0;
             {
                 unsigned long long tlo = 0;
@@ -3224,8 +3346,10 @@ static void int_literal_typed(const char *text, SourceLoc loc,
         }
     }
     if (!decimal && hi != 0) {
-        runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant is too large "
-                "for its type\n", loc.file, loc.line, loc.col);
+        if (!fakecc_is_quiet()) {
+            runtime.fprintf(runtime.stderr, "%s:%d:%d: warning: integer constant is too large "
+                    "for its type\n", loc.file, loc.line, loc.col);
+        }
         hi = 0;
     }
 int width;
@@ -4129,7 +4253,45 @@ static Stmt parse_stmt_impl(Parser *p) {
         stmt_array_init(&s.u.block);
         return s;
     }
-    if (k == TK_KW_TYPEDEF || is_type_start(p, p->pos)) {
+    int as_decl_stmt = 0;
+    if (k == TK_KW_TYPEDEF) {
+        as_decl_stmt = 1;
+    } else if (is_type_start(p, p->pos)) {
+        as_decl_stmt = 1;
+        if (k == TK_IDENT && p->pos + 1 < p->tokens->len) {
+            int qualified_pkg_type = 0;
+            const char *ident = p->tokens->data[p->pos].text;
+            if (p->tokens->data[p->pos + 1].kind == TK_DOT
+                && p->pos + 2 < p->tokens->len
+                && p->tokens->data[p->pos + 2].kind == TK_IDENT
+                && ident && tu_has_import(p->tu, ident) && p->pkg_ctx) {
+                Package *pkg = pkg_find(p->pkg_ctx, ident);
+                if (pkg && pkg_find_typedef(pkg, p->tokens->data[p->pos + 2].text))
+                    qualified_pkg_type = 1;
+            }
+            if (!qualified_pkg_type) {
+                switch (p->tokens->data[p->pos + 1].kind) {
+                case TK_ASSIGN: case TK_EQ: case TK_NE:
+                case TK_ARROW: case TK_DOT:
+                case TK_INC: case TK_DEC:
+                case TK_PLUS_EQ: case TK_MINUS_EQ: case TK_STAR_EQ:
+                case TK_SLASH_EQ: case TK_PERCENT_EQ:
+                case TK_AMP_EQ: case TK_BITOR_EQ: case TK_XOR_EQ:
+                case TK_SHL_EQ: case TK_SHR_EQ:
+                case TK_LBRACKET: case TK_COMMA: case TK_SEMICOLON:
+                case TK_QUESTION: case TK_ANDAND: case TK_OROR:
+                case TK_LT: case TK_LE: case TK_GT: case TK_GE:
+                case TK_PLUS: case TK_MINUS: case TK_SLASH: case TK_PERCENT:
+                case TK_AMP: case TK_BITOR: case TK_XOR: case TK_SHL: case TK_SHR:
+                    as_decl_stmt = 0;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+    }
+    if (as_decl_stmt) {
         if (k == TK_KW_TYPEDEF) {
             return parse_typedef_stmt(p);
         }
@@ -4274,8 +4436,11 @@ static Stmt parse_stmt_impl(Parser *p) {
         expect_kind(p, TK_SEMICOLON, "';'");
         type_free(&base);
         Stmt first = decls.data[0];
-        for (size_t i = 1; i < decls.len; i++)
-            stmt_array_push(&p->prepend, decls.data[i]);
+        for (size_t i = 1; i < decls.len; i++) {
+            Stmt s = decls.data[i];
+            s.u.decl.type = type_clone(s.u.decl.type);
+            stmt_array_push(&p->prepend, s);
+        }
         runtime.free(decls.data);
         return first;
     }
@@ -4532,10 +4697,11 @@ static Stmt parse_stmt_impl(Parser *p) {
         runtime.snprintf(lbl, sizeof(lbl), "__sw_%d_case_%d", g_cur_switch->switch_id, g_cur_switch->case_count++);
         switch_push_case_range(g_cur_switch->switch_stmt, 0, value, high_value, is_range, lbl);
         Stmt inner;
-        if (peek(p)->kind == TK_RBRACE) {
-            inner.kind = ST_EXPR;
+        if (peek(p)->kind == TK_RBRACE || peek(p)->kind == TK_EOF) {
+            runtime.memset(&inner, 0, sizeof(inner));
+            inner.kind = ST_BLOCK;
             inner.loc = kw->loc;
-            inner.u.expr = ((void*)0);
+            stmt_array_init(&inner.u.block);
         } else {
             inner = parse_stmt(p);
         }
@@ -4560,10 +4726,11 @@ static Stmt parse_stmt_impl(Parser *p) {
         runtime.snprintf(lbl, sizeof(lbl), "__sw_%d_default", g_cur_switch->switch_id);
         switch_push_case(g_cur_switch->switch_stmt, 1, 0, lbl);
         Stmt inner;
-        if (peek(p)->kind == TK_RBRACE) {
-            inner.kind = ST_EXPR;
+        if (peek(p)->kind == TK_RBRACE || peek(p)->kind == TK_EOF) {
+            runtime.memset(&inner, 0, sizeof(inner));
+            inner.kind = ST_BLOCK;
             inner.loc = kw->loc;
-            inner.u.expr = ((void*)0);
+            stmt_array_init(&inner.u.block);
         } else {
             inner = parse_stmt(p);
         }
@@ -4596,21 +4763,29 @@ static Stmt parse_stmt_impl(Parser *p) {
                           runtime.strcmp(peek(p)->text, "__asm") == 0)) {
         SourceLoc loc = peek(p)->loc;
         advance(p);
+        int is_volatile = 0;
         while (!fakecc_had_error() && (peek(p)->kind == TK_KW_VOLATILE || peek(p)->kind == TK_KW_CONST ||
                peek(p)->kind == TK_KW_GOTO ||
                (peek(p)->kind == TK_IDENT && (runtime.strcmp(peek(p)->text, "__volatile__") == 0 ||
                                               runtime.strcmp(peek(p)->text, "__volatile") == 0 ||
                                               runtime.strcmp(peek(p)->text, "goto") == 0 ||
                                               runtime.strcmp(peek(p)->text, "__inline__") == 0)))) {
+            if (peek(p)->kind == TK_KW_VOLATILE ||
+                (peek(p)->kind == TK_IDENT &&
+                 (runtime.strcmp(peek(p)->text, "__volatile__") == 0 ||
+                  runtime.strcmp(peek(p)->text, "__volatile") == 0)))
+                is_volatile = 1;
             advance(p);
         }
         Stmt s;
         runtime.memset(&s, 0, sizeof(s));
-        s.kind = ST_BLOCK;
         s.loc = loc;
-        stmt_array_init(&s.u.block);
         if (peek(p)->kind == TK_LPAREN) {
             advance(p);
+            size_t tcap = 64, tlen = 0;
+            char *tmpl = runtime.malloc(tcap);
+            if (!tmpl) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            tmpl[0] = 0;
             int is_empty_template = 1;
             while (!fakecc_had_error() && peek(p)->kind == TK_STRING_LITERAL) {
                 const char *src = peek(p)->text;
@@ -4620,6 +4795,14 @@ static Stmt parse_stmt_impl(Parser *p) {
                 for (size_t i = 0; i < slen; i++) {
                     if (!runtime.isspace((unsigned char)src[i])) { is_empty_template = 0; break; }
                 }
+                if (tlen + slen + 1 > tcap) {
+                    tcap = (tlen + slen + 1) * 2;
+                    tmpl = runtime.realloc(tmpl, tcap);
+                    if (!tmpl) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                }
+                runtime.memcpy(tmpl + tlen, src, slen);
+                tlen += slen;
+                tmpl[tlen] = 0;
                 advance(p);
             }
             Expr *outputs[16];
@@ -4628,10 +4811,13 @@ static Stmt parse_stmt_impl(Parser *p) {
             Expr *inputs[16];
             char *in_constr[16];
             int num_inputs = 0;
+            char *clobbers[32];
+            int num_clobbers = 0;
             runtime.memset(outputs, 0, sizeof(outputs));
             runtime.memset(out_constr, 0, sizeof(out_constr));
             runtime.memset(inputs, 0, sizeof(inputs));
             runtime.memset(in_constr, 0, sizeof(in_constr));
+            runtime.memset(clobbers, 0, sizeof(clobbers));
             if (peek(p)->kind == TK_COLON) {
                 advance(p);
                 while (!fakecc_had_error() && peek(p)->kind != TK_COLON && peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) {
@@ -4657,6 +4843,8 @@ static Stmt parse_stmt_impl(Parser *p) {
                             expr_free(e);
                             runtime.free(c_str);
                         }
+                    } else {
+                        runtime.free(c_str);
                     }
                     if (peek(p)->kind == TK_COMMA) advance(p);
                     else break;
@@ -4686,9 +4874,33 @@ static Stmt parse_stmt_impl(Parser *p) {
                                 expr_free(e);
                                 runtime.free(c_str);
                             }
+                        } else {
+                            runtime.free(c_str);
                         }
                         if (peek(p)->kind == TK_COMMA) advance(p);
                         else break;
+                    }
+                    if (peek(p)->kind == TK_COLON) {
+                        advance(p);
+                        while (!fakecc_had_error() && peek(p)->kind != TK_COLON && peek(p)->kind != TK_RPAREN && peek(p)->kind != TK_EOF) {
+                            if (peek(p)->kind == TK_STRING_LITERAL) {
+                                const char *src = peek(p)->text;
+                                size_t slen = runtime.strlen(src);
+                                if (slen >= 1 && src[0] == '"') { src++; slen--; }
+                                if (slen >= 1 && src[slen-1] == '"') slen--;
+                                if (num_clobbers < 32) {
+                                    clobbers[num_clobbers] = runtime.malloc(slen + 1);
+                                    runtime.memcpy(clobbers[num_clobbers], src, slen);
+                                    clobbers[num_clobbers][slen] = 0;
+                                    num_clobbers++;
+                                }
+                                advance(p);
+                            } else {
+                                advance(p);
+                            }
+                            if (peek(p)->kind == TK_COMMA) advance(p);
+                            else break;
+                        }
                     }
                 }
             }
@@ -4702,6 +4914,8 @@ static Stmt parse_stmt_impl(Parser *p) {
                 advance(p);
             }
             if (is_empty_template) {
+                s.kind = ST_BLOCK;
+                stmt_array_init(&s.u.block);
                 for (int oi = 0; oi < num_outputs; oi++) {
                     int match_idx = -1;
                     char match_char = (char)('0' + oi);
@@ -4725,31 +4939,80 @@ static Stmt parse_stmt_impl(Parser *p) {
                         stmt_array_push(&s.u.block, es);
                     }
                 }
-            }
-            for (int oi = 0; oi < num_outputs; oi++) {
-                if (outputs[oi]) {
-                    Stmt es;
-                    runtime.memset(&es, 0, sizeof(es));
-                    es.kind = ST_EXPR;
-                    es.loc = loc;
-                    es.u.expr = outputs[oi];
-                    outputs[oi] = ((void*)0);
-                    stmt_array_push(&s.u.block, es);
+                for (int oi = 0; oi < num_outputs; oi++) {
+                    if (outputs[oi]) {
+                        Stmt es;
+                        runtime.memset(&es, 0, sizeof(es));
+                        es.kind = ST_EXPR;
+                        es.loc = loc;
+                        es.u.expr = outputs[oi];
+                        outputs[oi] = ((void*)0);
+                        stmt_array_push(&s.u.block, es);
+                    }
+                    runtime.free(out_constr[oi]);
                 }
-                runtime.free(out_constr[oi]);
-            }
-            for (int ii = 0; ii < num_inputs; ii++) {
-                if (inputs[ii]) {
-                    Stmt es;
-                    runtime.memset(&es, 0, sizeof(es));
-                    es.kind = ST_EXPR;
-                    es.loc = loc;
-                    es.u.expr = inputs[ii];
-                    inputs[ii] = ((void*)0);
-                    stmt_array_push(&s.u.block, es);
+                for (int ii = 0; ii < num_inputs; ii++) {
+                    if (inputs[ii]) {
+                        Stmt es;
+                        runtime.memset(&es, 0, sizeof(es));
+                        es.kind = ST_EXPR;
+                        es.loc = loc;
+                        es.u.expr = inputs[ii];
+                        inputs[ii] = ((void*)0);
+                        stmt_array_push(&s.u.block, es);
+                    }
+                    runtime.free(in_constr[ii]);
                 }
-                runtime.free(in_constr[ii]);
+                for (int ci = 0; ci < num_clobbers; ci++) runtime.free(clobbers[ci]);
+                runtime.free(tmpl);
+            } else {
+                s.kind = ST_ASM;
+                s.u.asm_s.template = tmpl;
+                s.u.asm_s.is_volatile = is_volatile;
+                s.u.asm_s.num_outputs = num_outputs;
+                s.u.asm_s.num_inputs = num_inputs;
+                s.u.asm_s.num_clobbers = num_clobbers;
+                s.u.asm_s.outputs = ((void*)0);
+                s.u.asm_s.inputs = ((void*)0);
+                s.u.asm_s.clobbers = ((void*)0);
+                if (num_outputs > 0) {
+                    s.u.asm_s.outputs = runtime.calloc((size_t)num_outputs, sizeof(AsmOperand));
+                    for (int oi = 0; oi < num_outputs; oi++) {
+                        s.u.asm_s.outputs[oi].constraint = out_constr[oi];
+                        s.u.asm_s.outputs[oi].expr = outputs[oi];
+                        outputs[oi] = ((void*)0);
+                        out_constr[oi] = ((void*)0);
+                    }
+                }
+                if (num_inputs > 0) {
+                    s.u.asm_s.inputs = runtime.calloc((size_t)num_inputs, sizeof(AsmOperand));
+                    for (int ii = 0; ii < num_inputs; ii++) {
+                        s.u.asm_s.inputs[ii].constraint = in_constr[ii];
+                        s.u.asm_s.inputs[ii].expr = inputs[ii];
+                        inputs[ii] = ((void*)0);
+                        in_constr[ii] = ((void*)0);
+                    }
+                }
+                if (num_clobbers > 0) {
+                    s.u.asm_s.clobbers = runtime.calloc((size_t)num_clobbers, sizeof(char *));
+                    for (int ci = 0; ci < num_clobbers; ci++) {
+                        s.u.asm_s.clobbers[ci] = clobbers[ci];
+                        clobbers[ci] = ((void*)0);
+                    }
+                }
+                for (int oi = 0; oi < num_outputs; oi++) {
+                    runtime.free(out_constr[oi]);
+                    if (outputs[oi]) expr_free(outputs[oi]);
+                }
+                for (int ii = 0; ii < num_inputs; ii++) {
+                    runtime.free(in_constr[ii]);
+                    if (inputs[ii]) expr_free(inputs[ii]);
+                }
+                for (int ci = 0; ci < num_clobbers; ci++) runtime.free(clobbers[ci]);
             }
+        } else {
+            s.kind = ST_BLOCK;
+            stmt_array_init(&s.u.block);
         }
         if (peek(p)->kind == TK_SEMICOLON) advance(p);
         return s;
@@ -4936,6 +5199,8 @@ static FunctionDecl parse_function_decl(Parser *p) {
     fn.align = 0;
     fn.no_instrument = g_parsed_no_instrument;
     g_parsed_no_instrument = 0;
+    fn.is_naked = g_parsed_naked;
+    g_parsed_naked = 0;
     fn.is_constructor = g_parsed_constructor;
     fn.is_destructor = g_parsed_destructor;
     fn.ctor_prio = g_parsed_ctor_prio;
@@ -5115,6 +5380,10 @@ static FunctionDecl parse_function_decl(Parser *p) {
     if (g_parsed_no_instrument) {
         fn.no_instrument = 1;
         g_parsed_no_instrument = 0;
+    }
+    if (g_parsed_naked) {
+        fn.is_naked = 1;
+        g_parsed_naked = 0;
     }
     if (g_parsed_constructor) {
         fn.is_constructor = 1;
@@ -5477,11 +5746,13 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
     p.locals.cap = 0;
     p.scope_depth = 0;
     p.stmt_depth = 0;
+    p.expr_depth = 0;
     g_parser_tu = tu;
     if (peek(&p)->kind != TK_KW_PACKAGE) {
         const Token *t = peek(&p);
-        return die_at(t->loc.file, t->loc.line, t->loc.col,
+        die_at(t->loc.file, t->loc.line, t->loc.col,
                "expected 'package' declaration at start of file");
+        goto cleanup;
     }
     tu->package = parse_package_decl(&p);
     while (!fakecc_had_error() && peek(&p)->kind == TK_KW_IMPORT) {
@@ -5489,19 +5760,22 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
         advance(&p);
         const Token *ident = peek(&p);
         if (ident->kind != TK_IDENT) {
-            return die_at(ident->loc.file, ident->loc.line, ident->loc.col,
+            die_at(ident->loc.file, ident->loc.line, ident->loc.col,
                    "expected package name after 'import'");
+            goto cleanup;
         }
         advance(&p);
         expect_kind(&p, TK_SEMICOLON, "';'");
         if (!ctx) {
-            return die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+            die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                    "'import' requires a package search path (driver bug)");
+            goto cleanup;
         }
         for (size_t i = 0; i < tu->imports.len; i++) {
             if (runtime.strcmp(tu->imports.data[i].name, ident->text) == 0) {
-                return die_at(kw->loc.file, kw->loc.line, kw->loc.col,
+                die_at(kw->loc.file, kw->loc.line, kw->loc.col,
                        "duplicate import of package '%s'", ident->text);
+                goto cleanup;
             }
         }
         import_array_push(&tu->imports, ident->text, kw->loc);
@@ -5524,8 +5798,9 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
             if (tag->kind == TK_IDENT) advance(&p);
             if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
                 if (struct_registry_find(&tu->structs, tag->text)) {
-                    return die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of struct '%s'", tag->text);
+                    goto cleanup;
                 }
                 StructDef *sd = struct_registry_add(&tu->structs, tag->text, tag->loc);
                 parse_struct_body(&p, sd);
@@ -5542,8 +5817,9 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
             if (tag->kind == TK_IDENT) advance(&p);
             if (tag->kind == TK_IDENT && peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) {
                 if (struct_registry_find(&tu->structs, tag->text)) {
-                    return die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of '%s'", tag->text);
+                    goto cleanup;
                 }
                 StructDef *sd = struct_registry_add(&tu->structs, tag->text, tag->loc);
                 sd->is_union = 1;
@@ -5565,11 +5841,14 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
             if (peek(&p)->kind == TK_LBRACE && is_definition_only_lookahead(&p)) is_def = 1;
             if (has_tag && is_def) {
                 if (enum_registry_find(&tu->enums, tag->text)) {
-                    return die_at(tag->loc.file, tag->loc.line, tag->loc.col,
+                    die_at(tag->loc.file, tag->loc.line, tag->loc.col,
                            "redefinition of enum '%s'", tag->text);
+                    goto cleanup;
                 }
                 EnumDef *ed = enum_registry_add(&tu->enums, tag->text, tag->loc);
+                size_t ed_idx = (size_t)(ed - tu->enums.data);
                 parse_enum_underlying_opt(&p, ed);
+                ed = &tu->enums.data[ed_idx];
                 if (peek(&p)->kind == TK_LBRACE)
                     parse_enum_body(&p, ed);
                 expect_kind(&p, TK_SEMICOLON, "';'");
@@ -5604,9 +5883,11 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
                 }
                 runtime.free(s.u.block.data);
             } else if (s.kind != ST_DECL) {
-                return die_at(s.loc.file, s.loc.line, s.loc.col,
+                die_at(s.loc.file, s.loc.line, s.loc.col,
                        "only variable declarations allowed at file scope (got stmt kind %d, next token '%s')",
                        s.kind, peek(&p)->text ? peek(&p)->text : "NULL");
+                stmt_free(&s);
+                goto cleanup;
             } else {
                 stmt_array_push(&tu->globals, s);
             }
@@ -5615,7 +5896,12 @@ static int parse_in_pkg_impl(const TokenArray *tokens, TranslationUnit *tu, PkgC
     for (size_t i = 0; i < p.prepend.len; i++)
         stmt_array_push(&tu->globals, p.prepend.data[i]);
     p.prepend.len = 0;
+cleanup:
     stmt_array_free(&p.prepend);
+    if (p.has_last_fn_params) {
+        param_array_free(&p.last_fn_params);
+        p.has_last_fn_params = 0;
+    }
     parser_pop_scope(&p, -1);
     runtime.free(p.locals.data);
     if (fakecc_had_error()) return FAKECC_ERR;

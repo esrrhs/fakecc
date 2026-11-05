@@ -350,7 +350,14 @@ typedef enum {
     ST_GOTO,     /* goto label; */
     ST_LABEL,    /* label: stmt */
     ST_SWITCH,   /* switch (expr) { case/default ... } */
+    ST_ASM,      /* GNU asm / __asm__ with non-empty template */
 } StmtKind;
+
+/* One operand of a GNU extended asm statement. */
+typedef struct {
+    char *constraint; /* strdup'd, e.g. "=a", "Nd", "r", "+m" */
+    Expr *expr;       /* owns */
+} AsmOperand;
 
 typedef struct Stmt Stmt;
 struct StmtArray {
@@ -386,6 +393,16 @@ struct Stmt {
         struct { char *target; Expr *target_expr; } goto_s; /* ST_GOTO — target_expr != NULL for indirect goto *expr */
         struct { char *name; Stmt *stmt; } label_s;   /* ST_LABEL — owns stmt */
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s; /* ST_SWITCH */
+        struct {
+            char *template;       /* concatenated template string */
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;      /* strdup'd names: "memory", "cc", "rcx", ... */
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;                  /* ST_ASM */
     } u;
 };
 
@@ -442,6 +459,7 @@ typedef struct {
     int    is_destructor;  /* 1 = __attribute__((destructor)) → .fini_array */
     int    ctor_prio;      /* constructor priority (smaller runs first; 65535 = default) */
     int    dtor_prio;
+    int    is_naked;       /* 1 = __attribute__((naked)): no prologue/epilogue */
 } FunctionDecl;
 
 typedef struct {

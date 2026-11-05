@@ -68,13 +68,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -279,6 +280,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -467,7 +469,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -494,6 +501,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -509,6 +526,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -553,6 +580,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -697,6 +725,28 @@ struct EmitSymbol {
     size_t size;
     uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
+struct EmitComdat {
+    char *sect_name;
+    uint8_t selection;
+    char *symbol;
+    char *assoc_name;
+    uint8_t keep;
+};typedef struct EmitComdat EmitComdat;
+struct EmitSpan {
+    uint16_t kind;
+    size_t off;
+    size_t len;
+    int comdat;
+};typedef struct EmitSpan EmitSpan;
+struct EmitWinUnwind {
+    size_t begin;
+    size_t end;
+    size_t after_push_rbp;
+    size_t after_set_fp;
+    size_t after_prolog;
+    uint32_t stack_alloc;
+    int8_t pushed[8];
+};typedef struct EmitWinUnwind EmitWinUnwind;
 struct EmitReloc {
     size_t offset;
     uint32_t type;
@@ -824,6 +874,8 @@ struct EmitModule {
     Buffer fini_array;
     size_t fini_array_align;
     int *fini_prio;
+    Buffer tls_callbacks;
+    size_t tls_callbacks_align;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -849,6 +901,24 @@ struct EmitModule {
     DebugVar *dbg_globals;
     size_t num_dbg_globals;
     size_t cap_dbg_globals;
+    Buffer pdata;
+    Buffer xdata;
+    Buffer drectve;
+    EmitComdat *comdats;
+    size_t num_comdats;
+    size_t cap_comdats;
+    EmitSpan *spans;
+    size_t num_spans;
+    size_t cap_spans;
+    EmitReloc *pdata_relocs;
+    size_t num_pdata_relocs;
+    size_t cap_pdata_relocs;
+    EmitReloc *xdata_relocs;
+    size_t num_xdata_relocs;
+    size_t cap_xdata_relocs;
+    EmitWinUnwind *win_unwinds;
+    size_t num_win_unwinds;
+    size_t cap_win_unwinds;
 };typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
@@ -865,6 +935,16 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
 void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
 void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+void emit_module_add_win_unwind(EmitModule *m, const EmitWinUnwind *u);
+void emit_module_add_comdat(EmitModule *m, const char *sect_name,
+                            uint8_t selection, const char *symbol,
+                            const char *assoc_name);
+void emit_module_add_span(EmitModule *m, uint16_t kind, size_t off,
+                          size_t len, int comdat);
+void emit_module_add_pdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
+void emit_module_add_xdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
 int emit_is_darwin_import(const char *name);
 struct EmitAuxLib {
     char *install_name;
@@ -890,12 +970,20 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
+void link_set_image_base(uint64_t base);
+uint64_t link_image_base(void);
+int link_kernel_multiboot(const char **obj_paths, size_t npaths,
+                          const char *out_path);
 typedef int IRValue;
 enum IROpcode {
     IR_CONST,
     IR_ADD,
     IR_SUB,
     IR_MUL,
+    IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -938,6 +1026,7 @@ enum IROpcode {
     IR_LABEL,
     IR_BR,
     IR_CBR,
+    IR_BR_TABLE,
     IR_PARAM,
     IR_CALL,
     IR_RETURN,
@@ -956,6 +1045,7 @@ enum IROpcode {
     IR_STACK_RESTORE,
     IR_LONGJMP,
     IR_DBG_VALUE,
+    IR_ASM,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -969,6 +1059,7 @@ struct IRInst {
     char *call_name;
     IRValue *call_args;
     int call_nargs;
+    int call_is_variadic;
     IRValue call_callee;
     int width;
     int is_unsigned;
@@ -981,6 +1072,8 @@ struct IRInst {
     int *call_arg_nbytes;
     int alloca_bytes;
     int is_volatile;
+    char **asm_constraints;
+    char *asm_clobbers;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -1052,6 +1145,7 @@ struct IRFunction {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
     int has_dyn_alloca;
     int needs_apply_args;
     int needs_apply;
@@ -1121,7 +1215,12 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
+void codegen_set_code_model(int kernel);
+int codegen_code_model_is_kernel(void);
 int lex(const char *source, const char *filename, TokenArray *out);
 void opt(IRModule *ir, int opt_level, int want_debug);
 struct PkgContext;
@@ -1199,7 +1298,6 @@ int sema_error_count(void);
 int sema_warning_count(void);
 typedef struct FILE FILE;
 typedef long fpos_t;
-
 static int file_readable(const char *path) {
     FILE *f = runtime.fopen(path, "rb");
     if (!f) return 0;
@@ -1275,6 +1373,9 @@ static int ends_with(const char *s, const char *suffix) {
     if (slen < suflen) return 0;
     return runtime.strcmp(s + slen - suflen, suffix) == 0;
 }
+static int is_obj_input(const char *s) {
+    return ends_with(s, ".o") || ends_with(s, ".obj");
+}
 static int lower_one_tu(TranslationUnit *tu, const char *filename,
                         EmitModule *out, int opt_level, int want_debug,
                         PkgContext *pkg) {
@@ -1296,8 +1397,10 @@ static int lower_one_tu(TranslationUnit *tu, const char *filename,
     if (want_debug) out->dbg_tu_name = xstrdup(filename);
     codegen(&ir, out, want_debug);
     ir_module_free(&ir);
-    if (fakecc_had_error())
+    if (fakecc_had_error()) {
+        emit_module_free(out);
         return FAKECC_ERR;
+    }
     return FAKECC_OK;
 }
 static int compile_parse_string(const char *source, const char *filename,
@@ -1311,6 +1414,8 @@ static int compile_parse_string(const char *source, const char *filename,
     tu_init(tu);
     int rc = pkg ? parse_in_pkg(&tokens, tu, pkg) : parse(&tokens, tu);
     token_array_free(&tokens);
+    if (rc != FAKECC_OK)
+        tu_free(tu);
     return rc;
 }
 void fakecc_options_init(FakeccOptions *opts) {
@@ -1484,6 +1589,7 @@ int fakecc_compile_files(const char **input_paths,
     int opt_level = opts ? opts->opt_level : 1;
     int want_debug = opts ? opts->want_debug : 0;
     int nostdlib = opts ? opts->nostdlib : (is_shared ? 1 : 0);
+    g_tls_local_exec = is_shared ? 0 : 1;
     const char **needed = opts ? opts->needed : ((void*)0);
     size_t num_needed = opts ? opts->num_needed : 0;
     const char **lib_paths = opts ? opts->lib_paths : ((void*)0);
@@ -1491,7 +1597,7 @@ int fakecc_compile_files(const char **input_paths,
     PkgContext pkg;
     pkg_ctx_init(&pkg);
     for (size_t i = 0; i < num_inputs; i++) {
-        if (!ends_with(input_paths[i], ".o")) {
+        if (!is_obj_input(input_paths[i])) {
             char *d = dir_of(input_paths[i]);
             if (d) {
                 pkg_ctx_add_path(&pkg, d);
@@ -1518,7 +1624,7 @@ int fakecc_compile_files(const char **input_paths,
     if (!user_tus) { pkg_ctx_free(&pkg); return -1; }
     for (size_t i = 0; i < num_inputs; i++) {
         tu_init(&user_tus[i]);
-        if (!ends_with(input_paths[i], ".o")) {
+        if (!is_obj_input(input_paths[i])) {
             char *src = read_file_text(input_paths[i]);
             if (!src) {
                 for (size_t j = 0; j <= i; j++) tu_free(&user_tus[j]);
@@ -1569,7 +1675,7 @@ int fakecc_compile_files(const char **input_paths,
         return -1;
     }
     for (size_t i = 0; i < num_inputs; i++) {
-        if (ends_with(input_paths[i], ".o")) {
+        if (is_obj_input(input_paths[i])) {
             if (emit_obj_read(input_paths[i], &mods[i]) != 0) {
                 for (size_t j = 0; j < i; j++) emit_module_free(&mods[j]);
                 for (size_t j = 0; j < num_inputs; j++) tu_free(&user_tus[j]);

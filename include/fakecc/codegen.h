@@ -9,4 +9,9 @@
  * locations on `out` for later DWARF emission. */
 void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 
+/* x86_64 code model (-mcmodel=).  0 = small (default), 1 = kernel
+ * (negative 2GiB / higher-half). */
+void codegen_set_code_model(int kernel);
+int  codegen_code_model_is_kernel(void);
+
 #endif /* FAKECC_CODEGEN_H */

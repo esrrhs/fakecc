@@ -32,7 +32,17 @@
 #define PF_W            2
 #define PF_R            4
 
-#define ELF_BASE        0x400000
+/* Default static image base = fakeos USER_VMA (user/user.ld). Override via link_set_image_base / --image-base= (S1). */
+#define ELF_BASE_DEFAULT 0x400000ULL
+static uint64_t g_image_base = ELF_BASE_DEFAULT;
+
+void link_set_image_base(uint64_t base) {
+    g_image_base = base ? base : ELF_BASE_DEFAULT;
+}
+
+uint64_t link_image_base(void) {
+    return g_image_base;
+}
 #define PAGE_SIZE       0x1000
 
 #define ELF64_EHDR_SIZE  64
@@ -513,6 +523,16 @@ static void finalize_sections(
                 emit_module_dbg_func_end(
                     &dbg, fi, mod_text_off[i] + f->end_pc,
                     mod_text_off[i] + f->prologue_end_pc);
+                /* Preserve prologue CFA landmarks (N3: QEMU+gdb unwind). */
+                if (f->after_push_rbp_pc > f->start_pc ||
+                    f->after_mov_rbp_pc > f->start_pc) {
+                    emit_module_dbg_func_frame(
+                        &dbg, fi,
+                        mod_text_off[i] + f->after_push_rbp_pc,
+                        mod_text_off[i] + f->after_mov_rbp_pc);
+                    if (f->frame_size)
+                        dbg.dbg_funcs[fi].frame_size = f->frame_size;
+                }
                 for (size_t k = 0; k < f->num_vars; k++) {
                     emit_module_add_dbg_var(&dbg, fi, &f->vars[k]);
                     /* Location-list ranges are offsets into the module's own
@@ -1945,7 +1965,7 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
     size_t hdr_size = ELF64_EHDR_SIZE + ELF64_PHDR_SIZE * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
-    uint64_t base = is_shared ? 0 : ELF_BASE;
+    uint64_t base = is_shared ? 0 : g_image_base;
     uint64_t code_vaddr = base + text_offset;
     /* Combined .rodata follows .text; pad .text so rodata's vaddr matches
      * max_ro_align even when text_offset is not 16-aligned

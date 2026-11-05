@@ -11,6 +11,7 @@ extern int strncmp(const char *a, const char *b, size_t n);
 extern char *strchr(const char *s, int c);
 extern char *strrchr(const char *s, int c);
 extern char *strstr(const char *a, const char *b);
+extern char *strcat(char *dst, const char *src);
 extern char *strcpy(char *dst, const char *src);
 extern char *strncpy(char *dst, const char *src, size_t n);
 extern char *strerror(int n);

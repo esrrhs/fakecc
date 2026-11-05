@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -246,6 +247,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -434,7 +436,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -461,6 +468,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -476,6 +493,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -520,6 +547,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -638,8 +666,6 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-
-
 typedef struct FILE FILE;
 typedef long fpos_t;
 static const char *predefined_macro_literal(const char *text, int *out_is_float) {

@@ -1,7 +1,9 @@
 #include "fakecc/codegen.h"
 #include "fakecc/common.h"
 #include "fakecc/emit.h"
+#include "fakecc/iasm.h"
 #include "fakecc/ir.h"
+#include "fakecc/ldscript.h"
 #include "fakecc/lexer.h"
 #include "fakecc/macho.h"
 #include "fakecc/opt.h"
@@ -102,15 +104,26 @@ static void module_free(EmitModule *m) {
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
+            "usage: fakecc [-c] [-shared] [-g] [-O0|-O1] [-mcmodel=small|kernel]\n"
+            "              [--image-base=ADDR] [--kernel-multiboot]\n"
+            "              [-T script|--script=path]\n"
+            "              [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
             "              [-nostdlib] [-nodefaultlibs]\n"
-            "              [-LDIR]... [-lLIB]... <input...> -o <output>\n"
+            "              [-LDIR]... [-lLIB]... <input.c|.S|.o...> -o <output>\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
             "  -shared         produce a shared library (.so, or a DLL on Windows)\n"
             "  -g              emit DWARF debug info (line numbers, variables);\n"
             "                  independent of -O, never changes generated code\n"
             "  -O0             keep locals in memory (skip SSA promotion)\n"
             "  -O1             default: SSA promotion + folding + DCE\n"
+            "  -mcmodel=small  default x86_64 small code model\n"
+            "  -mcmodel=kernel x86_64 kernel / higher-half code model\n"
+            "  --image-base=A  static ELF link base (default 0x400000 = USER_VMA; S1)\n"
+"  --kernel-multiboot  fakeos S1+S2: dual-segment higher-half + Multiboot ELF32\n"
+            "  -T script / --script=path\n"
+            "                  fakeos S1: subset GNU ld script (boot/linker.ld or\n"
+            "                  user/user.ld); configures --kernel-multiboot /\n"
+            "                  --image-base from parsed constants\n"
             "  -mno-avx        pass 32-byte vectors in memory (gcc -mno-avx)\n"
             "  -mavx           default: 32-byte vectors in one YMM\n"
             "  -mavx512f       pass 64-byte vectors in one ZMM (gcc -mavx512f)\n"
@@ -139,6 +152,12 @@ static int ends_with(const char *s, const char *suf) {
 /* Relocatable object inputs: ELF/Mach-O use .o; Windows COFF uses .obj too. */
 static int is_obj_input(const char *s) {
     return ends_with(s, ".o") || ends_with(s, ".obj");
+}
+
+/* Gas-subset assembly (fakeos S3). */
+static int is_asm_input(const char *s) {
+    return ends_with(s, ".S") || ends_with(s, ".s")
+        || ends_with(s, ".fakecc.S");
 }
 
 /* Windows link inputs that are archives, import libraries, or DLLs.
@@ -606,6 +625,8 @@ int main(int argc, char **argv) {
     int is_shared = 0;
     int nodefaultlibs = 0;
     int nostdlib = 0;
+    int kernel_multiboot = 0;
+    const char *ld_script = NULL;
     int want_debug = 0;
     int opt_level = 1;
     const char *output_path = NULL;
@@ -635,11 +656,15 @@ int main(int argc, char **argv) {
     if (target_arg) {
         target = target_parse(target_arg);
         if (!target) {
+            /* S4: do not hard-fail on Makefile /flags probing with an unknown
+             * triple — fall back to the host default so single-backend and
+             * embedded /etc/fakecc.flags stay usable. */
             fprintf(stderr,
-                    "fakecc: unrecognized target triple '%s' "
-                    "(supported: x86_64-linux, arm64-macos, x86_64-windows)\n",
+                    "fakecc: warning: unrecognized target triple '%s' "
+                    "(supported: x86_64-linux, arm64-macos, x86_64-windows); "
+                    "using host default\n",
                     target_arg);
-            exit(1);
+            target = target_default();
         }
     } else {
         target = target_default();
@@ -692,6 +717,40 @@ int main(int argc, char **argv) {
             target_arg = argv[i] + 9;
         } else if (strncmp(argv[i], "-target=", 8) == 0) {
             target_arg = argv[i] + 8;
+        } else if (strncmp(argv[i], "-mcmodel=", 9) == 0) {
+            const char *cm = argv[i] + 9;
+            if (strcmp(cm, "small") == 0 || strcmp(cm, "medany") == 0) {
+                codegen_set_code_model(0);
+            } else if (strcmp(cm, "kernel") == 0) {
+                codegen_set_code_model(1);
+            } else {
+                fprintf(stderr, "fakecc: unsupported -mcmodel=%s (use small or kernel)\n", cm);
+                return 1;
+            }
+        } else if (strncmp(argv[i], "--image-base=", 13) == 0) {
+            const char *s = argv[i] + 13;
+            char *end = NULL;
+            unsigned long long v = strtoull(s, &end, 0);
+            if (!s[0] || (end && *end) || v == 0) {
+                fprintf(stderr, "fakecc: bad --image-base=%s\n", s);
+                return 1;
+            }
+            link_set_image_base((uint64_t)v);
+        } else if (strcmp(argv[i], "--kernel-multiboot") == 0) {
+            kernel_multiboot = 1;
+            nostdlib = 1;
+        } else if (strcmp(argv[i], "-T") == 0 || strcmp(argv[i], "--script") == 0) {
+            if (i + 1 >= argc) usage();
+            ld_script = argv[++i];
+        } else if (strncmp(argv[i], "--script=", 9) == 0) {
+            ld_script = argv[i] + 9;
+            if (!ld_script[0]) {
+                fprintf(stderr, "fakecc: empty --script=\n");
+                return 1;
+            }
+        } else if (argv[i][0] == '-' && argv[i][1] == 'T' && argv[i][2] != '\0') {
+            /* GNU ld style -Tpath */
+            ld_script = argv[i] + 2;
         } else if (strcmp(argv[i], "-O0") == 0) {
             opt_level = 0;
         } else if (argv[i][0] == '-' && argv[i][1] == 'O' && argv[i][2] != '\0') {
@@ -780,6 +839,19 @@ int main(int argc, char **argv) {
 
     if (ninputs == 0 || output_path == NULL) usage();
 
+    if (ld_script) {
+        LdScriptInfo ldi;
+        if (ldscript_parse_file(ld_script, &ldi) != 0)
+            return 1;
+        int from_script_kmb = 0;
+        if (ldscript_configure_link(&ldi, &from_script_kmb) != 0)
+            return 1;
+        if (from_script_kmb) {
+            kernel_multiboot = 1;
+            nostdlib = 1;
+        }
+    }
+
     for (int i = 0; i < ninputs; i++) {
         if (ends_with(inputs[i], ".cpp") || ends_with(inputs[i], ".cc")
             || ends_with(inputs[i], ".cxx") || ends_with(inputs[i], ".cp")
@@ -849,22 +921,36 @@ int main(int argc, char **argv) {
                     "fakecc: -l / -L / -nostdlib / -nodefaultlibs are link-time options\n");
             exit(1);
         }
-        TranslationUnit tu;
-        char *src = read_file(inputs[0]);
-        if (parse_source(src, inputs[0], &tu, &pkg) != FAKECC_OK) {
-            free(src);
-            exit(1);
-        }
-        free(src);
         EmitModule em;
+        emit_module_init(&em);
         emit_set_object_mode(1);
-        int low = lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
-        emit_set_object_mode(0);
-        if (low != FAKECC_OK) {
+        if (is_asm_input(inputs[0])) {
+            if (target->arch != TARGET_ARCH_X86_64) {
+                fprintf(stderr, "fakecc: .S assembly requires x86_64 target\n");
+                exit(1);
+            }
+            char *src = read_file(inputs[0]);
+            if (assemble_s_file(src, inputs[0], &em) != 0) {
+                free(src);
+                exit(1);
+            }
+            free(src);
+        } else {
+            TranslationUnit tu;
+            char *src = read_file(inputs[0]);
+            if (parse_source(src, inputs[0], &tu, &pkg) != FAKECC_OK) {
+                free(src);
+                exit(1);
+            }
+            free(src);
+            int low = lower_tu(&tu, inputs[0], &em, opt_level, want_debug, &pkg);
+            if (low != FAKECC_OK) {
+                tu_free(&tu);
+                exit(1);
+            }
             tu_free(&tu);
-            exit(1);
         }
-        tu_free(&tu);
+        emit_set_object_mode(0);
         emit_obj(&em, output_path);
         module_free(&em);
         free(inputs);
@@ -915,7 +1001,7 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < ninputs; i++) {
         tu_init(&user_tus[i]);
-        if (is_obj_input(inputs[i])) {
+        if (is_obj_input(inputs[i]) || is_asm_input(inputs[i])) {
             token_array_init(&user_tokens[i]);
         } else {
             char *src = read_file(inputs[i]);
@@ -1023,6 +1109,15 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ninputs; i++) {
         if (is_obj_input(inputs[i])) {
             if (emit_obj_read(inputs[i], &mods[i]) != 0) exit(1);
+        } else if (is_asm_input(inputs[i])) {
+            emit_module_init(&mods[i]);
+            char *src = read_file(inputs[i]);
+            if (assemble_s_file(src, inputs[i], &mods[i]) != 0) {
+                free(src);
+                exit(1);
+            }
+            free(src);
+            tu_free(&user_tus[i]);
         } else {
             if (lower_tu(&user_tus[i], inputs[i], &mods[i], opt_level, want_debug, &pkg) != FAKECC_OK)
                 exit(1);
@@ -1158,11 +1253,60 @@ int main(int argc, char **argv) {
     }
     free(rt_cache_dir);
 
-    emit_link(mod_ptrs, (size_t)nmods, output_path,
-              (const char **)needed, (size_t)num_needed,
-              nodefaultlibs || nostdlib,
-              (const char **)lib_paths, (size_t)num_lib_paths, want_debug,
-              is_shared);
+    if (kernel_multiboot) {
+        /* S1+S2: write relocatable temps (or reuse .o inputs) and run the
+         * dual-segment Multiboot ELF32 linker (boot/linker.ld / ldfake). */
+        if (is_shared) {
+            fprintf(stderr, "fakecc: --kernel-multiboot incompatible with -shared\n");
+            exit(1);
+        }
+        char **kpaths = calloc((size_t)nmods, sizeof(char *));
+        char **temps = calloc((size_t)nmods, sizeof(char *));
+        if (!kpaths || !temps) {
+            fprintf(stderr, "fakecc: out of memory\n");
+            exit(1);
+        }
+        int nk = 0;
+        for (int i = 0; i < nmods; i++) {
+            if (i < ninputs && is_obj_input(inputs[i])) {
+                kpaths[nk++] = (char *)inputs[i];
+                continue;
+            }
+{
+                /* tmpnam (stdio) avoids <unistd.h>/getpid so bootstrap
+                 * preprocess (-nostdinc + v0/fakeinc) still works. */
+                const char *tn = tmpnam(NULL);
+                if (!tn) {
+                    fprintf(stderr, "fakecc: tmpnam failed\n");
+                    exit(1);
+                }
+                char buf[256];
+                snprintf(buf, sizeof buf, "%s.o", tn);
+                temps[i] = xstrdup(buf);
+                if (!temps[i]) exit(1);
+            }
+            emit_set_object_mode(1);
+            emit_obj(mod_ptrs[i], temps[i]);
+            emit_set_object_mode(0);
+            kpaths[nk++] = temps[i];
+        }
+        if (link_kernel_multiboot((const char **)kpaths, (size_t)nk, output_path) != 0)
+            exit(1);
+        for (int i = 0; i < nmods; i++) {
+            if (temps[i]) {
+                remove(temps[i]);
+                free(temps[i]);
+            }
+        }
+        free(temps);
+        free(kpaths);
+    } else {
+        emit_link(mod_ptrs, (size_t)nmods, output_path,
+                  (const char **)needed, (size_t)num_needed,
+                  nodefaultlibs || nostdlib,
+                  (const char **)lib_paths, (size_t)num_lib_paths, want_debug,
+                  is_shared);
+    }
 
     for (int i = 0; i < nmods; i++) module_free(&mods[i]);
     free(mod_ptrs);

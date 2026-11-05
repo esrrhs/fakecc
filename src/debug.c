@@ -1153,17 +1153,19 @@ static void emit_debug_frame_arm64(const EmitModule *m, uint64_t text_base,
         d_u64(frame, text_base + f->start_pc);
         d_u64(frame, f->end_pc > f->start_pc ? f->end_pc - f->start_pc : 0);
 
-        size_t n = f->frame_size ? f->frame_size : 16;
-        size_t stp_end = f->after_push_rbp_pc > f->start_pc
-                         ? f->after_push_rbp_pc - f->start_pc : 4;
-        size_t mov_end = f->after_mov_rbp_pc > f->after_push_rbp_pc
-                         ? f->after_mov_rbp_pc - f->after_push_rbp_pc : 4;
-        cfa_advance(frame, stp_end / 4);
-        d_u8(frame, DW_CFA_def_cfa_offset); d_uleb(frame, n);
-        d_u8(frame, (uint8_t)(DW_CFA_offset | 29)); d_uleb(frame, n / 8);
-        d_u8(frame, (uint8_t)(DW_CFA_offset | 30)); d_uleb(frame, (n - 8) / 8);
-        cfa_advance(frame, mov_end / 4);
-        d_u8(frame, DW_CFA_def_cfa_register); d_uleb(frame, 29);
+        /* Naked / frameless: keep CIE CFA (sp+0 style). Do not invent stp/mov. */
+        if (f->after_push_rbp_pc > f->start_pc) {
+            size_t n = f->frame_size ? f->frame_size : 16;
+            size_t stp_end = f->after_push_rbp_pc - f->start_pc;
+            size_t mov_end = f->after_mov_rbp_pc > f->after_push_rbp_pc
+                             ? f->after_mov_rbp_pc - f->after_push_rbp_pc : 4;
+            cfa_advance(frame, stp_end / 4);
+            d_u8(frame, DW_CFA_def_cfa_offset); d_uleb(frame, n);
+            d_u8(frame, (uint8_t)(DW_CFA_offset | 29)); d_uleb(frame, n / 8);
+            d_u8(frame, (uint8_t)(DW_CFA_offset | 30)); d_uleb(frame, (n - 8) / 8);
+            cfa_advance(frame, mov_end / 4);
+            d_u8(frame, DW_CFA_def_cfa_register); d_uleb(frame, 29);
+        }
 
         while ((frame->len - fde_start) & 7) d_u8(frame, DW_CFA_nop);
         uint32_t fde_len = (uint32_t)(frame->len - fde_start - 4);
@@ -1207,15 +1209,19 @@ static void emit_debug_frame(const EmitModule *m, uint64_t text_base, Buffer *fr
          *   after push %rbp:    CFA = rsp + 16, caller's rbp at CFA-16
          *   after mov %rsp,%rbp CFA = rbp + 16
          */
-        size_t push_end = f->after_push_rbp_pc > f->start_pc
-                          ? f->after_push_rbp_pc - f->start_pc : 1;
-        size_t mov_end = f->after_mov_rbp_pc > f->after_push_rbp_pc
-                         ? f->after_mov_rbp_pc - f->after_push_rbp_pc : 3;
-        cfa_advance(frame, push_end);
-        d_u8(frame, DW_CFA_def_cfa_offset); d_uleb(frame, 16);
-        d_u8(frame, (uint8_t)(DW_CFA_offset | 6)); d_uleb(frame, 2);
-        cfa_advance(frame, mov_end);
-        d_u8(frame, DW_CFA_def_cfa_register); d_uleb(frame, 6);
+        /* Naked / frameless functions never call dbg_func_frame; leave the
+         * CIE default (CFA = rsp+8).  Inventing a push/mov sequence made
+         * gdb unwind through a fake rbp frame (fakeos N3). */
+        if (f->after_push_rbp_pc > f->start_pc) {
+            size_t push_end = f->after_push_rbp_pc - f->start_pc;
+            size_t mov_end = f->after_mov_rbp_pc > f->after_push_rbp_pc
+                             ? f->after_mov_rbp_pc - f->after_push_rbp_pc : 3;
+            cfa_advance(frame, push_end);
+            d_u8(frame, DW_CFA_def_cfa_offset); d_uleb(frame, 16);
+            d_u8(frame, (uint8_t)(DW_CFA_offset | 6)); d_uleb(frame, 2);
+            cfa_advance(frame, mov_end);
+            d_u8(frame, DW_CFA_def_cfa_register); d_uleb(frame, 6);
+        }
 
         while ((frame->len - fde_start) & 7) d_u8(frame, DW_CFA_nop);
         uint32_t fde_len = (uint32_t)(frame->len - fde_start - 4);
@@ -1438,13 +1444,13 @@ void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
         d_u32(debug_info, nm);
         d_u64(debug_info, text_base_vaddr + f->start_pc);
         d_u64(debug_info, f->end_pc >= f->start_pc ? f->end_pc - f->start_pc : 0);
-        /* DW_AT_frame_base: the register every DW_OP_fbreg offset is relative
-         * to.  It is rbp on x86-64 (DWARF 6) and the frame pointer x29 on
-         * arm64 (DWARF 29) -- the two backends lay their frames out around
-         * different anchors, and a frame base naming the wrong one makes every
-         * variable read the wrong address. */
+        /* DW_AT_frame_base: rbp/x29 when a real prologue ran; rsp/sp for
+         * naked / frameless (fakeos N3 — syscall_entry / isr stubs). */
         { Buffer expr; buffer_init(&expr);
-          d_u8(&expr, DW_OP_reg0 + dbg_frame_reg());
+          int fr = dbg_frame_reg();
+          if (!(f->after_push_rbp_pc > f->start_pc))
+              fr = (target_current()->arch == TARGET_ARCH_ARM64) ? 31 : 7; /* sp/rsp */
+          d_u8(&expr, DW_OP_reg0 + fr);
           d_uleb(debug_info, expr.len); d_bytes(debug_info, expr.data, expr.len); buffer_free(&expr); }
         for (size_t vi = 0; vi < f->num_vars; vi++) {
             const DebugVar *v = &f->vars[vi];

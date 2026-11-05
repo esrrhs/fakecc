@@ -1,5 +1,6 @@
 #include "fakecc/target.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* This module is the one sanctioned place for host-platform detection:
@@ -41,11 +42,26 @@ static const TargetDesc TARGET_X86_64_WINDOWS = {
     1,
 };
 
+const TargetDesc *target_parse(const char *triple);
+
 const TargetDesc *target_x86_64_linux(void)   { return &TARGET_X86_64_LINUX; }
 const TargetDesc *target_arm64_macos(void)    { return &TARGET_ARM64_MACOS; }
 const TargetDesc *target_x86_64_windows(void) { return &TARGET_X86_64_WINDOWS; }
 
 static const TargetDesc *host_default(void) {
+    /* fakeos N1 / bootstrap: allow forcing Linux ELF without patching sources.
+     * Compile with -DFAKECC_BOOTSTRAP_LINUX, or set FAKECC_HOST_DEFAULT at run
+     * time (also useful from /etc/fakecc.flags wrappers). */
+#if defined(FAKECC_BOOTSTRAP_LINUX)
+    return &TARGET_X86_64_LINUX;
+#else
+    {
+        const char *env = getenv("FAKECC_HOST_DEFAULT");
+        if (env && env[0]) {
+            const TargetDesc *t = target_parse(env);
+            if (t) return t;
+        }
+    }
 #if defined(_WIN32)
     return &TARGET_X86_64_WINDOWS;
 #elif defined(__APPLE__) && defined(__aarch64__)
@@ -55,6 +71,7 @@ static const TargetDesc *host_default(void) {
      * default (x86-64 ELF). */
     return &TARGET_X86_64_LINUX;
 #endif
+#endif /* !FAKECC_BOOTSTRAP_LINUX */
 }
 
 static const TargetDesc *g_current = NULL;

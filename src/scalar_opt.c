@@ -95,7 +95,7 @@ static int inst_has_side_effect(const IRInst *inst) {
     return op == IR_RETURN || op == IR_STORE || op == IR_STORE_PTR ||
            op == IR_BR || op == IR_CBR || op == IR_BR_TABLE ||
            op == IR_JMP_PTR || op == IR_LABEL ||
-           op == IR_ALLOCA || op == IR_CALL || op == IR_PARAM ||
+           op == IR_ALLOCA || op == IR_CALL || op == IR_ASM || op == IR_PARAM ||
            op == IR_VADD || op == IR_VSUB || op == IR_VMUL || op == IR_VDIV ||
            op == IR_VBAND || op == IR_VBOR || op == IR_VBXOR;
 }
@@ -232,7 +232,7 @@ int scalar_dce(IRFunction *fn) {
             if (inst->c >= 0 && inst->c < fn->next_value_id) used[inst->c] = 1;
             if (inst->d >= 0 && inst->d < fn->next_value_id) used[inst->d] = 1;
         }
-        if (inst->op == IR_CALL) {
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
             for (int k = 0; k < inst->call_nargs; k++) {
                 int v = inst->call_args[k];
                 if (v >= 0 && v < fn->next_value_id) used[v] = 1;
@@ -338,7 +338,7 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->c >= max_vid) max_vid = inst->c + 1;
             if (inst->d >= max_vid) max_vid = inst->d + 1;
         }
-        if (inst->op == IR_CALL) {
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
             if (inst->call_callee >= max_vid) max_vid = inst->call_callee + 1;
             for (int k = 0; k < inst->call_nargs; k++) {
                 if (k < IR_CALL_MAX_ARGS && inst->call_args[k] >= max_vid)
@@ -353,7 +353,7 @@ void scalar_renumber(IRFunction *fn) {
     /* Assign new ids in first-seen order.
      * Note: IR_CBR's `b` field is a label id (not a value); IR_LABEL/IR_BR
      * carry no value operands.  IR_CALL has additional value uses in
-     * call_args.  Skip these when walking. */
+     * call_args (and IR_ASM operands).  Skip label fields when walking. */
     int next = 0;
     for (size_t i = 0; i < fn->insts.len; i++) {
         IRInst *inst = &fn->insts.data[i];
@@ -376,8 +376,9 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->d >= 0 && inst->d < max_vid && map[inst->d] == -1)
                 map[inst->d] = next++;
         }
-        if (inst->op == IR_CALL) {
-            if (inst->call_callee >= 0 && inst->call_callee < max_vid && map[inst->call_callee] == -1)
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
+            if (inst->op == IR_CALL && inst->call_callee >= 0
+                && inst->call_callee < max_vid && map[inst->call_callee] == -1)
                 map[inst->call_callee] = next++;
             for (int k = 0; k < inst->call_nargs; k++) {
                 if (k >= IR_CALL_MAX_ARGS) break;
@@ -409,8 +410,9 @@ void scalar_renumber(IRFunction *fn) {
             if (inst->c >= 0 && inst->c < max_vid) inst->c = map[inst->c];
             if (inst->d >= 0 && inst->d < max_vid) inst->d = map[inst->d];
         }
-        if (inst->op == IR_CALL) {
-            if (inst->call_callee >= 0 && inst->call_callee < max_vid)
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
+            if (inst->op == IR_CALL && inst->call_callee >= 0
+                && inst->call_callee < max_vid)
                 inst->call_callee = map[inst->call_callee];
             for (int k = 0; k < inst->call_nargs; k++) {
                 if (k >= IR_CALL_MAX_ARGS) break;

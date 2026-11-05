@@ -17,11 +17,13 @@ enum TargetOS {
     TOS_UNKNOWN = 0,
     TOS_LINUX = 1,
     TOS_MACOS = 2,
+    TOS_WINDOWS = 3,
 };typedef enum TargetOS TargetOS;
 enum TargetObjFmt {
     TARGET_OBJFMT_UNKNOWN = 0,
     TARGET_OBJFMT_ELF = 1,
     TARGET_OBJFMT_MACHO = 2,
+    TARGET_OBJFMT_PE = 3,
 };typedef enum TargetObjFmt TargetObjFmt;
 struct TargetDesc {
     TargetArch arch;
@@ -39,8 +41,8 @@ const TargetDesc *target_default(void);
 const TargetDesc *target_parse(const char *triple);
 const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
+const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
-
 static const TargetDesc TARGET_X86_64_LINUX = {
     TARGET_ARCH_X86_64,
     TOS_LINUX,
@@ -61,10 +63,29 @@ static const TargetDesc TARGET_ARM64_MACOS = {
     8,
     0,
 };
+static const TargetDesc TARGET_X86_64_WINDOWS = {
+    TARGET_ARCH_X86_64,
+    TOS_WINDOWS,
+    TARGET_OBJFMT_PE,
+    64,
+    32,
+    "x86_64-windows",
+    4,
+    1,
+};
+const TargetDesc *target_parse(const char *triple);
 const TargetDesc *target_x86_64_linux(void) { return &TARGET_X86_64_LINUX; }
 const TargetDesc *target_arm64_macos(void) { return &TARGET_ARM64_MACOS; }
+const TargetDesc *target_x86_64_windows(void) { return &TARGET_X86_64_WINDOWS; }
 static const TargetDesc *host_default(void) {
-    return &TARGET_ARM64_MACOS;
+    {
+        const char *env = runtime.getenv("FAKECC_HOST_DEFAULT");
+        if (env && env[0]) {
+            const TargetDesc *t = target_parse(env);
+            if (t) return t;
+        }
+    }
+    return &TARGET_X86_64_LINUX;
 }
 static const TargetDesc *g_current = NULL;
 const TargetDesc *target_current(void) {
@@ -92,6 +113,14 @@ static TargetOS parse_os_token(const char *tok, size_t len) {
         return TOS_MACOS;
     if (len >= 6 && runtime.strncmp(tok, "darwin", 6) == 0)
         return TOS_MACOS;
+    if (len >= 7 && runtime.strncmp(tok, "windows", 7) == 0)
+        return TOS_WINDOWS;
+    if (len >= 5 && runtime.strncmp(tok, "mingw", 5) == 0)
+        return TOS_WINDOWS;
+    if (len == 5 && runtime.strncmp(tok, "win32", 5) == 0)
+        return TOS_WINDOWS;
+    if (len == 4 && runtime.strncmp(tok, "msvc", 4) == 0)
+        return TOS_WINDOWS;
     return TOS_UNKNOWN;
 }
 const TargetDesc *target_parse(const char *triple) {
@@ -116,6 +145,8 @@ const TargetDesc *target_parse(const char *triple) {
         return &TARGET_X86_64_LINUX;
     if (arch == TARGET_ARCH_ARM64 && os == TOS_MACOS)
         return &TARGET_ARM64_MACOS;
+    if (arch == TARGET_ARCH_X86_64 && os == TOS_WINDOWS)
+        return &TARGET_X86_64_WINDOWS;
     return NULL;
 }
 int target_backend_ready(const TargetDesc *t) {

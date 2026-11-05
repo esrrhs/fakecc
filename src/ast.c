@@ -1713,6 +1713,23 @@ void stmt_free(Stmt *s) {
         expr_free(s->u.for_s.step);
         stmt_free_ptr(s->u.for_s.body);
         break;
+    case ST_ASM: {
+        free(s->u.asm_s.template);
+        for (int i = 0; i < s->u.asm_s.num_outputs; i++) {
+            free(s->u.asm_s.outputs[i].constraint);
+            expr_free(s->u.asm_s.outputs[i].expr);
+        }
+        free(s->u.asm_s.outputs);
+        for (int i = 0; i < s->u.asm_s.num_inputs; i++) {
+            free(s->u.asm_s.inputs[i].constraint);
+            expr_free(s->u.asm_s.inputs[i].expr);
+        }
+        free(s->u.asm_s.inputs);
+        for (int i = 0; i < s->u.asm_s.num_clobbers; i++)
+            free(s->u.asm_s.clobbers[i]);
+        free(s->u.asm_s.clobbers);
+        break;
+    }
     case ST_BREAK:
     case ST_CONTINUE:
         break;
@@ -1800,6 +1817,45 @@ Stmt stmt_clone(const Stmt *s) {
         r.u.for_s.step = expr_clone(s->u.for_s.step);
         r.u.for_s.body = stmt_clone_ptr(s->u.for_s.body);
         break;
+    case ST_ASM: {
+        r.u.asm_s.template = s->u.asm_s.template ? xstrdup(s->u.asm_s.template) : NULL;
+        r.u.asm_s.is_volatile = s->u.asm_s.is_volatile;
+        r.u.asm_s.num_outputs = s->u.asm_s.num_outputs;
+        r.u.asm_s.num_inputs = s->u.asm_s.num_inputs;
+        r.u.asm_s.num_clobbers = s->u.asm_s.num_clobbers;
+        r.u.asm_s.outputs = NULL;
+        r.u.asm_s.inputs = NULL;
+        r.u.asm_s.clobbers = NULL;
+        if (s->u.asm_s.num_outputs > 0) {
+            r.u.asm_s.outputs = calloc((size_t)s->u.asm_s.num_outputs, sizeof(AsmOperand));
+            for (int i = 0; i < s->u.asm_s.num_outputs; i++) {
+                r.u.asm_s.outputs[i].constraint =
+                    s->u.asm_s.outputs[i].constraint
+                        ? xstrdup(s->u.asm_s.outputs[i].constraint) : NULL;
+                r.u.asm_s.outputs[i].expr =
+                    s->u.asm_s.outputs[i].expr
+                        ? expr_clone(s->u.asm_s.outputs[i].expr) : NULL;
+            }
+        }
+        if (s->u.asm_s.num_inputs > 0) {
+            r.u.asm_s.inputs = calloc((size_t)s->u.asm_s.num_inputs, sizeof(AsmOperand));
+            for (int i = 0; i < s->u.asm_s.num_inputs; i++) {
+                r.u.asm_s.inputs[i].constraint =
+                    s->u.asm_s.inputs[i].constraint
+                        ? xstrdup(s->u.asm_s.inputs[i].constraint) : NULL;
+                r.u.asm_s.inputs[i].expr =
+                    s->u.asm_s.inputs[i].expr
+                        ? expr_clone(s->u.asm_s.inputs[i].expr) : NULL;
+            }
+        }
+        if (s->u.asm_s.num_clobbers > 0) {
+            r.u.asm_s.clobbers = calloc((size_t)s->u.asm_s.num_clobbers, sizeof(char *));
+            for (int i = 0; i < s->u.asm_s.num_clobbers; i++)
+                r.u.asm_s.clobbers[i] = s->u.asm_s.clobbers[i]
+                    ? xstrdup(s->u.asm_s.clobbers[i]) : NULL;
+        }
+        break;
+    }
     case ST_BREAK:
     case ST_CONTINUE:
         break;

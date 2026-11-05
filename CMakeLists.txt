@@ -48,6 +48,10 @@ if(USE_COV)
     endif()
 endif()
 
+
+option(FAKECC_NO_MACHO "Omit Mach-O backend; link hoststub (Linux-only bootstrap)" OFF)
+option(FAKECC_BOOTSTRAP_LINUX "Compile host_default as x86_64-linux (fakeos N1)" OFF)
+
 add_library(fakecc_core
     src/common.c
     src/lexer.c
@@ -66,11 +70,14 @@ add_library(fakecc_core
     src/target.c
     src/a64.c
     src/codegen.c
+    src/iasm.c
+    src/as_s.c
     src/cg64.c
     src/debug.c
     src/emit.c
     src/link.c
-    src/macho.c
+    src/link_kernel.c
+    src/ldscript.c
     src/pe.c
     src/coff.c
     src/arcoff.c
@@ -78,6 +85,16 @@ add_library(fakecc_core
     src/pkg.c
     src/compiler.c
 )
+if(FAKECC_NO_MACHO)
+  target_sources(fakecc_core PRIVATE src/hoststub.c)
+else()
+  target_sources(fakecc_core PRIVATE src/macho.c)
+endif()
+
+
+if(FAKECC_BOOTSTRAP_LINUX)
+  target_compile_definitions(fakecc_core PUBLIC FAKECC_BOOTSTRAP_LINUX=1)
+endif()
 
 target_include_directories(fakecc_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

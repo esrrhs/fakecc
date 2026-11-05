@@ -380,8 +380,8 @@ static LiveInfo *compute_liveness(const IRFunction *fn) {
             if (inst->d >= 0 && inst->d < nv) liv_add_use(&liv[inst->d], (int)i);
         }
 
-        /* IR_CALL: each call_args[k] is a use. */
-        if (inst->op == IR_CALL) {
+        /* IR_CALL / IR_ASM: each call_args[k] is a use. */
+        if (inst->op == IR_CALL || inst->op == IR_ASM) {
             for (int k = 0; k < inst->call_nargs; k++) {
                 IRValue av = inst->call_args[k];
                 if (av >= 0 && av < nv) liv_add_use(&liv[av], (int)i);
@@ -576,7 +576,7 @@ static void compute_use_def(const IRFunction *fn, const CFG *cfg,
                     !bs_test(&def_b[bi], inst->d))
                     bs_set(&use_b[bi], inst->d);
             }
-            if (inst->op == IR_CALL) {
+            if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < use_b[bi].nv &&
@@ -734,7 +734,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
 
-            if (inst->op == IR_CALL) {
+            if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 BS_FOREACH(&live, over) {
                     if ((int)over != inst->dst && (int)over != inst->b &&
                         (int)over != inst->c && (int)over != inst->d &&
@@ -781,7 +781,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                     value_in_class(fn, inst->d, float_class, cls->exclude_16byte_ld))
                     bs_set(&live, inst->d);
             }
-            if (inst->op == IR_CALL) {
+            if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&
@@ -801,26 +801,33 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         }
     }
 
-    /* Pass 1b: Propagate forbid_mask through IR_COPY (phi-elim merges).
-     * Only when -O1 reserved the va_arg scratch: that is the path where
-     * mem2reg emits loop-carried COPYs that must share call-survival
-     * constraints.  Skipping at -O0 keeps that code stream unchanged. */
+    /* Pass 1b: Propagate forbid_mask through IR_COPY (phi-elim merges) and
+     * through pointer-step ADD/SUB so a fmt++ result inherits call-survival
+     * from the pre-increment pointer.  Only when -O1 reserved the va_arg
+     * scratch: that is the path where mem2reg emits loop-carried values that
+     * must share those constraints.  Skipping at -O0 keeps that stream. */
     if (ra_reserve_va_scratch) {
         int changed = 1;
         while (changed) {
             changed = 0;
             for (size_t i = 0; i < fn->insts.len; i++) {
                 const IRInst *inst = &fn->insts.data[i];
-                if (inst->op != IR_COPY) continue;
                 int d = inst->dst, a = inst->a;
                 if (d < 0 || d >= nv || a < 0 || a >= nv) continue;
                 if (!value_in_class(fn, d, float_class, cls->exclude_16byte_ld))
                     continue;
                 if (!value_in_class(fn, a, float_class, cls->exclude_16byte_ld))
                     continue;
-                uint32_t m = forbid_mask[d] | forbid_mask[a];
-                if (forbid_mask[d] != m) { forbid_mask[d] = m; changed = 1; }
-                if (forbid_mask[a] != m) { forbid_mask[a] = m; changed = 1; }
+                if (inst->op == IR_COPY) {
+                    uint32_t m = forbid_mask[d] | forbid_mask[a];
+                    if (forbid_mask[d] != m) { forbid_mask[d] = m; changed = 1; }
+                    if (forbid_mask[a] != m) { forbid_mask[a] = m; changed = 1; }
+                } else if (inst->op == IR_ADD || inst->op == IR_SUB) {
+                    /* One-way: dst inherits source's call-survival.  Do not
+                     * push dst's mask back onto a — that over-constrains. */
+                    uint32_t m = forbid_mask[d] | forbid_mask[a];
+                    if (forbid_mask[d] != m) { forbid_mask[d] = m; changed = 1; }
+                }
             }
         }
     }
@@ -919,7 +926,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
                     value_in_class(fn, inst->d, float_class, cls->exclude_16byte_ld))
                     bs_set(&live, inst->d);
             }
-            if (inst->op == IR_CALL) {
+            if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 for (int k = 0; k < inst->call_nargs; k++) {
                     IRValue av = inst->call_args[k];
                     if (av >= 0 && av < nv &&

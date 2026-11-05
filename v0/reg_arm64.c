@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -56,6 +57,10 @@ enum IROpcode {
     IR_ADD,
     IR_SUB,
     IR_MUL,
+    IR_UMULH,
+    IR_ADDO,
+    IR_SUBO,
+    IR_MULO,
     IR_DIV,
     IR_MOD,
     IR_NEG,
@@ -98,6 +103,7 @@ enum IROpcode {
     IR_LABEL,
     IR_BR,
     IR_CBR,
+    IR_BR_TABLE,
     IR_PARAM,
     IR_CALL,
     IR_RETURN,
@@ -116,6 +122,7 @@ enum IROpcode {
     IR_STACK_RESTORE,
     IR_LONGJMP,
     IR_DBG_VALUE,
+    IR_ASM,
 };typedef enum IROpcode IROpcode;
 struct IRInst {
     IROpcode op;
@@ -129,6 +136,7 @@ struct IRInst {
     char *call_name;
     IRValue *call_args;
     int call_nargs;
+    int call_is_variadic;
     IRValue call_callee;
     int width;
     int is_unsigned;
@@ -141,6 +149,8 @@ struct IRInst {
     int *call_arg_nbytes;
     int alloca_bytes;
     int is_volatile;
+    char **asm_constraints;
+    char *asm_clobbers;
 };typedef struct IRInst IRInst;
 struct IRInstArray {
     IRInst *data;
@@ -212,6 +222,7 @@ struct IRFunction {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
     int has_dyn_alloca;
     int needs_apply_args;
     int needs_apply;
@@ -481,6 +492,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -669,7 +681,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -696,6 +713,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -711,6 +738,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -755,6 +792,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -877,6 +915,9 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_op_with_overflow(IROpcode op) {
+    return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
+}
 enum Reg {
     REG_RAX = 0,
     REG_RCX = 1,
@@ -928,7 +969,6 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
-
 enum A64GpReg {
     A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
     A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,

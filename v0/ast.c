@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -245,6 +246,7 @@ int sysv_agg_ret_x87(Type t);
 int sysv_memory_pass_as_pointer(Type t);
 int abi_gp_nregs(void);
 int type_long_double_width(void);
+int type_is_pair16(Type t);
 int abi_sret_uses_gp(void);
 int abi_indirect_agg(Type t);
 int abi_is_hfa(Type t);
@@ -433,7 +435,12 @@ enum StmtKind {
     ST_GOTO,
     ST_LABEL,
     ST_SWITCH,
+    ST_ASM,
 };typedef enum StmtKind StmtKind;
+struct AsmOperand {
+    char *constraint;
+    Expr *expr;
+};typedef struct AsmOperand AsmOperand;
 typedef struct Stmt Stmt;
 struct StmtArray {
     Stmt *data;
@@ -460,6 +467,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     };struct Stmt {
     StmtKind kind;
     SourceLoc loc;
@@ -475,6 +492,16 @@ union __anon_u_2 {
         struct { char *target; Expr *target_expr; } goto_s;
         struct { char *name; Stmt *stmt; } label_s;
         struct { Expr *cond; Stmt *body; SwitchCase *cases; int num_cases; int cap_cases; } switch_s;
+        struct {
+            char *template;
+            AsmOperand *outputs;
+            int num_outputs;
+            AsmOperand *inputs;
+            int num_inputs;
+            char **clobbers;
+            int num_clobbers;
+            int is_volatile;
+        } asm_s;
     } u;
 };
 void stmt_array_init(StmtArray *a);
@@ -519,6 +546,7 @@ struct FunctionDecl {
     int is_destructor;
     int ctor_prio;
     int dtor_prio;
+    int is_naked;
 };typedef struct FunctionDecl FunctionDecl;
 struct PackageDecl {
     char *name;
@@ -646,11 +674,13 @@ enum TargetOS {
     TOS_UNKNOWN = 0,
     TOS_LINUX = 1,
     TOS_MACOS = 2,
+    TOS_WINDOWS = 3,
 };typedef enum TargetOS TargetOS;
 enum TargetObjFmt {
     TARGET_OBJFMT_UNKNOWN = 0,
     TARGET_OBJFMT_ELF = 1,
     TARGET_OBJFMT_MACHO = 2,
+    TARGET_OBJFMT_PE = 3,
 };typedef enum TargetObjFmt TargetObjFmt;
 struct TargetDesc {
     TargetArch arch;
@@ -668,8 +698,8 @@ const TargetDesc *target_default(void);
 const TargetDesc *target_parse(const char *triple);
 const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
+const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
-
 typedef struct FILE FILE;
 typedef long fpos_t;
 Type type_clone(Type t) {
@@ -1219,6 +1249,27 @@ static int sysv_paint(Type t, int offset, int eight[8]) {
 int sysv_classify_agg(Type t, SysVRegClass cls[2]) {
     cls[0] = SYSV_CLS_INTEGER;
     cls[1] = SYSV_CLS_INTEGER;
+    const TargetDesc *td = target_current();
+    if (td && td->os == TOS_WINDOWS) {
+        if (t.is_vector) {
+            if (t.width == 4) {
+                cls[0] = (t.kind == TY_FLOAT) ? SYSV_CLS_SSE : SYSV_CLS_INTEGER;
+                return 1;
+            }
+            if (t.width == 16 || t.width == 8) {
+                cls[0] = SYSV_CLS_SSE;
+                return 1;
+            }
+            return 0;
+        }
+        if (t.kind != TY_STRUCT) return 0;
+        int sz = type_size(t);
+        if (sz == 1 || sz == 2 || sz == 4 || sz == 8) {
+            cls[0] = SYSV_CLS_INTEGER;
+            return 1;
+        }
+        return 0;
+    }
     if (t.is_vector) {
         if (t.width == 32) {
             if (g_no_avx) return 0;
@@ -1309,6 +1360,8 @@ static int type_is_pure_x87(Type t) {
     return any;
 }
 int sysv_agg_ret_x87(Type t) {
+    const TargetDesc *td = target_current();
+    if (td && (td->os == TOS_WINDOWS || td->arch == TARGET_ARCH_ARM64)) return 0;
     if (type_is_complex_ldouble(t)) return 0;
     if (t.kind != TY_STRUCT) return 0;
     if (type_size(t) != 16) return 0;
@@ -1318,7 +1371,8 @@ int sysv_agg_ret_x87(Type t) {
 }
 static int abi_is_arm64(void);
 int sysv_memory_pass_as_pointer(Type t) {
-    if (abi_is_arm64()) return 0;
+    const TargetDesc *td = target_current();
+    if (td && (td->os == TOS_WINDOWS || td->arch == TARGET_ARCH_ARM64)) return 0;
     return t.kind == TY_STRUCT && t.tag
         && runtime.strcmp(t.tag, "__va_list_tag") == 0;
 }
@@ -1328,8 +1382,15 @@ static int abi_is_arm64(void) {
 }
 int type_long_double_width(void) {
     const TargetDesc *t = target_current();
-    if (t && t->arch == TARGET_ARCH_ARM64) return 8;
+    if (t && (t->arch == TARGET_ARCH_ARM64 || t->os == TOS_WINDOWS)) return 8;
     return 16;
+}
+int type_is_pair16(Type t) {
+    if (t.is_vector) return 0;
+    if (t.width != 16) return 0;
+    if (t.kind == TY_INT) return 1;
+    if (t.kind == TY_FLOAT && t.is_decimal) return 1;
+    return 0;
 }
 Type type_make_long_double(void) {
     Type t = type_make_float(type_long_double_width());
@@ -1398,6 +1459,16 @@ int abi_hfa_elem_size(Type t) {
     return kind ? kind : -1;
 }
 int abi_indirect_agg(Type t) {
+    const TargetDesc *td = target_current();
+    if (td && td->os == TOS_WINDOWS) {
+        if (type_is_pair16(t)) return 1;
+        if (t.is_vector) return type_size(t) > 16;
+        if (t.kind == TY_STRUCT) {
+            int sz = type_size(t);
+            return (sz != 1 && sz != 2 && sz != 4 && sz != 8);
+        }
+        return 0;
+    }
     if (!abi_is_arm64()) return 0;
     if (t.is_vector) return type_size(t) > 16;
     if (t.kind != TY_STRUCT) return 0;
@@ -1885,6 +1956,42 @@ Expr *expr_new_label_addr(const char *label, SourceLoc loc) {
     return e;
 }
 void expr_free(Expr *e) {
+    while (e && (e->kind == EX_UNARY || e->kind == EX_ADDR ||
+                 e->kind == EX_DEREF || e->kind == EX_INC_DEC)) {
+        Expr *next;
+        if (e->kind == EX_UNARY) next = e->u.un.operand;
+        else if (e->kind == EX_ADDR) next = e->u.addr.operand;
+        else if (e->kind == EX_DEREF) next = e->u.deref.operand;
+        else next = e->u.incdec.operand;
+        type_free(&e->type);
+        runtime.free(e);
+        e = next;
+    }
+    while (e && (e->kind == EX_BINOP || e->kind == EX_COMMA ||
+                 e->kind == EX_ASSIGN || e->kind == EX_COMPOUND_ASSIGN ||
+                 e->kind == EX_MEMBER || e->kind == EX_CAST)) {
+        Expr *spine;
+        Expr *other = ((void*)0);
+        if (e->kind == EX_BINOP) {
+            spine = e->u.bin.l; other = e->u.bin.r;
+        } else if (e->kind == EX_COMMA) {
+            spine = e->u.comma.lhs; other = e->u.comma.rhs;
+        } else if (e->kind == EX_ASSIGN) {
+            spine = e->u.assign.lvalue; other = e->u.assign.rvalue;
+        } else if (e->kind == EX_COMPOUND_ASSIGN) {
+            spine = e->u.comp.lvalue; other = e->u.comp.rvalue;
+        } else if (e->kind == EX_MEMBER) {
+            spine = e->u.member.obj;
+            runtime.free(e->u.member.name);
+        } else {
+            spine = e->u.cast.operand;
+            type_free(&e->u.cast.target);
+        }
+        type_free(&e->type);
+        runtime.free(e);
+        if (other) expr_free(other);
+        e = spine;
+    }
     if (!e) return;
     switch (e->kind) {
     case EX_INT_LIT:
@@ -2036,6 +2143,23 @@ void stmt_free(Stmt *s) {
         expr_free(s->u.for_s.step);
         stmt_free_ptr(s->u.for_s.body);
         break;
+    case ST_ASM: {
+        runtime.free(s->u.asm_s.template);
+        for (int i = 0; i < s->u.asm_s.num_outputs; i++) {
+            runtime.free(s->u.asm_s.outputs[i].constraint);
+            expr_free(s->u.asm_s.outputs[i].expr);
+        }
+        runtime.free(s->u.asm_s.outputs);
+        for (int i = 0; i < s->u.asm_s.num_inputs; i++) {
+            runtime.free(s->u.asm_s.inputs[i].constraint);
+            expr_free(s->u.asm_s.inputs[i].expr);
+        }
+        runtime.free(s->u.asm_s.inputs);
+        for (int i = 0; i < s->u.asm_s.num_clobbers; i++)
+            runtime.free(s->u.asm_s.clobbers[i]);
+        runtime.free(s->u.asm_s.clobbers);
+        break;
+    }
     case ST_BREAK:
     case ST_CONTINUE:
         break;
@@ -2121,6 +2245,45 @@ Stmt stmt_clone(const Stmt *s) {
         r.u.for_s.step = expr_clone(s->u.for_s.step);
         r.u.for_s.body = stmt_clone_ptr(s->u.for_s.body);
         break;
+    case ST_ASM: {
+        r.u.asm_s.template = s->u.asm_s.template ? xstrdup(s->u.asm_s.template) : ((void*)0);
+        r.u.asm_s.is_volatile = s->u.asm_s.is_volatile;
+        r.u.asm_s.num_outputs = s->u.asm_s.num_outputs;
+        r.u.asm_s.num_inputs = s->u.asm_s.num_inputs;
+        r.u.asm_s.num_clobbers = s->u.asm_s.num_clobbers;
+        r.u.asm_s.outputs = ((void*)0);
+        r.u.asm_s.inputs = ((void*)0);
+        r.u.asm_s.clobbers = ((void*)0);
+        if (s->u.asm_s.num_outputs > 0) {
+            r.u.asm_s.outputs = runtime.calloc((size_t)s->u.asm_s.num_outputs, sizeof(AsmOperand));
+            for (int i = 0; i < s->u.asm_s.num_outputs; i++) {
+                r.u.asm_s.outputs[i].constraint =
+                    s->u.asm_s.outputs[i].constraint
+                        ? xstrdup(s->u.asm_s.outputs[i].constraint) : ((void*)0);
+                r.u.asm_s.outputs[i].expr =
+                    s->u.asm_s.outputs[i].expr
+                        ? expr_clone(s->u.asm_s.outputs[i].expr) : ((void*)0);
+            }
+        }
+        if (s->u.asm_s.num_inputs > 0) {
+            r.u.asm_s.inputs = runtime.calloc((size_t)s->u.asm_s.num_inputs, sizeof(AsmOperand));
+            for (int i = 0; i < s->u.asm_s.num_inputs; i++) {
+                r.u.asm_s.inputs[i].constraint =
+                    s->u.asm_s.inputs[i].constraint
+                        ? xstrdup(s->u.asm_s.inputs[i].constraint) : ((void*)0);
+                r.u.asm_s.inputs[i].expr =
+                    s->u.asm_s.inputs[i].expr
+                        ? expr_clone(s->u.asm_s.inputs[i].expr) : ((void*)0);
+            }
+        }
+        if (s->u.asm_s.num_clobbers > 0) {
+            r.u.asm_s.clobbers = runtime.calloc((size_t)s->u.asm_s.num_clobbers, sizeof(char *));
+            for (int i = 0; i < s->u.asm_s.num_clobbers; i++)
+                r.u.asm_s.clobbers[i] = s->u.asm_s.clobbers[i]
+                    ? xstrdup(s->u.asm_s.clobbers[i]) : ((void*)0);
+        }
+        break;
+    }
     case ST_BREAK:
     case ST_CONTINUE:
         break;
@@ -2210,7 +2373,7 @@ void tu_init(TranslationUnit *tu) {
     typedef_registry_init(&tu->typedefs);
     SourceLoc vloc = {0};
     StructDef *va = struct_registry_add(&tu->structs, "__va_list_tag", vloc);
-    if (abi_is_arm64()) {
+    if (abi_is_arm64() || (target_current() && target_current()->os == TOS_WINDOWS)) {
         struct_def_push_member(va, "overflow_arg_area",
                                type_make_ptr(type_make_void()), -1);
     } else {
@@ -2553,15 +2716,44 @@ int fold_const_int(const Expr *e, long long *out) {
         return 1;
     }
     if (e->kind == EX_UNARY) {
+        const Expr *stack_n[8];
+        const Expr **nodes = stack_n;
+        int cap = 8, n = 0, heap = 0;
+        const Expr *cur = e;
         long long v;
-        if (!fold_const_int(e->u.un.operand, &v)) return 0;
-        switch (e->u.un.op) {
-        case UOP_NEG: *out = (long long)(0ull - (unsigned long long)v); return 1;
-        case UOP_POS: *out = v; return 1;
-        case UOP_BITNOT: *out = ~v; return 1;
-        case UOP_NOT: *out = !v ? 1 : 0; return 1;
-        default: return 0;
+        int i;
+        while (cur && cur->kind == EX_UNARY) {
+            if (n >= cap) {
+                int nc = cap * 2;
+                const Expr **np = (const Expr **)runtime.malloc((size_t)nc * sizeof(const Expr *));
+                if (!np) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                runtime.memcpy(np, nodes, (size_t)n * sizeof(const Expr *));
+                if (heap) runtime.free((void *)nodes);
+                nodes = np;
+                cap = nc;
+                heap = 1;
+            }
+            nodes[n++] = cur;
+            cur = cur->u.un.operand;
         }
+        if (!fold_const_int(cur, &v)) {
+            if (heap) runtime.free((void *)nodes);
+            return 0;
+        }
+        for (i = n - 1; i >= 0; i--) {
+            switch (nodes[i]->u.un.op) {
+            case UOP_NEG: v = (long long)(0ull - (unsigned long long)v); break;
+            case UOP_POS: break;
+            case UOP_BITNOT: v = ~v; break;
+            case UOP_NOT: v = !v ? 1 : 0; break;
+            default:
+                if (heap) runtime.free((void *)nodes);
+                return 0;
+            }
+        }
+        if (heap) runtime.free((void *)nodes);
+        *out = v;
+        return 1;
     }
     if (e->kind == EX_BINOP) {
 long long l;
@@ -2700,6 +2892,49 @@ long long r;
 }
 Expr *expr_clone(const Expr *e) {
     if (!e) return ((void*)0);
+    if (e->kind == EX_UNARY || e->kind == EX_ADDR ||
+        e->kind == EX_DEREF || e->kind == EX_INC_DEC) {
+        const Expr *stack_n[8];
+        const Expr **nodes = stack_n;
+        int cap = 8, n = 0, heap = 0, i;
+        const Expr *cur = e;
+        Expr *leaf;
+        while (cur && (cur->kind == EX_UNARY || cur->kind == EX_ADDR ||
+                       cur->kind == EX_DEREF || cur->kind == EX_INC_DEC)) {
+            if (n >= cap) {
+                int nc = cap * 2;
+                const Expr **np = (const Expr **)runtime.malloc((size_t)nc * sizeof(const Expr *));
+                if (!np) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+                runtime.memcpy(np, nodes, (size_t)n * sizeof(const Expr *));
+                if (heap) runtime.free((void *)nodes);
+                nodes = np;
+                cap = nc;
+                heap = 1;
+            }
+            nodes[n++] = cur;
+            if (cur->kind == EX_UNARY) cur = cur->u.un.operand;
+            else if (cur->kind == EX_ADDR) cur = cur->u.addr.operand;
+            else if (cur->kind == EX_DEREF) cur = cur->u.deref.operand;
+            else cur = cur->u.incdec.operand;
+        }
+        leaf = expr_clone(cur);
+        for (i = n - 1; i >= 0; i--) {
+            const Expr *src = nodes[i];
+            Expr *r = (Expr *)runtime.malloc(sizeof(Expr));
+            if (!r) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            runtime.memset(r, 0, sizeof(Expr));
+            *r = *src;
+            r->type = type_clone(src->type);
+            r->va_arg_type = type_clone(src->va_arg_type);
+            if (src->kind == EX_UNARY) r->u.un.operand = leaf;
+            else if (src->kind == EX_ADDR) r->u.addr.operand = leaf;
+            else if (src->kind == EX_DEREF) r->u.deref.operand = leaf;
+            else r->u.incdec.operand = leaf;
+            leaf = r;
+        }
+        if (heap) runtime.free((void *)nodes);
+        return leaf;
+    }
     Expr *r = runtime.malloc(sizeof(Expr));
     if (!r) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     runtime.memset(r, 0, sizeof(Expr));

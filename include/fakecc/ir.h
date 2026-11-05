@@ -106,6 +106,10 @@ typedef enum {
      * If `a`'s definition is optimized away, renumber sets `a` to -1 and the
      * variable is reported as unavailable over that range. */
     IR_DBG_VALUE,
+    IR_ASM,         /* GNU inline asm: call_name=template; call_args =
+                     *   [0..imm) output addresses, [imm..nargs) input values;
+                     * asm_constraints[i] parallel; asm_clobbers comma-list;
+                     * is_volatile set when volatile. */
 } IROpcode;
 
 /* Maximum arguments to IR_CALL.  SysV packs small aggregates into 1–2
@@ -189,8 +193,13 @@ typedef struct {
      * the alloca is pinned.  For IR_PARAM, a MEMORY blob's incoming size
      * (codegen LEAs [rbp+off] when alloca_bytes > 8). */
     int      alloca_bytes;
-    /* IR_LOAD / IR_LOAD_PTR: the access is volatile and must not be DCE'd. */
+    /* IR_LOAD / IR_LOAD_PTR: the access is volatile and must not be DCE'd.
+     * IR_ASM: volatile asm (no DCE / reordering across). */
     int      is_volatile;
+    /* IR_ASM only: per-operand constraint strings (length call_nargs). */
+    char   **asm_constraints;
+    /* IR_ASM only: comma-separated clobber list, or NULL. */
+    char    *asm_clobbers;
 } IRInst;
 
 /* ------------------------------------------------------------------ */
@@ -298,6 +307,7 @@ typedef struct {
     int   is_destructor;  /* 1 = emit a .fini_array pointer to this function */
     int   ctor_prio;
     int   dtor_prio;
+    int   is_naked;       /* 1 = no compiler-injected prologue/epilogue */
     int   has_dyn_alloca; /* 1 = function uses dynamic alloca / VLA */
     /* GNU __builtin_apply_args: save incoming arg regs at prologue (GCC
      * migrates the save to function entry so later calls cannot clobber

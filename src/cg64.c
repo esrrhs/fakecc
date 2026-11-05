@@ -5548,6 +5548,9 @@ static void emit_function(C64 *c, int fi) {
             break;
         }
 
+        case IR_ASM:
+            /* x86-only; ignored on arm64. */
+            break;
         case IR_CALL:
             emit_call(c, s);
             break;

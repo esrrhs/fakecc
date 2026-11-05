@@ -525,6 +525,8 @@ static void collect_labels(LabelSet *ls, const Stmt *s) {
         for (size_t i = 0; i < s->u.block.len; i++)
             collect_labels(ls, &s->u.block.data[i]);
         break;
+    case ST_ASM:
+        break;
     default:
         break;
     }
@@ -4009,6 +4011,18 @@ static void check_stmt(Stmt *s, size_t scope_mark, int *has_return) {
     case ST_BLOCK:
         check_stmt_list(&s->u.block, has_return);
         break;
+    case ST_ASM: {
+        Type discard;
+        for (int i = 0; i < s->u.asm_s.num_outputs; i++) {
+            discard = check_expr_inner(s->u.asm_s.outputs[i].expr);
+            type_free(&discard);
+        }
+        for (int i = 0; i < s->u.asm_s.num_inputs; i++) {
+            discard = check_expr_inner(s->u.asm_s.inputs[i].expr);
+            type_free(&discard);
+        }
+        break;
+    }
     }
 }
 

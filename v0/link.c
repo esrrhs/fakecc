@@ -34,13 +34,14 @@ void buffer_appendf(Buffer *b, const char *fmt, ...);
 char *xstrdup(const char *s);
 void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
+void fakecc_set_quiet(int quiet);
+int fakecc_is_quiet(void);
 int die_at(const char *file, int line, int col, const char *fmt, ...);
 void fakecc_clear_error(void);
 int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -67,6 +68,28 @@ struct EmitSymbol {
     size_t size;
     uint16_t macho_desc;
 };typedef struct EmitSymbol EmitSymbol;
+struct EmitComdat {
+    char *sect_name;
+    uint8_t selection;
+    char *symbol;
+    char *assoc_name;
+    uint8_t keep;
+};typedef struct EmitComdat EmitComdat;
+struct EmitSpan {
+    uint16_t kind;
+    size_t off;
+    size_t len;
+    int comdat;
+};typedef struct EmitSpan EmitSpan;
+struct EmitWinUnwind {
+    size_t begin;
+    size_t end;
+    size_t after_push_rbp;
+    size_t after_set_fp;
+    size_t after_prolog;
+    uint32_t stack_alloc;
+    int8_t pushed[8];
+};typedef struct EmitWinUnwind EmitWinUnwind;
 struct EmitReloc {
     size_t offset;
     uint32_t type;
@@ -194,6 +217,8 @@ struct EmitModule {
     Buffer fini_array;
     size_t fini_array_align;
     int *fini_prio;
+    Buffer tls_callbacks;
+    size_t tls_callbacks_align;
     EmitSymbol *syms;
     size_t num_syms;
     size_t cap_syms;
@@ -219,6 +244,24 @@ struct EmitModule {
     DebugVar *dbg_globals;
     size_t num_dbg_globals;
     size_t cap_dbg_globals;
+    Buffer pdata;
+    Buffer xdata;
+    Buffer drectve;
+    EmitComdat *comdats;
+    size_t num_comdats;
+    size_t cap_comdats;
+    EmitSpan *spans;
+    size_t num_spans;
+    size_t cap_spans;
+    EmitReloc *pdata_relocs;
+    size_t num_pdata_relocs;
+    size_t cap_pdata_relocs;
+    EmitReloc *xdata_relocs;
+    size_t num_xdata_relocs;
+    size_t cap_xdata_relocs;
+    EmitWinUnwind *win_unwinds;
+    size_t num_win_unwinds;
+    size_t cap_win_unwinds;
 };typedef struct EmitModule EmitModule;
 void emit_module_init(EmitModule *m);
 void emit_module_free(EmitModule *m);
@@ -235,6 +278,16 @@ void emit_module_add_data_reloc(EmitModule *m, size_t offset, uint32_t type,
                                 int sym, int32_t addend);
 void emit_module_add_rebase(EmitModule *m, uint64_t slot, uint64_t target);
 void emit_module_add_bind(EmitModule *m, uint64_t slot, const char *name);
+void emit_module_add_win_unwind(EmitModule *m, const EmitWinUnwind *u);
+void emit_module_add_comdat(EmitModule *m, const char *sect_name,
+                            uint8_t selection, const char *symbol,
+                            const char *assoc_name);
+void emit_module_add_span(EmitModule *m, uint16_t kind, size_t off,
+                          size_t len, int comdat);
+void emit_module_add_pdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
+void emit_module_add_xdata_reloc(EmitModule *m, size_t offset, uint32_t type,
+                                 int sym, int32_t addend);
 int emit_is_darwin_import(const char *name);
 struct EmitAuxLib {
     char *install_name;
@@ -260,7 +313,10 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                const char **lib_paths, size_t num_lib_paths,
                int want_debug, int is_shared);
 void emit_elf(const EmitModule *m, const char *path);
-
+void link_set_image_base(uint64_t base);
+uint64_t link_image_base(void);
+int link_kernel_multiboot(const char **obj_paths, size_t npaths,
+                          const char *out_path);
 DebugTypeTag ir_type_tag(int type_kind, int is_bool);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
@@ -297,11 +353,13 @@ enum TargetOS {
     TOS_UNKNOWN = 0,
     TOS_LINUX = 1,
     TOS_MACOS = 2,
+    TOS_WINDOWS = 3,
 };typedef enum TargetOS TargetOS;
 enum TargetObjFmt {
     TARGET_OBJFMT_UNKNOWN = 0,
     TARGET_OBJFMT_ELF = 1,
     TARGET_OBJFMT_MACHO = 2,
+    TARGET_OBJFMT_PE = 3,
 };typedef enum TargetObjFmt TargetObjFmt;
 struct TargetDesc {
     TargetArch arch;
@@ -319,6 +377,7 @@ const TargetDesc *target_default(void);
 const TargetDesc *target_parse(const char *triple);
 const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
+const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
 struct EmitModule;
 struct MachoDebug {
@@ -353,10 +412,51 @@ void macho_section_offsets(const struct EmitModule *em, size_t text_len,
                            MachoSectOffsets *off);
 size_t macho_tlv_block_tbss_base(size_t tdata_len, size_t max_align);
 int macho_codesign(const char *path);
+struct EmitModule;
+struct PeImport {
+    char *dll;
+    char *name;
+    int is_data;
+    int ordinal;
+    int hint;
+};typedef struct PeImport PeImport;
+struct PeLinkOpt {
+    int shared;
+    const PeImport *imports;
+    size_t nimports;
+    const char *implib_path;
+};typedef struct PeLinkOpt PeLinkOpt;
+int pe_link(struct EmitModule **mods, size_t n, const char *path);
+int pe_link_ex(struct EmitModule **mods, size_t n, const char *path,
+               const PeLinkOpt *opt);
+int pe_pull_libraries(struct EmitModule **mods, size_t nmods,
+                      const char **needed, size_t nneeded,
+                      const char **lib_paths, size_t npaths,
+                      struct EmitModule ***extra, size_t *nextra,
+                      PeImport **imports, size_t *nimports);
+void pe_imports_free(PeImport *imps, size_t n);
+struct PeImplibSym {
+    const char *name;
+    int is_data;
+};typedef struct PeImplibSym PeImplibSym;
+int pe_write_import_libs(const char *dll_path, const char *implib_path,
+                         const char *dll_name,
+                         const PeImplibSym *syms, size_t nsyms);
+int coff_write_object(const struct EmitModule *m, const char *path);
+int coff_read_object(const char *path, struct EmitModule *m);
+int coff_read_object_mem(const void *buf, size_t n, const char *name,
+                         struct EmitModule *m);
 typedef struct FILE FILE;
 typedef long fpos_t;
+static uint64_t g_image_base = 0x400000ULL;
 struct CommonEnt { const char *name; size_t align, size, off; };
 typedef struct CommonEnt CommonEnt;
+void link_set_image_base(uint64_t base) {
+    g_image_base = base ? base : 0x400000ULL;
+}
+uint64_t link_image_base(void) {
+    return g_image_base;
+}
 static int reloc_is_tls_gd(uint32_t t) {
     return t == 19;
 }
@@ -732,6 +832,15 @@ Buffer debug_frame;
                 emit_module_dbg_func_end(
                     &dbg, fi, mod_text_off[i] + f->end_pc,
                     mod_text_off[i] + f->prologue_end_pc);
+                if (f->after_push_rbp_pc > f->start_pc ||
+                    f->after_mov_rbp_pc > f->start_pc) {
+                    emit_module_dbg_func_frame(
+                        &dbg, fi,
+                        mod_text_off[i] + f->after_push_rbp_pc,
+                        mod_text_off[i] + f->after_mov_rbp_pc);
+                    if (f->frame_size)
+                        dbg.dbg_funcs[fi].frame_size = f->frame_size;
+                }
                 for (size_t k = 0; k < f->num_vars; k++) {
                     emit_module_add_dbg_var(&dbg, fi, &f->vars[k]);
                     DebugVar *dv = &dbg.dbg_funcs[fi].vars[
@@ -1200,6 +1309,37 @@ void emit_link(EmitModule **mods, size_t n, const char *path,
                                   skip_libsystem, ((void*)0));
         if (rc != 0) runtime.exit(1);
         if (macho_codesign(path) != 0) runtime.exit(1);
+        return;
+    }
+    if (target_current()->objfmt == TARGET_OBJFMT_PE) {
+        EmitModule **extra = ((void*)0);
+        size_t nextra = 0;
+        PeImport *imps = ((void*)0);
+        size_t nimps = 0;
+        if (pe_pull_libraries(mods, n, needed_in, num_needed_in,
+                              lib_paths, num_lib_paths,
+                              &extra, &nextra, &imps, &nimps) != 0)
+            runtime.exit(1);
+        EmitModule **all = mods;
+        if (nextra) {
+            all = xmalloc((n + nextra) * sizeof(EmitModule *));
+            runtime.memcpy(all, mods, n * sizeof(*all));
+            runtime.memcpy(all + n, extra, nextra * sizeof(*all));
+        }
+        PeLinkOpt opt;
+        runtime.memset(&opt, 0, sizeof opt);
+        opt.shared = is_shared;
+        opt.imports = imps;
+        opt.nimports = nimps;
+        int rc = pe_link_ex(all, n + nextra, path, &opt);
+        for (size_t i = 0; i < nextra; i++) {
+            emit_module_free(extra[i]);
+            runtime.free(extra[i]);
+        }
+        runtime.free(extra);
+        pe_imports_free(imps, nimps);
+        if (all != mods) runtime.free(all);
+        if (rc != 0) runtime.exit(1);
         return;
     }
 Buffer text;
@@ -1946,7 +2086,7 @@ size_t mj;
     size_t hdr_size = 64 + 56 * phnum_max;
     size_t start_offset = hdr_size;
     size_t text_offset = start_offset + start_size;
-    uint64_t base = is_shared ? 0 : 0x400000;
+    uint64_t base = is_shared ? 0 : g_image_base;
     uint64_t code_vaddr = base + text_offset;
     {
         size_t ro_va = (size_t)(code_vaddr + text.len);

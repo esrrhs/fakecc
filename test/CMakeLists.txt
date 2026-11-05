@@ -118,6 +118,19 @@ add_executable(test_link unit/test_link.c)
 target_link_libraries(test_link PRIVATE fakecc_core test_framework)
 add_test(NAME test_link COMMAND test_link)
 
+add_executable(test_link_kernel unit/test_link_kernel.c)
+target_link_libraries(test_link_kernel PRIVATE fakecc_core test_framework)
+add_test(NAME test_link_kernel COMMAND test_link_kernel)
+
+add_executable(test_ldscript unit/test_ldscript.c)
+target_link_libraries(test_ldscript PRIVATE fakecc_core test_framework)
+add_test(NAME test_ldscript COMMAND test_ldscript)
+
+
+add_executable(test_as_s unit/test_as_s.c)
+target_link_libraries(test_as_s PRIVATE fakecc_core test_framework)
+add_test(NAME test_as_s COMMAND test_as_s)
+
 add_executable(test_pkg unit/test_pkg.c)
 target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)
 add_test(NAME test_pkg COMMAND test_pkg)

@@ -31,7 +31,15 @@ case "$(uname -s 2>/dev/null)" in
     MSYS*|MINGW*|CYGWIN*) OUT_NAME=fakecc.exe ;;
 esac
 # Derived from src/, not listed here — see build_bootstrap.sh for why.
-MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | tr '\n' ' ')
+# hoststub.c and macho.c are mutually exclusive (CMake FAKECC_NO_MACHO).
+# Linking both makes the Mach-O/PE linker report duplicate macho_text_offset.
+if [ "${FAKECC_NO_MACHO:-}" = "1" ] || [ "${FAKECC_NO_MACHO:-}" = "ON" ]; then
+    _drop=macho
+else
+    _drop=hoststub
+fi
+MODULES=$(cd "$ROOT/src" && LC_ALL=C ls *.c | sed 's/\.c$//' | grep -v "^${_drop}$" | tr '\n' ' ')
+unset _drop
 [ -n "$MODULES" ] || { echo "no sources found in $ROOT/src" >&2; exit 1; }
 
 [ -x "$STAGE0" ] || { echo "no Stage 0 compiler at $STAGE0" >&2; exit 1; }
