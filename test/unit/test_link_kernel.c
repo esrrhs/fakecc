@@ -189,8 +189,82 @@ static void test_kernel_multiboot_shape(void) {
     (void)lo_filesz;
 }
 
+
+/* Stress path that would fail under the old objs[40] / 768 KiB arena. */
+static void test_kernel_capacity_stress(void) {
+    const char *boot_asm = TMP_PATH("fakecc_kcap_boot.asm");
+    const char *kern_asm = TMP_PATH("fakecc_kcap_kern.asm");
+    const char *boot_o = TMP_PATH("fakecc_kcap_boot.o");
+    const char *kern_o = TMP_PATH("fakecc_kcap_kern.o");
+    const char *blob_asm = TMP_PATH("fakecc_kcap_blob.asm");
+    const char *blob_o = TMP_PATH("fakecc_kcap_blob.o");
+    const char *out = TMP_PATH("fakecc_kcap_out.elf");
+    const char *paths[96];
+    int npaths = 0;
+    int i;
+
+    T_ASSERT(write_file(boot_asm,
+        "section .multiboot\n"
+        "dd 0x1BADB002\n"
+        "dd 0\n"
+        "dd -(0x1BADB002)\n"
+        "section .boot.text\n"
+        "global _start\n"
+        "_start:\n"
+        "    ret\n"));
+    T_ASSERT(write_file(kern_asm,
+        "section .text\n"
+        "global kmain\n"
+        "kmain:\n"
+        "    ret\n"
+        "section .data\n"
+        "global marker\n"
+        "marker:\n"
+        "    dq 0\n"));
+    /* ~900 KiB PROGBITS — exceeds the old fixed 768 KiB object arena. */
+    T_ASSERT(write_file(blob_asm,
+        "section .rodata\n"
+        "global bigblob\n"
+        "bigblob:\n"
+        "times 900*1024 db 0xA5\n"));
+
+    {
+        char *av1[] = { "nasm", "-f", "elf64", (char *)boot_asm, "-o", (char *)boot_o, NULL };
+        char *av2[] = { "nasm", "-f", "elf64", (char *)kern_asm, "-o", (char *)kern_o, NULL };
+        char *av3[] = { "nasm", "-f", "elf64", (char *)blob_asm, "-o", (char *)blob_o, NULL };
+        if (!run_cmd(av1) || !run_cmd(av2) || !run_cmd(av3)) {
+            printf("  SKIP test_kernel_capacity_stress (nasm failed)\n");
+            return;
+        }
+    }
+
+    paths[npaths++] = boot_o;
+    /* 50 copies of kern.o: exceeds legacy objs[40] slot limit. */
+    for (i = 0; i < 50; i++)
+        paths[npaths++] = kern_o;
+    paths[npaths++] = blob_o;
+
+    T_ASSERT_EQ_INT(link_kernel_multiboot(paths, (size_t)npaths, out), 0);
+
+    size_t n = 0;
+    unsigned char *b = slurp(out, &n);
+    T_ASSERT(n > 0x1000);
+    T_ASSERT(b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F');
+    T_ASSERT_EQ_INT((int)b[4], 1);
+    free(b);
+
+    unlink(out);
+    unlink(boot_o);
+    unlink(kern_o);
+    unlink(blob_o);
+    unlink(boot_asm);
+    unlink(kern_asm);
+    unlink(blob_asm);
+}
+
 int main(void) {
     target_set_current(target_x86_64_linux());
     test_kernel_multiboot_shape();
+    test_kernel_capacity_stress();
     return t_finalize();
 }

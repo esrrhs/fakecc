@@ -548,6 +548,46 @@ static void test_desc_isr_and_helpers(void) {
     emit_module_free(&em);
 }
 
+
+static void test_gs_fs_abs_mem(void) {
+    /* fakeos sysentry needs %gs:disp; must match GNU as --64, not 8E sreg mov. */
+    static const char src[] =
+        "    .text\n"
+        "    .globl gs_roundtrip\n"
+        "gs_roundtrip:\n"
+        "    movq %rdi, %gs:8\n"
+        "    movq %gs:8, %rax\n"
+        "    movq %rsi, %fs:0\n"
+        "    movq %fs:0, %rcx\n"
+        "    ret\n";
+    EmitModule em;
+    emit_module_init(&em);
+    T_ASSERT_EQ_INT(assemble_s_file(src, "gs_roundtrip.S", &em), 0);
+    T_ASSERT(has_sym(&em, "gs_roundtrip"));
+    /* Expected (as --64):
+     *   65 48 89 3c 25 08 00 00 00   movq %rdi,%gs:0x8
+     *   65 48 8b 04 25 08 00 00 00   movq %gs:0x8,%rax
+     *   64 48 89 34 25 00 00 00 00   movq %rsi,%fs:0x0
+     *   64 48 8b 0c 25 00 00 00 00   movq %fs:0x0,%rcx
+     *   c3                           ret
+     */
+    static const unsigned char expect[] = {
+        0x65, 0x48, 0x89, 0x3c, 0x25, 0x08, 0x00, 0x00, 0x00,
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00,
+        0x64, 0x48, 0x89, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00,
+        0x64, 0x48, 0x8b, 0x0c, 0x25, 0x00, 0x00, 0x00, 0x00,
+        0xc3
+    };
+    T_ASSERT_EQ_INT((int)em.text.len, (int)sizeof(expect));
+    for (size_t i = 0; i < sizeof(expect); i++) {
+        T_ASSERT_EQ_INT((int)(unsigned char)em.text.data[i], (int)expect[i]);
+    }
+    /* Must not encode as bare sreg mov (0x8E). */
+    for (size_t i = 0; i < em.text.len; i++)
+        T_ASSERT((unsigned char)em.text.data[i] != 0x8E);
+    emit_module_free(&em);
+}
+
 static void test_byte_in_text_order(void) {
     /* .byte mid-function must stay after preceding insns (not prepended). */
     static const char src[] =
@@ -582,6 +622,7 @@ int main(void) {
     test_byte_in_text_sysret();
     test_sysentry_trampolines();
     test_desc_isr_and_helpers();
+    test_gs_fs_abs_mem();
     test_byte_in_text_order();
     return t_finalize();
 }
