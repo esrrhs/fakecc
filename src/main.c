@@ -2,6 +2,7 @@
 #include "fakecc/common.h"
 #include "fakecc/emit.h"
 #include "fakecc/iasm.h"
+#include "fakecc/as_nasm.h"
 #include "fakecc/ir.h"
 #include "fakecc/ldscript.h"
 #include "fakecc/lexer.h"
@@ -109,7 +110,10 @@ static void usage(void) {
             "              [-T script|--script=path]\n"
             "              [-mavx|-mno-avx] [-mavx512f|-mno-avx512f]\n"
             "              [-nostdlib] [-nodefaultlibs]\n"
-            "              [-LDIR]... [-lLIB]... <input.c|.S|.o...> -o <output>\n"
+            "              [-f bin|-f elf64] [-LDIR]... [-lLIB]...\n"
+            "              <input.c|.S|.asm|.o...> -o <output>\n"
+            "  -f bin          NASM-syntax .asm → flat binary (ORG/BITS; ap_tramp)\n"
+            "  -f elf64        NASM-syntax .asm → ET_REL (boot.asm mixed bits)\n"
             "  (default)       link builtin runtime/ (freestanding; no DT_NEEDED)\n"
             "  -shared         produce a shared library (.so, or a DLL on Windows)\n"
             "  -g              emit DWARF debug info (line numbers, variables);\n"
@@ -622,6 +626,7 @@ static void add_pkg_env_paths(PkgContext *ctx) {
 
 int main(int argc, char **argv) {
     int compile_only = 0;
+    int nasm_fmt = -1; /* -1 unset, 0=bin, 1=elf64 */
     int is_shared = 0;
     int nodefaultlibs = 0;
     int nostdlib = 0;
@@ -675,6 +680,20 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0) {
             compile_only = 1;
+        } else if (strcmp(argv[i], "-f") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "fakecc: -f needs an argument\n");
+                exit(1);
+            }
+            i++;
+            if (strcmp(argv[i], "bin") == 0) nasm_fmt = 0;
+            else if (strcmp(argv[i], "elf64") == 0) nasm_fmt = 1;
+            else {
+                fprintf(stderr, "fakecc: unsupported -f %s (use bin or elf64)\n", argv[i]);
+                exit(1);
+            }
+        } else if ((strcmp(argv[i], "-fbin") == 0) || (strcmp(argv[i], "-felf64") == 0)) {
+            nasm_fmt = (argv[i][2] == 'b') ? 0 : 1;
         } else if (strcmp(argv[i], "-shared") == 0) {
             is_shared = 1;
         } else if (strcmp(argv[i], "-nodefaultlibs") == 0) {
@@ -910,6 +929,27 @@ int main(int argc, char **argv) {
         g_tls_local_exec = 1;
     else
         g_tls_local_exec = 0;
+
+    /* NASM-syntax .asm: -f bin (flat) or -f elf64 / -c (ET_REL). */
+    if (ninputs == 1 && is_nasm_input(inputs[0]) &&
+        (nasm_fmt == 0 || nasm_fmt == 1 || compile_only)) {
+        if (!output_path) {
+            fprintf(stderr, "fakecc: -o is required for .asm assembly\n");
+            exit(1);
+        }
+        NasmFormat fmt = (nasm_fmt == 0) ? NASM_FMT_BIN : NASM_FMT_ELF64;
+        if (nasm_fmt < 0) fmt = NASM_FMT_ELF64; /* -c .asm defaults to elf64 */
+        char *src = read_file(inputs[0]);
+        if (assemble_nasm(src, inputs[0], fmt, output_path) != 0) {
+            free(src);
+            exit(1);
+        }
+        free(src);
+        free(inputs);
+        free(rt_dir);
+        pkg_ctx_free(&pkg);
+        return 0;
+    }
 
     if (compile_only) {
         if (ninputs != 1) {

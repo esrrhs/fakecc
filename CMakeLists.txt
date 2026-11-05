@@ -72,6 +72,7 @@ add_library(fakecc_core
     src/codegen.c
     src/iasm.c
     src/as_s.c
+    src/as_nasm.c
     src/cg64.c
     src/debug.c
     src/emit.c
