@@ -134,6 +134,8 @@ add_test(NAME test_as_s COMMAND test_as_s)
 add_executable(test_as_nasm unit/test_as_nasm.c)
 target_link_libraries(test_as_nasm PRIVATE fakecc_core test_framework)
 add_test(NAME test_as_nasm COMMAND test_as_nasm)
+# Fail fast if the assembler path hangs (Windows runner starvation).
+set_tests_properties(test_as_nasm PROPERTIES TIMEOUT 30)
 
 add_executable(test_pkg unit/test_pkg.c)
 target_link_libraries(test_pkg PRIVATE fakecc_core test_framework)

@@ -54,6 +54,33 @@ static void test_ap_tramp_snippet(void) {
     unlink(path);
 }
 
+static void test_times_dollar(void) {
+    /* Mirrors ap_tramp pad: times (N - ($ - $$)) db 0 */
+    static const char src[] =
+        "ORG 0\n"
+        "BITS 16\n"
+        "cli\n"
+        "cld\n"
+        "times (16 - ($ - $$)) db 0x90\n";
+    const char *path = "test_as_nasm_times.bin";
+    T_ASSERT_EQ_INT(assemble_nasm(src, "times.asm", NASM_FMT_BIN, path), 0);
+    unsigned char *buf = NULL; size_t n = 0;
+    T_ASSERT_EQ_INT(read_all(path, &buf, &n), 0);
+    T_ASSERT_EQ_INT((int)n, 16);
+    T_ASSERT_EQ_INT(buf[0], 0xFA);
+    T_ASSERT_EQ_INT(buf[1], 0xFC);
+    T_ASSERT_EQ_INT(buf[15], 0x90);
+    free(buf);
+    unlink(path);
+}
+
+static void test_times_cap(void) {
+    /* Must reject absurd times rather than OOM / hang the runner. */
+    static const char src[] = "ORG 0\nBITS 16\ntimes 0x7fffffff db 0\n";
+    T_ASSERT(assemble_nasm(src, "huge.asm", NASM_FMT_BIN, "test_as_nasm_huge.bin") != 0);
+    unlink("test_as_nasm_huge.bin");
+}
+
 static void test_is_nasm_input(void) {
     T_ASSERT(is_nasm_input("boot.asm"));
     T_ASSERT(is_nasm_input("x.nasm"));
@@ -64,6 +91,8 @@ static void test_is_nasm_input(void) {
 int main(void) {
     test_is_nasm_input();
     test_ap_tramp_snippet();
+    test_times_dollar();
+    test_times_cap();
     printf("test_as_nasm: PASS\n");
     return 0;
 }

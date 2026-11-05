@@ -161,7 +161,8 @@ static void cur_eb(As *as, uint8_t v) {
     eb(&s->bytes, v);
 }
 static void do_align(As *as, int a, int use_nop) {
-    if (a <= 1) return;
+    /* Reject non-positive / absurd alignments (negative int → huge size_t pad). */
+    if (a <= 1 || a > (1 << 20)) return;
     Sect *s = cur(as);
     if (s->align < a) s->align = a;
     size_t off = cur_off(as);
@@ -1073,6 +1074,11 @@ static int process_line(As *as, char *line) {
             if (!strcmp(mn,"times")) {
                 p=skip_ws(p); int64_t cnt; int sy;
                 if (!eval_ex(as,&p,&cnt,&sy,as->pass==1)){free(mn);return 0;}
+                /* Cap to avoid OOM / runner starvation on bad exprs. */
+                if (cnt < 0) cnt = 0;
+                if (cnt > 16*1024*1024) {
+                    as_err(as,"times count too large"); free(mn); return 0;
+                }
                 p=skip_ws(p);
                 /* body: usually `db 0` */
                 char body[256];
@@ -1104,6 +1110,8 @@ static int process_line(As *as, char *line) {
                 free(mn);
                 p=skip_ws(p); int64_t n; int sy;
                 if (!eval_ex(as,&p,&n,&sy,1)) return 0;
+                if (n < 0) n = 0;
+                if (n > 16*1024*1024) { as_err(as,"res* count too large"); return 0; }
                 Sect *s=cur(as);
                 if (!s->nobits) {
                     for (int64_t i=0;i<n*sz;i++) cur_eb(as,0);
@@ -1448,16 +1456,23 @@ static int run_assemble(As *as, const char *src) {
 
 int is_nasm_input(const char *path) {
     size_t n=strlen(path);
-    return (n>=4 && (!strcmp(path+n-4,".asm") || !strcmp(path+n-5,".nasm")));
+    if (n >= 5 && !strcmp(path + n - 5, ".nasm")) return 1;
+    if (n >= 4 && !strcmp(path + n - 4, ".asm")) return 1;
+    return 0;
 }
 
 int assemble_nasm(const char *src, const char *filename, NasmFormat fmt, const char *out_path) {
-    As as;
-    memset(&as,0,sizeof as);
-    as.fmt=fmt; as.filename=filename; as.bits=16; as.cur_sect=-1;
-    if (run_assemble(&as, src) != 0) return -1;
-    int rc = (fmt==NASM_FMT_BIN) ? write_bin(&as,out_path) : write_elf64(&as,out_path);
-    for (int i=0;i<as.nsects;i++) { buffer_free(&as.sects[i].bytes); free(as.sects[i].name); }
-    for (int i=0;i<as.nsyms;i++) { free(as.syms[i].name); free(as.syms[i].equ_expr); }
+    /* As is ~190KB — heap-allocate so Windows' 1MB default stack (and ASan
+     * frames) are not blown by a single assembler invocation. */
+    As *as = (As *)calloc(1, sizeof(As));
+    if (!as) return -1;
+    as->fmt=fmt; as->filename=filename; as->bits=16; as->cur_sect=-1;
+    int rc = -1;
+    if (run_assemble(as, src) != 0) goto out;
+    rc = (fmt==NASM_FMT_BIN) ? write_bin(as,out_path) : write_elf64(as,out_path);
+out:
+    for (int i=0;i<as->nsects;i++) { buffer_free(&as->sects[i].bytes); free(as->sects[i].name); }
+    for (int i=0;i<as->nsyms;i++) { free(as->syms[i].name); free(as->syms[i].equ_expr); }
+    free(as);
     return rc;
 }
