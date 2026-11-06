@@ -650,6 +650,42 @@ static void emit_mov_mr(Buffer *b, int base, int64_t disp, int src, int w) {
     }
     modrm_mem(b, src, base, disp);
 }
+static void emit_abs_disp32(Buffer *b, int reg) {
+    modrm(b, 0, reg, 4);
+    eb(b, 0x25);
+}
+static void emit_seg_override(Buffer *b, int sreg) {
+    if (sreg == 4) eb(b, 0x64);
+    else if (sreg == 5) eb(b, 0x65);
+}
+static void emit_mov_seg_abs_load(Buffer *b, int dst, int sreg, int64_t disp, int w) {
+    emit_seg_override(b, sreg);
+    if (w == 1) {
+        rex(b, 0, dst, 0, 0); eb(b, 0x8A);
+    } else if (w == 2) {
+        eb(b, 0x66); rex(b, 0, dst, 0, 0); eb(b, 0x8B);
+    } else if (w == 4) {
+        rex(b, 0, dst, 0, 0); eb(b, 0x8B);
+    } else {
+        rex(b, 1, dst, 0, 0); eb(b, 0x8B);
+    }
+    emit_abs_disp32(b, dst);
+    e32(b, (int32_t)disp);
+}
+static void emit_mov_seg_abs_store(Buffer *b, int src, int sreg, int64_t disp, int w) {
+    emit_seg_override(b, sreg);
+    if (w == 1) {
+        rex(b, 0, src, 0, 0); eb(b, 0x88);
+    } else if (w == 2) {
+        eb(b, 0x66); rex(b, 0, src, 0, 0); eb(b, 0x89);
+    } else if (w == 4) {
+        rex(b, 0, src, 0, 0); eb(b, 0x89);
+    } else {
+        rex(b, 1, src, 0, 0); eb(b, 0x89);
+    }
+    emit_abs_disp32(b, src);
+    e32(b, (int32_t)disp);
+}
 static int parse_operand(const char **pp, int *kind, int *reg, int64_t *imm,
                          char **sym, int *width) {
     const char *p = skip_ws(*pp);
@@ -711,6 +747,15 @@ not_mem:
         }
         int sr = parse_sreg_name(p, &xend);
         if (sr >= 0) {
+            const char *q = skip_ws(xend);
+            if (*q == ':') {
+                int64_t disp = 0;
+                q = skip_ws(q + 1);
+                if (!parse_imm(&q, &disp)) return 0;
+                *kind = 8; *reg = sr; *width = 8; *imm = disp;
+                *pp = q;
+                return 1;
+            }
             *kind = 7; *reg = sr; *width = 2;
             *pp = xend;
             return 1;
@@ -1122,6 +1167,12 @@ int load;
             eb(b, 0x0F); eb(b, load ? 0x20 : 0x22);
             modrm(b, 3, cr, gp);
             handled = 1;
+        } else if (k1 == 8 && k2 == 0) {
+            emit_mov_seg_abs_load(b, r2, r1, imm1, w);
+            handled = 1;
+        } else if (k1 == 0 && k2 == 8) {
+            emit_mov_seg_abs_store(b, r1, r2, imm2, w);
+            handled = 1;
         } else if (k1 == 0 && k2 == 7) {
             eb(b, 0x8E); modrm(b, 3, r2, r1);
             handled = 1;
@@ -1267,21 +1318,22 @@ int load;
             else modrm(b, 0, 7, r1);
             handled = 1;
         }
-    } else if (runtime.strcmp(mn, "movdqa") == 0) {
+    } else if (runtime.strcmp(mn, "movdqa") == 0 || runtime.strcmp(mn, "movdqu") == 0) {
+        uint8_t pref = (runtime.strcmp(mn, "movdqu") == 0) ? 0xF3 : 0x66;
         if (k1 == 5 && k2 == 2) {
-            eb(b, 0x66);
+            eb(b, pref);
             rex(b, 0, r1, 0, r2);
             eb(b, 0x0F); eb(b, 0x7F);
             modrm_mem(b, r1, r2, imm2);
             handled = 1;
         } else if (k1 == 2 && k2 == 5) {
-            eb(b, 0x66);
+            eb(b, pref);
             rex(b, 0, r2, 0, r1);
             eb(b, 0x0F); eb(b, 0x6F);
             modrm_mem(b, r2, r1, imm1);
             handled = 1;
         } else if (k1 == 5 && k2 == 5) {
-            eb(b, 0x66);
+            eb(b, pref);
             rex(b, 0, r2, 0, r1);
             eb(b, 0x0F); eb(b, 0x6F);
             modrm(b, 3, r2, r1);

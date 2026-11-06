@@ -3515,23 +3515,27 @@ static int is_const_init(const Expr *e, const SymTable *globals) {
     }
     return 0;
 }
-static int init_leaf_count(Type t) {
+static int init_leaf_count_d(Type t, int depth) {
+    if (depth > 64) return 1;
     if (t.kind == TY_ARRAY && t.elem_type) {
         if (t.length <= 0) return 0;
-        return t.length * init_leaf_count(*t.elem_type);
+        return t.length * init_leaf_count_d(*t.elem_type, depth + 1);
     }
     if (t.kind == TY_STRUCT) {
         const StructDef *sd = struct_registry_find_c(g_sema_structs, t.tag);
         if (!sd || sd->num_members == 0) return 1;
-        if (sd->is_union) return init_leaf_count(sd->members[0].type);
+        if (sd->is_union) return init_leaf_count_d(sd->members[0].type, depth + 1);
         int total = 0;
         for (int i = 0; i < sd->num_members; i++) {
             if (sd->members[i].bit_width == 0) continue;
-            total += init_leaf_count(sd->members[i].type);
+            total += init_leaf_count_d(sd->members[i].type, depth + 1);
         }
         return total;
     }
     return 1;
+}
+static int init_leaf_count(Type t) {
+    return init_leaf_count_d(t, 0);
 }
 static int init_elem_may_be_aggregate(const Expr *e) {
     switch (e->kind) {
