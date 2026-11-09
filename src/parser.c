@@ -986,6 +986,13 @@ static Type eval_expr_type(Parser *p, const Expr *e) {
     }
 }
 
+static Type wrap_vector(Type t, int vec_size) {
+    if (vec_size <= 0 || t.is_vector) return t;
+    Type vt = type_make_vector(t, vec_size);
+    type_free(&t);
+    return vt;
+}
+
 static Type finish_specifiers(Type t, int is_const, int is_volatile, int is_restrict, int is_complex, int vec_size, Parser *p) {
     if (fakecc_had_error()) return type_make_void();
     if (is_const) t.is_const = 1;
@@ -996,7 +1003,7 @@ static Type finish_specifiers(Type t, int is_const, int is_volatile, int is_rest
         if (t.kind == TY_INT || t.kind == TY_FLOAT) t.width = g_parsed_mode_size;
         g_parsed_mode_size = 0;
     }
-    if (vec_size > 0 && !t.is_vector) t = type_make_vector(t, vec_size);
+    t = wrap_vector(t, vec_size);
     return t;
 }
 
@@ -1832,7 +1839,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         if (base.kind == TY_INT || base.kind == TY_FLOAT) base.width = g_parsed_mode_size;
         g_parsed_mode_size = 0;
     }
-    if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
+    base = wrap_vector(base, pre_vec);
     enum { MAX_PTRS = 8 };
     int ptr_const[MAX_PTRS], ptr_volatile[MAX_PTRS], ptr_restrict[MAX_PTRS];
     int ptrs = 0;
@@ -1842,7 +1849,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             if (base.kind == TY_INT || base.kind == TY_FLOAT) base.width = g_parsed_mode_size;
             g_parsed_mode_size = 0;
         }
-        if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
+        base = wrap_vector(base, pre_vec);
         if (peek(p)->kind != TK_STAR) break;
         advance(p);
         int c = 0, v = 0, r = 0;
@@ -1867,7 +1874,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         if (base.kind == TY_INT || base.kind == TY_FLOAT) base.width = g_parsed_mode_size;
         g_parsed_mode_size = 0;
     }
-    if (pre_vec > 0 && !base.is_vector) base = type_make_vector(base, pre_vec);
+    base = wrap_vector(base, pre_vec);
 
     Type t;
     if (peek(p)->kind == TK_LPAREN && (p->pos + 1 < p->tokens->len &&
@@ -1951,7 +1958,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
             g_parsed_mode_size = 0;
         }
         t = base;
-        if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
+        t = wrap_vector(t, attr_vec);
         /* Apply prefix pointers FIRST (they wrap the base type, innermost).
          * `int *rows[2]` → ptr(int) then array(2, ptr(int)).  Applying them
          * after the array (at function scope) would wrongly yield
@@ -2052,7 +2059,7 @@ static Type parse_declarator(Parser *p, Type base, char **name_out) {
         if (t.kind == TY_INT || t.kind == TY_FLOAT) t.width = g_parsed_mode_size;
         g_parsed_mode_size = 0;
     }
-    if (attr_vec > 0 && !t.is_vector) t = type_make_vector(t, attr_vec);
+    t = wrap_vector(t, attr_vec);
     return t;
 }
 
@@ -4902,11 +4909,7 @@ static Stmt parse_typedef_stmt(Parser *p) {
         }
         int attr_align = 0, attr_packed = 0, attr_sso = 0, attr_vec = 0;
         while (parse_attribute(p, &attr_align, &attr_packed, &attr_sso, &attr_vec, NULL)) {}
-        if (attr_vec > 0 && !ty.is_vector) {
-            Type vt = type_make_vector(ty, attr_vec);
-            type_free(&ty);
-            ty = vt;
-        }
+        ty = wrap_vector(ty, attr_vec);
         TypedefEntry *exist = typedef_registry_get(&p->tu->typedefs, decl_name);
         if (exist) {
             size_t exist_idx = (size_t)(exist - p->tu->typedefs.data);

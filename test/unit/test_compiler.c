@@ -246,6 +246,22 @@ static void test_extern_redecl_nonconst_init_no_uaf(void) {
     remove(out);
 }
 
+/* Regression: vector_size on a function or complex declarator type in a typedef
+ * used to leave aliased pointer fields on the vector type, which were freed by
+ * type_free on the old type, then accessed again on TU cleanup (fuzz_compile
+ * ASan heap-use-after-free). */
+static void test_vector_typedef_uaf(void) {
+    const char *out = TMP_DIR PATH_SEP "test_compiler_vec_uaf.o";
+    const char *crash =
+        "package main;\n"
+        "typedef long (long)g __attribute__((vector_size(16)));\n"
+        "syntax error here;\n";
+    fakecc_set_quiet(1);
+    T_ASSERT(fakecc_compile_string_to_obj(crash, out, NULL) != 0);
+    fakecc_set_quiet(0);
+    remove(out);
+}
+
 int main(void) {
     /* The high-level API cases below assert ELF output; pin the x86-64
      * backend until the arm64-macos backend lands. */
@@ -259,5 +275,6 @@ int main(void) {
     test_deep_add_chain();
     test_enum_nested_realloc_no_uaf();
     test_extern_redecl_nonconst_init_no_uaf();
+    test_vector_typedef_uaf();
     return t_finalize();
 }

@@ -849,6 +849,15 @@ Type type_make_vector(Type elem, long long vec_size) {
     Type t = elem;
     t.is_vector = 1;
     t.width = vec_size;
+    t.pointee = ((void*)0);
+    t.elem_type = ((void*)0);
+    t.vla_dim = ((void*)0);
+    t.tag = ((void*)0);
+    t.func_ret = ((void*)0);
+    t.func_params = ((void*)0);
+    t.func_nparams = 0;
+    t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0;
     t.elem_type = runtime.malloc(sizeof(Type));
     if (!t.elem_type) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     *t.elem_type = type_clone(elem);

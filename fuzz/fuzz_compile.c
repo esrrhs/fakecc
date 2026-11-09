@@ -20,7 +20,7 @@
 /* fakecc leaks on most error paths and calls exit(1) when it cannot allocate;
  * neither is what this target looks for. */
 const char *__asan_default_options(void) {
-    return "detect_leaks=0";
+    return "detect_leaks=0:allocator_may_return_null=1";
 }
 
 /* Resolve a writable temp dir: TMPDIR, TEMP, TMP, else cwd.
