@@ -188,6 +188,15 @@ Type type_make_vector(Type elem, long long vec_size) {
     Type t = elem;
     t.is_vector = 1;
     t.width = vec_size;
+    t.pointee = NULL;
+    t.elem_type = NULL;
+    t.vla_dim = NULL;
+    t.tag = NULL;
+    t.func_ret = NULL;
+    t.func_params = NULL;
+    t.func_nparams = 0;
+    t.func_is_variadic = 0;
+    t.func_is_unprototyped = 0;
     t.elem_type = malloc(sizeof(Type));
     if (!t.elem_type) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     *t.elem_type = type_clone(elem);

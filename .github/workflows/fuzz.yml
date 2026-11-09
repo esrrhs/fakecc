@@ -118,7 +118,7 @@ jobs:
           # fuzzer exit (e.g. fakecc calling exit()) aborts before FUZZ_EXIT
           # / grep handling can treat "fuzz target exited" as non-fatal.
           set +e
-          ASAN_OPTIONS=detect_leaks=0 \
+          ASAN_OPTIONS="detect_leaks=0:allocator_may_return_null=1" \
           UBSAN_OPTIONS=print_stacktrace=1 \
           ./bin/${{ matrix.target }} \
             "$CORPUS" \
@@ -230,7 +230,7 @@ jobs:
           # fuzzer exit (e.g. fakecc calling exit()) aborts before FUZZ_EXIT
           # / grep handling can treat "fuzz target exited" as non-fatal.
           set +e
-          ASAN_OPTIONS=detect_leaks=0 \
+          ASAN_OPTIONS="detect_leaks=0:allocator_may_return_null=1" \
           UBSAN_OPTIONS=print_stacktrace=1 \
           "$FUZZ_BIN" \
             "$CORPUS" \
