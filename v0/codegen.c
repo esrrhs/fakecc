@@ -6922,6 +6922,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     st_idx = -1;
                 }
             }
+            if (st_gname && st_idx >= 0 && st->width != 1) continue;
             if (st->b < 0 || st->b >= nvals_f || ssa_def[st->b] < 0
                 || raw_uses[st->b] != 1 || !value_unique_def(fn, st->b))
                 continue;

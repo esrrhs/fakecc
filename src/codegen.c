@@ -6876,6 +6876,11 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     st_idx = -1;
                 }
             }
+            /* The indexed abs32 STORE_PTR emitter below only implements
+             * byte RMW. Do not remove a wider load/ALU/address tree unless
+             * there is a matching emitter: the generic store would otherwise
+             * consume dead (and potentially repurposed) register homes. */
+            if (st_gname && st_idx >= 0 && st->width != 1) continue;
             if (st->b < 0 || st->b >= nvals_f || ssa_def[st->b] < 0
                 || raw_uses[st->b] != 1 || !value_unique_def(fn, st->b))
                 continue;
