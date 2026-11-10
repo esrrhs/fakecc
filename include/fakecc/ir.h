@@ -420,6 +420,19 @@ int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
 
 
+
+/* IR_CALL.a is the result-slot pointer for INTEGER-register struct
+ * returns (direct_ret_slot: dst == -1, imm = 1 or 2 eightbytes) and
+ * for x87 struct returns (x87_pair).  Codegen writes the return
+ * registers through that pointer after the callee returns, so `a`
+ * is live across the call.  A dummy pinned 8-byte "keep" alloca is
+ * not required to express that liveness. */
+static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
+    if (!inst || inst->op != IR_CALL || inst->a < 0) return 0;
+    if (inst->x87_pair) return 1;
+    return inst->dst < 0 && inst->imm >= 1 && inst->imm <= 2;
+}
+
 /* True for IR_ADDO/SUBO/MULO — `c` is a second SSA def (overflow flag). */
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;

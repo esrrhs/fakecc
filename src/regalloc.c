@@ -152,6 +152,36 @@ static int value_is_ld(const IRFunction *fn, int v) {
     return fn->value_width[v] == 16;
 }
 
+/* Pinned IR_ALLOCA destinations already have a frame home assigned later
+ * via alloca_off.  IR_ALLOCA isel is a no-op and never reads or writes the
+ * RA color or spill slot; collect_callee_saved already ignores these
+ * homes.  Leaving them in the GP class still allocates unused spill slots
+ * and can steal caller-saved colors from real SSA temps. */
+static char *ra_pinned_alloca_skip;
+static int ra_pinned_alloca_nv;
+
+static void ra_set_pinned_alloca_skip(const IRFunction *fn) {
+    int nv = fn && fn->next_value_id > 0 ? fn->next_value_id : 0;
+    free(ra_pinned_alloca_skip);
+    ra_pinned_alloca_skip = NULL;
+    ra_pinned_alloca_nv = nv;
+    if (nv <= 0 || !fn) return;
+    ra_pinned_alloca_skip = xmalloc((size_t)nv);
+    memset(ra_pinned_alloca_skip, 0, (size_t)nv);
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *in = &fn->insts.data[i];
+        if (in->op == IR_ALLOCA && in->alloca_bytes > 0
+            && in->dst >= 0 && in->dst < nv)
+            ra_pinned_alloca_skip[in->dst] = 1;
+    }
+}
+
+static void ra_clear_pinned_alloca_skip(void) {
+    free(ra_pinned_alloca_skip);
+    ra_pinned_alloca_skip = NULL;
+    ra_pinned_alloca_nv = 0;
+}
+
 /* True if SSA value `v` belongs to the register class being allocated in
  * this run: GP (float_class 0) = non-float; SIMD (float_class 1) = float,
  * with width-16 long doubles excluded only when the target keeps them on a
@@ -159,6 +189,9 @@ static int value_is_ld(const IRFunction *fn, int v) {
  * leaves such values uncolored (REG_NONE) — their home is a stack slot. */
 static int value_in_class(const IRFunction *fn, int v, int float_class,
                           int exclude_16byte_ld) {
+    if (ra_pinned_alloca_skip && v >= 0 && v < ra_pinned_alloca_nv
+        && ra_pinned_alloca_skip[v])
+        return 0;
     if (float_class)
         return value_is_float_class(fn, v)
             && (!exclude_16byte_ld || !value_is_ld(fn, v));
@@ -734,6 +767,12 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
 
+            /* Result-slot pointer is used after return (RAX/RDX or fstpt). */
+            if (inst->op == IR_CALL && ir_call_ret_ptr_live_after(inst)
+                && inst->a < nv
+                && value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
+                bs_set(&live, inst->a);
+
             if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 BS_FOREACH(&live, over) {
                     if ((int)over != inst->dst && (int)over != inst->b &&
@@ -842,6 +881,13 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             /* LABEL/BR/DBG_VALUE carry no register operands. */
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
+
+            /* Keep the post-return dest pointer in the live set so it
+             * interferes across the call (same as a use after return). */
+            if (inst->op == IR_CALL && ir_call_ret_ptr_live_after(inst)
+                && inst->a < nv
+                && value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
+                bs_set(&live, inst->a);
 
             if (inst->dst >= 0 && inst->dst < nv &&
                 value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)
@@ -1329,6 +1375,8 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     int nv = fn->next_value_id;
     if (nv <= 0) return NULL;
 
+    ra_set_pinned_alloca_skip(fn);
+
     /* Short-circuit: if the function has no values of this class, don't
      * bother building a graph.  Keeps ra_xmm NULL for int-only code. */
     {
@@ -1336,11 +1384,17 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
         for (int v = 0; v < nv; v++) {
             if (value_in_class(fn, v, float_class, cls->exclude_16byte_ld)) { any = 1; break; }
         }
-        if (!any) return NULL;
+        if (!any) {
+            ra_clear_pinned_alloca_skip();
+            return NULL;
+        }
     }
 
     LiveInfo *liv = compute_liveness(fn);
-    if (!liv) return NULL;
+    if (!liv) {
+        ra_clear_pinned_alloca_skip();
+        return NULL;
+    }
 
     /* Build CFG (for spill-cost loop-depth heuristic AND CFG-aware liveness). */
     CFG cfg;
@@ -1407,6 +1461,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     liv_free(liv, nv);
     cfg_free(&cfg);
 
+    ra_clear_pinned_alloca_skip();
     return ra;
 }
 
