@@ -814,6 +814,31 @@ static void test_o0_scalar_locals_compact_frame(void) {
 }
 
 
+/* movq %reg, disp(%rbp): REX.W 89 /r with rm=rbp.  Used to prove
+ * INTEGER sret payloads land in a named local, not only in a spill. */
+static int fn_has_movq_reg_rbp(const EmitModule *em, const char *name, int reg) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    unsigned r = (unsigned)reg & 7;
+    int rex_r = (reg >= 8);
+    for (size_t i = 0; i + 3 < n; i++) {
+        unsigned char rex = b[i];
+        if ((rex & 0xF8) != 0x48) continue;
+        if (rex_r && !(rex & 4)) continue;
+        if (!rex_r && (rex & 4)) continue;
+        if (b[i + 1] != 0x89) continue;
+        unsigned char modrm = b[i + 2];
+        int mod = (modrm >> 6) & 3, rm = modrm & 7, ro = (modrm >> 3) & 7;
+        if (mod == 0 || mod == 3 || ro != (int)r) continue;
+        if (rm == 5) return 1;
+        if (rm == 4 && i + 3 < n) {
+            unsigned char sib = b[i + 3];
+            if ((sib & 7) == 5) return 1;
+        }
+    }
+    return 0;
+}
+
 /* A 16-byte INTEGER-class struct returned in rax/rdx and stored into
  * distinct destinations must not pin a dummy 8-byte "keep" alloca per
  * call site.  Those slots were store-only (never reloaded) and pushed
@@ -854,12 +879,47 @@ static void test_o0_struct_ret_named_local(void) {
         "}"
         "int main() { return (int)use_tmp(); }");
     T_ASSERT(find_sym(&em, "use_tmp") != NULL);
-    /* Named 16-byte t must sit in the frame (rax/rdx stored to [rbp+off]).
-     * A leftover even-rounded GP spill area may still make the prologue
-     * $0x20 rather than $0x10; a dummy keep slot would push it to $0x30. */
-    T_ASSERT(fn_has_sub_rsp_imm(&em, "use_tmp", 0x10)
-          || fn_has_sub_rsp_imm(&em, "use_tmp", 0x20));
+    /* Named 16-byte t sits in the frame; rax/rdx are stored to [rbp+off].
+     * A foldable INTEGER sret dest must not reserve a GP spill home, so
+     * the prologue is $0x10, not $0x20. */
+    T_ASSERT(fn_has_sub_rsp_imm(&em, "use_tmp", 0x10));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "use_tmp", 0x20));
     T_ASSERT(!fn_has_sub_rsp_imm(&em, "use_tmp", 0x30));
+    T_ASSERT(fn_has_movq_reg_rbp(&em, "use_tmp", 0)); /* rax */
+    T_ASSERT(fn_has_movq_reg_rbp(&em, "use_tmp", 2)); /* rdx */
+    emit_module_free(&em);
+}
+
+/* Independent named locals in separate switch cases: each INTEGER sret
+ * dest folds to [rbp+off], so RA must not reserve a spill home per site.
+ * Nine 16-byte locals plus the i32 selector fit in $0xa0; the previous
+ * 0x50 GP-spill reservation made the frame $0xf0. */
+static void test_o0_struct_ret_switch_no_spill(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef struct { int a; int b; long long c; } S;"
+        "S mk(long long x) { S s; s.a = (int)x; s.b = 0; s.c = x; return s; }"
+        "long long use_many(int k) {"
+        "  S a,b,c,d,e,f,g,h,i;"
+        "  switch (k) {"
+        "    case 0: a = mk(1); return a.c;"
+        "    case 1: b = mk(2); return b.c;"
+        "    case 2: c = mk(3); return c.c;"
+        "    case 3: d = mk(4); return d.c;"
+        "    case 4: e = mk(5); return e.c;"
+        "    case 5: f = mk(6); return f.c;"
+        "    case 6: g = mk(7); return g.c;"
+        "    case 7: h = mk(8); return h.c;"
+        "    default: i = mk(9); return i.c;"
+        "  }"
+        "}"
+        "int main() { return (int)use_many(3); }");
+    T_ASSERT(find_sym(&em, "use_many") != NULL);
+    T_ASSERT(fn_has_sub_rsp_imm(&em, "use_many", 0xa0));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "use_many", 0xf0));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "use_many", 0xe0));
+    T_ASSERT(fn_has_movq_reg_rbp(&em, "use_many", 0));
+    T_ASSERT(fn_has_movq_reg_rbp(&em, "use_many", 2));
     emit_module_free(&em);
 }
 
@@ -901,5 +961,6 @@ int main(void) {
     test_o0_scalar_locals_compact_frame();
     test_o0_struct_ret_no_keep_slot();
     test_o0_struct_ret_named_local();
+    test_o0_struct_ret_switch_no_spill();
     return t_finalize();
 }

@@ -215,6 +215,69 @@ static int def_op_is(const IRFunction *fn, const int *def, IRValue v, IROpcode o
     return fn->insts.data[def[v]].op == op;
 }
 
+/* Exactly one SSA definition (dst or overflow `c`). */
+static char *ra_build_unique_def(const IRFunction *fn) {
+    int nv = fn->next_value_id > 0 ? fn->next_value_id : 1;
+    unsigned char *cnt = xmalloc((size_t)nv);
+    memset(cnt, 0, (size_t)nv);
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *in = &fn->insts.data[i];
+        if (in->dst >= 0 && in->dst < nv && cnt[in->dst] < 2)
+            cnt[in->dst]++;
+        if (ir_op_with_overflow(in->op) && in->c >= 0 && in->c < nv
+            && cnt[in->c] < 2)
+            cnt[in->c]++;
+    }
+    char *unique = xmalloc((size_t)nv);
+    for (int i = 0; i < nv; i++)
+        unique[i] = (cnt[i] == 1);
+    free(cnt);
+    return unique;
+}
+
+/* Conservative subset of codegen's fold_ptr_off / call_integer_sret_folds:
+ * unique-def COPY* of &pinned_alloca or (&pinned_alloca)+const, with no
+ * runtime realignment (IR_ALLOCA.imm >= 32).  Those trees become a static
+ * [rbp+off] once alloca_off is assigned, so INTEGER-register sret stores
+ * need no register (or spill) live across the call.  Unpinned or
+ * dynamically realigned addresses, and every x87_pair dest, still need
+ * a post-return pointer in a register. */
+static int ra_ptr_folds_pinned_frame(const IRFunction *fn, const int *def,
+                                    const char *unique, IRValue v, int depth) {
+    if (depth > 8 || !fn || !def || !unique
+        || v < 0 || v >= fn->next_value_id || def[v] < 0)
+        return 0;
+    if (!unique[v]) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op == IR_COPY)
+        return ra_ptr_folds_pinned_frame(fn, def, unique, d->a, depth + 1);
+    if (d->op == IR_ADDR) {
+        IRValue slot = d->a;
+        if (slot < 0 || slot >= fn->next_value_id || def[slot] < 0) return 0;
+        const IRInst *al = &fn->insts.data[def[slot]];
+        if (al->op != IR_ALLOCA || al->alloca_bytes <= 0) return 0;
+        if (al->imm >= 32) return 0;
+        return 1;
+    }
+    if (d->op == IR_ADD) {
+        if (d->b >= 0 && def_op_is(fn, def, d->b, IR_CONST)
+            && !fn->insts.data[def[d->b]].is_float)
+            return ra_ptr_folds_pinned_frame(fn, def, unique, d->a, depth + 1);
+        if (d->a >= 0 && def_op_is(fn, def, d->a, IR_CONST)
+            && !fn->insts.data[def[d->a]].is_float)
+            return ra_ptr_folds_pinned_frame(fn, def, unique, d->b, depth + 1);
+    }
+    return 0;
+}
+
+/* When to keep IR_CALL.a in the live set across the call itself. */
+static int ra_call_ret_ptr_needs_live_after(const IRFunction *fn, const int *def,
+                                           const char *unique, const IRInst *inst) {
+    if (!ir_call_ret_ptr_live_after(inst)) return 0;
+    if (inst->x87_pair) return 1;
+    return !ra_ptr_folds_pinned_frame(fn, def, unique, inst->a, 0);
+}
+
 /* ADDR or (ADDR+const)+… — the bases fold_ptr_off would turn into [rbp+off]. */
 static int ra_is_stack_base(const IRFunction *fn, const int *def, IRValue v, int depth) {
     if (depth > 8 || v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
@@ -721,6 +784,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
     for (int v = 0; v < nv; v++) forbid_mask[v] = 0;
 
     int *ssa_def = ra_build_defs(fn);
+    char *unique_def = ra_build_unique_def(fn);
     /* ADDR/ALLOCA never need a callee-saved home. */
     if (!float_class && cls->nregs > 0) {
         uint32_t all = cls->nregs >= 32 ? 0xffffffffu
@@ -767,8 +831,10 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
 
-            /* Result-slot pointer is used after return (RAX/RDX or fstpt). */
-            if (inst->op == IR_CALL && ir_call_ret_ptr_live_after(inst)
+            /* Result-slot pointer is used after return (RAX/RDX or fstpt)
+             * unless INTEGER sret already folds to a static [rbp+off]. */
+            if (inst->op == IR_CALL
+                && ra_call_ret_ptr_needs_live_after(fn, ssa_def, unique_def, inst)
                 && inst->a < nv
                 && value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->a);
@@ -883,8 +949,10 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             inst->op == IR_DBG_VALUE) continue;
 
             /* Keep the post-return dest pointer in the live set so it
-             * interferes across the call (same as a use after return). */
-            if (inst->op == IR_CALL && ir_call_ret_ptr_live_after(inst)
+             * interferes across the call, except INTEGER sret dests that
+             * fold to [rbp+off] and never need a register after return. */
+            if (inst->op == IR_CALL
+                && ra_call_ret_ptr_needs_live_after(fn, ssa_def, unique_def, inst)
                 && inst->a < nv
                 && value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
                 bs_set(&live, inst->a);
@@ -1028,6 +1096,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
     }
     free(use_b); free(def_b); free(in_b); free(out_b);
     free(ssa_def);
+    free(unique_def);
 }
 
 
