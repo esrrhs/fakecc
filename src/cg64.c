@@ -366,16 +366,92 @@ typedef struct {
     size_t pc;    /* code offset of the marker      */
 } C64DbgObs;
 
+/* True when SSA `v` has exactly one defining instruction. */
+static int c64_unique_def(const C64 *c, IRValue v) {
+    if (!c || !c->fn || v < 0) return 0;
+    int n = 0;
+    for (size_t i = 0; i < c->fn->insts.len; i++) {
+        const IRInst *in = &c->fn->insts.data[i];
+        if (in->dst == v) n++;
+        if (ir_op_with_overflow(in->op) && in->c == v) n++;
+        if (n > 1) return 0;
+    }
+    return n == 1;
+}
+
+/* Unique-def &pinned_alloca (or ADDR+const / COPY of one) -> fp-relative
+ * offset and alignment.  Mirrors codegen.c fold_ptr_off so a pointer that
+ * never needs a register can still be rematerialized after a call. */
+static int c64_fold_ptr_off(const C64 *c, IRValue v, int *out_off,
+                            int *out_aln, int depth) {
+    if (depth > 8 || !c || !c->fn || !c->def || !c->alloca_off
+        || v < 0 || v >= c->fn->next_value_id)
+        return 0;
+    int di = c->def[v];
+    if (di < 0 || (size_t)di >= c->fn->insts.len) return 0;
+    const IRInst *d = &c->fn->insts.data[di];
+    int nv = c->fn->next_value_id;
+    if (d->op == IR_COPY && c64_unique_def(c, v))
+        return c64_fold_ptr_off(c, d->a, out_off, out_aln, depth + 1);
+    if (d->op == IR_ALLOCA && d->alloca_bytes > 0
+        && v < nv && c->alloca_off[v] != 0) {
+        *out_off = c->alloca_off[v];
+        if (out_aln) *out_aln = alloca_align_of(c, v, nv);
+        return 1;
+    }
+    if (d->op == IR_ADDR && d->a >= 0 && d->a < nv
+        && c->alloca_off[d->a] != 0) {
+        *out_off = c->alloca_off[d->a];
+        if (out_aln) *out_aln = alloca_align_of(c, d->a, nv);
+        return 1;
+    }
+    if (d->op == IR_ADD) {
+        int base_off = 0, base_aln = 0;
+        if (d->b >= 0 && d->b < nv && c->def[d->b] >= 0) {
+            const IRInst *imm = &c->fn->insts.data[c->def[d->b]];
+            if (imm->op == IR_CONST && !imm->is_float
+                && c64_fold_ptr_off(c, d->a, &base_off, &base_aln, depth + 1)) {
+                *out_off = base_off + (int)imm->imm;
+                if (out_aln) *out_aln = base_aln;
+                return 1;
+            }
+        }
+        if (d->a >= 0 && d->a < nv && c->def[d->a] >= 0) {
+            const IRInst *imm = &c->fn->insts.data[c->def[d->a]];
+            if (imm->op == IR_CONST && !imm->is_float
+                && c64_fold_ptr_off(c, d->b, &base_off, &base_aln, depth + 1)) {
+                *out_off = base_off + (int)imm->imm;
+                if (out_aln) *out_aln = base_aln;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* Where did register allocation put SSA value `v`?  Mirrors codegen.c's
  * value_home() for the arm64 register files.  DBG_LOC_NONE means the value
  * has no home -- its defining instruction was optimized away, so the source
- * variable is genuinely unavailable at that point. */
+ * variable is genuinely unavailable at that point.
+ *
+ * A unique-def ADDR of a pinned alloca is rematerialized as
+ * DBG_LOC_FBREG_VALUE so a debugger can print a pointer local that holds
+ * &local even when the ADDR dest was never written. */
 static void value_home64(C64 *c, int v, DebugLocKind *kind,
                          int *fbreg, int *dwarf_reg) {
     *kind = DBG_LOC_NONE;
     *fbreg = 0;
     *dwarf_reg = -1;
     if (v < 0) return;
+
+    {
+        int off = 0, aln = 0;
+        if (c64_fold_ptr_off(c, v, &off, &aln, 0) && off != 0) {
+            *kind = DBG_LOC_FBREG_VALUE;
+            *fbreg = off;
+            return;
+        }
+    }
 
     if (scalar_fp_val(c, v) || vec16_val(c, v)) {
         if (!c->ra_fp || v >= c->ra_fp->num_values) return;
@@ -505,6 +581,13 @@ static int load_op(C64 *c, IRValue v, int other) {
         emit_mov_imm_w(c->as, scratch, d->imm, vw(c, v) == 8);
         return scratch;
     }
+    {
+        int off = 0, aln = 0;
+        if (c64_fold_ptr_off(c, v, &off, &aln, 0) && off != 0) {
+            emit_fp_addr_aligned(c, scratch, off, aln);
+            return scratch;
+        }
+    }
     int r = home_reg(c, v);
     if (r >= 0) return r;
     frame_load(c, scratch, spill_off(c, v), 8, 1, 0);
@@ -512,9 +595,16 @@ static int load_op(C64 *c, IRValue v, int other) {
 }
 
 static int load_ptrv(C64 *c, IRValue v, int other) {
+    int scratch = (other == SCR0) ? SCR1 : SCR0;
+    {
+        int off = 0, aln = 0;
+        if (c64_fold_ptr_off(c, v, &off, &aln, 0) && off != 0) {
+            emit_fp_addr_aligned(c, scratch, off, aln);
+            return scratch;
+        }
+    }
     int r = home_reg(c, v);
     if (r >= 0) return r;
-    int scratch = (other == SCR0) ? SCR1 : SCR0;
     frame_load(c, scratch, spill_off(c, v), 8, 1, 0);
     return scratch;
 }

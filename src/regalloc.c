@@ -235,13 +235,14 @@ static char *ra_build_unique_def(const IRFunction *fn) {
     return unique;
 }
 
-/* Conservative subset of codegen's fold_ptr_off / call_integer_sret_folds:
- * unique-def COPY* of &pinned_alloca or (&pinned_alloca)+const, with no
- * runtime realignment (IR_ALLOCA.imm >= 32).  Those trees become a static
- * [rbp+off] once alloca_off is assigned, so INTEGER-register sret stores
- * need no register (or spill) live across the call.  Unpinned or
- * dynamically realigned addresses, and every x87_pair dest, still need
- * a post-return pointer in a register. */
+/* Conservative subset of the x86-64 backend's fold_ptr_off /
+ * call_integer_sret_folds: unique-def COPY* of &pinned_alloca or
+ * (&pinned_alloca)+const, with no runtime realignment (IR_ALLOCA.imm
+ * >= 32).  On x86-64 those trees become a static [rbp+off], so
+ * INTEGER-register sret stores need no register (or spill) live across
+ * the call.  Unpinned or dynamically realigned addresses, every
+ * x87_pair dest, and every non-x86-64 backend (which reloads CALL.a
+ * through a register after return) still need a post-return pointer. */
 static int ra_ptr_folds_pinned_frame(const IRFunction *fn, const int *def,
                                     const char *unique, IRValue v, int depth) {
     if (depth > 8 || !fn || !def || !unique
@@ -270,11 +271,16 @@ static int ra_ptr_folds_pinned_frame(const IRFunction *fn, const int *def,
     return 0;
 }
 
-/* When to keep IR_CALL.a in the live set across the call itself. */
+/* When to keep IR_CALL.a in the live set across the call itself.
+ * Skipping liveness for a foldable pinned-frame dest is only sound on
+ * x86-64, where isel stores RAX/RDX through fold_ptr_off.  The arm64
+ * backend reloads the pointer with load_ptrv after the call, so a
+ * caller-saved home (or a never-written spill) would be stale. */
 static int ra_call_ret_ptr_needs_live_after(const IRFunction *fn, const int *def,
                                            const char *unique, const IRInst *inst) {
     if (!ir_call_ret_ptr_live_after(inst)) return 0;
     if (inst->x87_pair) return 1;
+    if (target_current()->arch != TARGET_ARCH_X86_64) return 1;
     return !ra_ptr_folds_pinned_frame(fn, def, unique, inst->a, 0);
 }
 

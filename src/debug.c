@@ -839,6 +839,9 @@ static void emit_loc_bytes(Buffer *expr, DebugLocKind kind, int rbp_offset,
         if (dwarf_reg >= 0 && dwarf_reg <= 31)
             d_u8(expr, (uint8_t)(DW_OP_reg0 + dwarf_reg));
         else { d_u8(expr, DW_OP_regx); d_uleb(expr, (uint64_t)dwarf_reg); }
+    } else if (kind == DBG_LOC_FBREG_VALUE) {
+        d_u8(expr, DW_OP_fbreg); d_sleb(expr, rbp_offset);
+        d_u8(expr, DW_OP_stack_value);
     } else if (kind == DBG_LOC_ENTRY_VALUE) {
         /* DW_OP_entry_value <len> DW_OP_regN ; DW_OP_stack_value */
         Buffer inner; buffer_init(&inner);

@@ -506,6 +506,49 @@ static void test_arm64_spill_pressure(void) {
     inst_array_data_free(&fn.insts);
 }
 
+/* INTEGER-register struct return: CALL.a is a unique &pinned_alloca.
+ * x86-64 may fold that dest to [rbp+off] and skip a live-after home;
+ * arm64 reloads the pointer after the call, so the value must have a
+ * spill (ADDR forbids callee-saved colors and the call clobbers the
+ * rest). */
+static void test_sret_dest_live_after_arm64_not_x86_fold(void) {
+    /* Shared IR: v0 = alloca 16; v1 = &v0; call writes 2 eightbytes
+     * through v1 after return. */
+    IRFunction fn;
+    RAResult *ra;
+
+    fn = fn_empty_init(2);
+    push_inst(&fn.insts, IR_ALLOCA, 0, -1, -1, 0);
+    fn.insts.data[0].alloca_bytes = 16;
+    push_inst(&fn.insts, IR_ADDR, 1, 0, -1, 0);
+    push_call(&fn.insts, -1, "mk");
+    fn.insts.data[fn.insts.len - 1].a = 1;
+    fn.insts.data[fn.insts.len - 1].imm = 2;
+    push_inst(&fn.insts, IR_RETURN, -1, -1, -1, 0);
+
+    target_set_current(target_arm64_macos());
+    ra = reg_alloc(&fn);
+    T_ASSERT(ra != NULL);
+    /* Pinned alloca itself is not allocated. */
+    T_ASSERT(ra->reg[0] < 0);
+    /* Dest pointer must be kept across the call. */
+    T_ASSERT(ra->reg[1] < 0);
+    T_ASSERT(ra->spill_slot[1] >= 0);
+    ra_result_free(ra);
+
+    target_set_current(target_x86_64_linux());
+    ra = reg_alloc(&fn);
+    T_ASSERT(ra != NULL);
+    T_ASSERT(ra->reg[0] < 0);
+    /* Foldable dest: no spill reserved for the pointer.  A caller-saved
+     * color is fine (the post-return store folds to [rbp+off]); a spill
+     * would be the regression this optimization removed. */
+    if (ra->reg[1] < 0)
+        T_ASSERT(ra->spill_slot[1] < 0);
+    ra_result_free(ra);
+    inst_array_data_free(&fn.insts);
+}
+
 /* ---- main ---- */
 
 int main(void) {
@@ -528,6 +571,7 @@ int main(void) {
     test_arm64_live_across_call();
     test_x86_live_across_call();
     test_arm64_spill_pressure();
+    test_sret_dest_live_after_arm64_not_x86_fold();
 
     target_set_current(saved);
     return t_finalize();

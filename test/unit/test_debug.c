@@ -521,6 +521,99 @@ static void test_address_taken_stays_in_memory(void) {
     emit_module_free(&em);
 }
 
+/* A pointer local that holds &local must be printable at the return.
+ * At -O0 it lives in its own stack slot (the slot is stored).  At -O1
+ * it is promoted to an ADDR SSA that isel folds into [rbp+off] and may
+ * never write, so the location is the rematerialized frame address
+ * (DW_OP_fbreg + DW_OP_stack_value), not a stale register or spill. */
+static void test_pointer_to_local_location(void) {
+    const char *src =
+        "package main;\n"
+        "int main(void) { int v; int *p; v = 42; p = &v; return *p; }\n";
+
+    {
+        EmitModule em;
+        compile_module(src, 0, 1, &em);
+        const DebugFunc *f = find_func(&em, "main");
+        T_ASSERT(f != NULL);
+        const DebugVar *v = find_var(f, "v");
+        const DebugVar *p = find_var(f, "p");
+        T_ASSERT(v != NULL && p != NULL);
+        T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)v->loc_kind);
+        T_ASSERT_EQ_INT(0, (int)v->num_ranges);
+        T_ASSERT(v->rbp_offset < 0);
+        /* Own slot holding the pointer, not a rematerialized value. */
+        T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)p->loc_kind);
+        T_ASSERT_EQ_INT(0, (int)p->num_ranges);
+        T_ASSERT(p->rbp_offset < 0);
+        T_ASSERT(p->rbp_offset != v->rbp_offset);
+        emit_module_free(&em);
+    }
+
+    {
+        EmitModule em;
+        compile_module(src, 1, 1, &em);
+        const DebugFunc *f = find_func(&em, "main");
+        T_ASSERT(f != NULL);
+        const DebugVar *v = find_var(f, "v");
+        const DebugVar *p = find_var(f, "p");
+        T_ASSERT(v != NULL && p != NULL);
+        T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)v->loc_kind);
+        T_ASSERT(v->rbp_offset < 0);
+        T_ASSERT(p->num_ranges > 0);
+        int saw = 0;
+        for (size_t i = 0; i < p->num_ranges; i++) {
+            const DebugLocRange *r = &p->ranges[i];
+            T_ASSERT(r->pc_end > r->pc_start);
+            T_ASSERT_EQ_INT(DBG_LOC_FBREG_VALUE, (int)r->loc_kind);
+            T_ASSERT_EQ_INT(v->rbp_offset, r->rbp_offset);
+            saw = 1;
+        }
+        T_ASSERT(saw);
+        emit_module_free(&em);
+    }
+}
+
+/* Same contract for a pointer to a named struct local (q = &s). */
+static void test_pointer_to_struct_local_location(void) {
+    const char *src =
+        "package main;\n"
+        "struct S { int x; int y; };\n"
+        "int main(void) { struct S s; struct S *q; s.x = 8; s.y = 34; q = &s;\n"
+        "                 return q->x + q->y; }\n";
+
+    {
+        EmitModule em;
+        compile_module(src, 0, 1, &em);
+        const DebugFunc *f = find_func(&em, "main");
+        const DebugVar *s = find_var(f, "s");
+        const DebugVar *q = find_var(f, "q");
+        T_ASSERT(s != NULL && q != NULL);
+        T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)s->loc_kind);
+        T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)q->loc_kind);
+        T_ASSERT(s->rbp_offset < 0 && q->rbp_offset < 0);
+        T_ASSERT(s->rbp_offset != q->rbp_offset);
+        emit_module_free(&em);
+    }
+
+    {
+        EmitModule em;
+        compile_module(src, 1, 1, &em);
+        const DebugFunc *f = find_func(&em, "main");
+        const DebugVar *sv = find_var(f, "s");
+        const DebugVar *q = find_var(f, "q");
+        T_ASSERT(sv != NULL && q != NULL);
+        T_ASSERT_EQ_INT(DBG_LOC_FBREG, (int)sv->loc_kind);
+        T_ASSERT(sv->rbp_offset < 0);
+        T_ASSERT(q->num_ranges > 0);
+        for (size_t i = 0; i < q->num_ranges; i++) {
+            T_ASSERT_EQ_INT(DBG_LOC_FBREG_VALUE, (int)q->ranges[i].loc_kind);
+            T_ASSERT_EQ_INT(sv->rbp_offset, q->ranges[i].rbp_offset);
+        }
+        emit_module_free(&em);
+    }
+}
+
 /* Arrays live in memory and carry their element count, so gdb can print the
  * whole object. */
 static void test_array_local_shape(void) {
@@ -747,6 +840,8 @@ int main(void) {
     test_promoted_local_has_loclist();
     test_o0_locals_are_stack_slots();
     test_address_taken_stays_in_memory();
+    test_pointer_to_local_location();
+    test_pointer_to_struct_local_location();
     test_array_local_shape();
     test_dead_variable_has_no_location();
     test_global_var_records();

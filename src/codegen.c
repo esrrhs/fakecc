@@ -3872,13 +3872,28 @@ static int reg_to_dwarf(int r) {
 /* Where did register allocation put SSA value `v`?  Fills a DWARF location
  * description: a machine register, or the rbp-relative spill slot it was
  * assigned.  Yields DBG_LOC_NONE when `v` has no home — the value's defining
- * instruction was optimized away, so the variable is unavailable here. */
+ * instruction was optimized away, so the variable is unavailable here.
+ *
+ * A unique-def ADDR of a pinned alloca (or ADDR+const / COPY of one) is
+ * rematerialized as DBG_LOC_FBREG_VALUE: the pointer's value is the
+ * frame address itself.  isel often folds that tree into [rbp+off] and
+ * never writes the ADDR dest, so a register/spill home would be stale. */
 static void value_home(const IRFunction *fn, int v, int gp_spill_area,
+                       const int *def, const int *alloca_off,
                        DebugLocKind *kind, int *rbp_offset, int *dwarf_reg) {
     *kind = DBG_LOC_NONE;
     *rbp_offset = 0;
     *dwarf_reg = -1;
     if (v < 0) return;
+
+    if (def && alloca_off) {
+        int off = 0;
+        if (fold_ptr_off(fn, def, alloca_off, v, &off, 0) && off != 0) {
+            *kind = DBG_LOC_FBREG_VALUE;
+            *rbp_offset = off;
+            return;
+        }
+    }
 
     if (value_is_float_class(fn, v)) {
         const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
@@ -12979,7 +12994,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     DebugLocKind lk;
                     int off, dreg;
                     value_home(fn, dbg_obs[k].value, gp_spill_area,
-                               &lk, &off, &dreg);
+                               ssa_def, alloca_off, &lk, &off, &dreg);
                     dbg_var_add_range(&dv, dbg_obs[k].pc, end, lk, off, dreg);
                 }
                 emit_module_add_dbg_var(out, dbg_func_idx, &dv);
