@@ -9515,11 +9515,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
             restore_big_copy(fn, big_copy_sp, e->loc);
-            /* Keep the result-slot pointer live across the call so RA
-             * spills it (or uses a callee-saved home) and codegen can
-             * fstpt into it after the callee returns. */
-            IRValue keep = emit_alloca(fn, 8, 8, 1, e->loc);
-            emit_inst_w(fn, IR_STORE, -1, keep, slot_addr, 0, 8, 1, e->loc);
+            /* slot_addr is IR_CALL.a; RA treats it as live after return
+             * (ir_call_ret_ptr_live_after) so codegen can fstpt through
+             * it.  A dummy pinned 8-byte keep slot is not needed. */
             free(arg_vals);
             free(arg_on_stack);
             free(arg_nbytes);
@@ -9546,11 +9544,9 @@ static IRValue lower_expr(IRFunction *fn, IRSymTable *st, const Expr *e) {
                 inst.width = 8;
                 inst.is_unsigned = 1;
                 ir_inst_array_push(&fn->insts, inst);
-                /* Keep the result-slot pointer live across the call (same
-                 * trick as the X87 path) so RA spills or uses a callee-saved
-                 * home; codegen stores RAX/RDX through it after return. */
-                IRValue keep = emit_alloca(fn, 8, 8, 1, e->loc);
-                emit_inst_w(fn, IR_STORE, -1, keep, slot_addr, 0, 8, 1, e->loc);
+                /* slot_addr is already IR_CALL.a.  RA marks it live across
+                 * the call (ir_call_ret_ptr_live_after); codegen stores
+                 * RAX/RDX through it after return.  No dummy keep alloca. */
                 free(arg_vals);
                 free(arg_on_stack);
                 free(arg_nbytes);

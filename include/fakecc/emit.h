@@ -130,7 +130,12 @@ typedef enum {
     DBG_LOC_ADDR  = 3,  /* absolute address via sym_name (link resolves) */
     /* Value of the ABI arrival register as it was on entry to this function.
      * Resolved by the debugger via DW_TAG_call_site_parameter. */
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    /* The variable's *value* is the address of rbp/fp + rbp_offset
+     * (DW_OP_fbreg <off> DW_OP_stack_value).  Used for a pointer local
+     * that uniquely holds &pinned_alloca, whose ADDR SSA may never be
+     * materialized into a register because memory ops fold to [rbp+off]. */
+    DBG_LOC_FBREG_VALUE = 5
 } DebugLocKind;
 
 /* One entry of a DWARF location list: over [pc_start, pc_end) within the
@@ -177,7 +182,7 @@ typedef struct {
     /* Single-location form: used when the variable has one home for its
      * whole scope (stack slot, or a global's address). */
     DebugLocKind loc_kind;
-    int rbp_offset;     /* DBG_LOC_FBREG */
+    int rbp_offset;     /* DBG_LOC_FBREG / DBG_LOC_FBREG_VALUE */
     int dwarf_reg;      /* DBG_LOC_REG (x86-64 DWARF numbering) */
     char *sym_name;     /* DBG_LOC_ADDR: ELF symbol name */
     /* DBG_LOC_ADDR's other spelling: the section the object lives in and its

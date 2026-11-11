@@ -382,7 +382,670 @@ static void test_builtin_return_codegen(void) {
     emit_module_free(&em);
 }
 
+
+/* A 6-int O0 leaf that only adds its parameters should not push unused
+ * callee-saved regs (those colors may still sit on fused-away SSA). */
+static int fn_text_has_push_cs(const EmitModule *em, const char *name) {
+    const EmitSymbol *s = find_sym(em, name);
+    if (!s || s->value + s->size > em->text.len) return 1;
+    const unsigned char *b = (const unsigned char *)em->text.data + s->value;
+    size_t n = s->size;
+    for (size_t i = 0; i < n; i++) {
+        if (b[i] == 0x53) return 1;                 /* push %rbx */
+        if (i + 1 < n && b[i] == 0x41 && (b[i + 1] == 0x54 || b[i + 1] == 0x55))
+            return 1;                               /* push %r12 / %r13 */
+    }
+    return 0;
+}
+
+static void test_o0_leaf_no_dead_cs_push(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "int sum6(int a, int b, int c, int d, int e, int f) {"
+        "  return a + b + c + d + e + f;"
+        "}"
+        "int main() { return sum6(1, 2, 3, 4, 5, 6); }");
+    T_ASSERT(find_sym(&em, "sum6") != NULL);
+    T_ASSERT(!fn_text_has_push_cs(&em, "sum6"));
+    emit_module_free(&em);
+}
+
+static int fn_bytes(const EmitModule *em, const char *name,
+                    const unsigned char **out, size_t *n) {
+    const EmitSymbol *s = find_sym(em, name);
+    if (!s || s->value + s->size > em->text.len) return 0;
+    *out = (const unsigned char *)em->text.data + s->value;
+    *n = s->size;
+    return 1;
+}
+
+/* and $imm8, r32  →  83 /4 ib  (optional 0x40/0x41 REX). */
+static int fn_has_and_imm8(const EmitModule *em, const char *name, unsigned imm) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 2 < n; i++) {
+        size_t k = i;
+        if (b[k] == 0x40 || b[k] == 0x41) k++;
+        if (k + 2 < n && b[k] == 0x83 && ((b[k + 1] & 0xF8) == 0xE0)
+            && b[k + 2] == (unsigned char)imm)
+            return 1;
+    }
+    return 0;
+}
+
+/* or $imm8, r32  →  83 /1 ib */
+static int fn_has_or_imm8(const EmitModule *em, const char *name, unsigned imm) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 2 < n; i++) {
+        size_t k = i;
+        if (b[k] == 0x40 || b[k] == 0x41) k++;
+        if (k + 2 < n && b[k] == 0x83 && ((b[k + 1] & 0xF8) == 0xC8)
+            && b[k + 2] == (unsigned char)imm)
+            return 1;
+    }
+    return 0;
+}
+
+/* mov $imm32, r32  →  B8+r ibyte[4]  (optional REX.B). */
+static int fn_has_mov_imm32(const EmitModule *em, const char *name, unsigned imm) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 4 < n; i++) {
+        size_t k = i;
+        if (b[k] == 0x41) k++;
+        if (k + 4 < n && (b[k] & 0xF8) == 0xB8) {
+            unsigned v = (unsigned)b[k+1] | ((unsigned)b[k+2] << 8)
+                       | ((unsigned)b[k+3] << 16) | ((unsigned)b[k+4] << 24);
+            if (v == imm) return 1;
+        }
+    }
+    return 0;
+}
+
+/* pop %rbp; ret  —  5D C3.  Shared epilogue should emit this once. */
+static int fn_count_pop_rbp_ret(const EmitModule *em, const char *name) {
+    const unsigned char *b; size_t n;
+    int c = 0;
+    if (!fn_bytes(em, name, &b, &n)) return -1;
+    for (size_t i = 0; i + 1 < n; i++)
+        if (b[i] == 0x5D && b[i + 1] == 0xC3) c++;
+    return c;
+}
+
+static void test_o0_and_imm(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "unsigned mask15(unsigned x) { return x & 15u; }"
+        "int main() { return (int)mask15(1); }");
+    T_ASSERT(find_sym(&em, "mask15") != NULL);
+    T_ASSERT(fn_has_and_imm8(&em, "mask15", 15));
+    T_ASSERT(!fn_has_mov_imm32(&em, "mask15", 15));
+    emit_module_free(&em);
+}
+
+static void test_o0_or_imm_via_trunc(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "unsigned or1(unsigned x) { return x | 1u; }"
+        "int main() { return (int)or1(2); }");
+    T_ASSERT(find_sym(&em, "or1") != NULL);
+    T_ASSERT(fn_has_or_imm8(&em, "or1", 1));
+    T_ASSERT(!fn_has_mov_imm32(&em, "or1", 1));
+    emit_module_free(&em);
+}
+
+/* orl $imm32, r/m32  →  81 /1 id  (optional REX, then ModRM/SIB/disp). */
+static int fn_has_or_imm32_mem(const EmitModule *em, const char *name,
+                               unsigned imm) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 5 < n; i++) {
+        size_t k = i;
+        if (b[k] == 0x40 || b[k] == 0x41 || b[k] == 0x42 || b[k] == 0x43) k++;
+        if (k + 5 >= n || b[k] != 0x81) continue;
+        unsigned char modrm = b[k + 1];
+        if ((modrm & 0x38) != 0x08) continue; /* /1 */
+        size_t p = k + 2;
+        int mod = (modrm >> 6) & 3;
+        int rm = modrm & 7;
+        if (mod == 3) continue; /* register dest, not mem */
+        if (rm == 4) p++; /* SIB */
+        if (mod == 1) p += 1;
+        else if (mod == 2 || (mod == 0 && rm == 5) || (mod == 0 && rm == 4)) {
+            /* disp32, or SIB with base=5 handled as disp32 when mod=0.
+             * Conservatively accept a 4-byte follow if present. */
+            if (mod == 2 || (mod == 0 && ((rm == 5) || (rm == 4))))
+                p += 4;
+        }
+        if (p + 3 >= n) continue;
+        unsigned v = (unsigned)b[p] | ((unsigned)b[p + 1] << 8)
+                   | ((unsigned)b[p + 2] << 16) | ((unsigned)b[p + 3] << 24);
+        if (v == imm) return 1;
+    }
+    return 0;
+}
+
+static void test_o0_or_imm_rmw(void) {
+    /* TRUNC-hidden immediates used to skip CONST then fall back to
+     * `or %reg, mem` with an undefined register (pr29797 / pr58943). */
+    EmitModule em = compile_o0(
+        "package main;"
+        "unsigned g;"
+        "unsigned or_local(unsigned x) { unsigned n = x; n |= 65536u; return n; }"
+        "unsigned or_global(void) { g |= 128u; return g; }"
+        "int main() { return (int)(or_local(1) + or_global()); }");
+    T_ASSERT(find_sym(&em, "or_local") != NULL);
+    T_ASSERT(find_sym(&em, "or_global") != NULL);
+    T_ASSERT(fn_has_or_imm32_mem(&em, "or_local", 65536u));
+    T_ASSERT(fn_has_or_imm32_mem(&em, "or_global", 128u));
+    T_ASSERT(!fn_has_mov_imm32(&em, "or_local", 65536u));
+    T_ASSERT(!fn_has_mov_imm32(&em, "or_global", 128u));
+    emit_module_free(&em);
+}
+
+static void test_o0_shared_epilogue(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "int sign3(int x) {"
+        "  if (x > 0) return x + 1;"
+        "  if (x < 0) return x - 1;"
+        "  return 0;"
+        "}"
+        "int main() { return sign3(2) + sign3(-3) + sign3(0); }");
+    T_ASSERT(find_sym(&em, "sign3") != NULL);
+    T_ASSERT(fn_count_pop_rbp_ret(&em, "sign3") == 1);
+    emit_module_free(&em);
+}
+
+
+
+/* lea r, disp8(%rbp)  →  (optional REX) 8D /r with mod=01 rm=101. */
+static int fn_has_lea_rbp_disp8(const EmitModule *em, const char *name) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 2 < n; i++) {
+        size_t k = i;
+        if (b[k] == 0x40 || b[k] == 0x41 || b[k] == 0x48 || b[k] == 0x49
+            || b[k] == 0x4C || b[k] == 0x4D)
+            k++;
+        if (k + 2 < n && b[k] == 0x8D && (b[k + 1] & 0xC7) == 0x45)
+            return 1;
+    }
+    return 0;
+}
+
+static void test_o0_vec_folded_no_dest_lea(void) {
+    /* Folded vadd/vxor of frame vectors must not lea the dest just to
+     * store with movups [rbp+off] (vec c=a+b; a=c^b). */
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef int V __attribute__((vector_size(16)));"
+        "V addxor(void) {"
+        "  V a, b, c;"
+        "  a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;"
+        "  b[0] = 5; b[1] = 6; b[2] = 7; b[3] = 8;"
+        "  c = a + b;"
+        "  a = c ^ b;"
+        "  return a;"
+        "}"
+        "int main() { V r = addxor(); return r[0]; }");
+    T_ASSERT(find_sym(&em, "addxor") != NULL);
+    T_ASSERT(!fn_has_lea_rbp_disp8(&em, "addxor"));
+    emit_module_free(&em);
+}
+
+
+/* movaps xmm, mem / mem, xmm  →  (REX) 0F 28/29 /r, r/m not 11. */
+static int fn_has_movaps_mem(const EmitModule *em, const char *name) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 2 < n; i++) {
+        size_t k = i;
+        if (b[k] >= 0x40 && b[k] <= 0x4F) k++;
+        if (k + 2 < n && b[k] == 0x0F && (b[k + 1] == 0x28 || b[k + 1] == 0x29)
+            && (b[k + 2] & 0xC0) != 0xC0)
+            return 1;
+    }
+    return 0;
+}
+
+static int fn_has_movups_mem(const EmitModule *em, const char *name) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 2 < n; i++) {
+        size_t k = i;
+        if (b[k] >= 0x40 && b[k] <= 0x4F) k++;
+        if (k + 2 < n && b[k] == 0x0F && (b[k + 1] == 0x10 || b[k + 1] == 0x11)
+            && (b[k + 2] & 0xC0) != 0xC0)
+            return 1;
+    }
+    return 0;
+}
+
+/* pxor xmm, mem  →  66 (REX) 0F EF /r with r/m not 11 (not reg-reg). */
+static int fn_has_pxor_mem(const EmitModule *em, const char *name) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 3 < n; i++) {
+        size_t k = i;
+        if (b[k] != 0x66) continue;
+        k++;
+        if (b[k] >= 0x40 && b[k] <= 0x4F) k++;
+        if (k + 2 < n && b[k] == 0x0F && b[k + 1] == 0xEF
+            && (b[k + 2] & 0xC0) != 0xC0)
+            return 1;
+    }
+    return 0;
+}
+
+static void test_o0_vec_aligned_movaps(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef int V __attribute__((vector_size(16)));"
+        "V addxor(void) {"
+        "  V a, b, c;"
+        "  a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;"
+        "  b[0] = 5; b[1] = 6; b[2] = 7; b[3] = 8;"
+        "  c = a + b;"
+        "  a = c ^ b;"
+        "  return a;"
+        "}"
+        "int main() { V r = addxor(); return r[0]; }");
+    T_ASSERT(find_sym(&em, "addxor") != NULL);
+    T_ASSERT(fn_has_movaps_mem(&em, "addxor"));
+    T_ASSERT(fn_has_pxor_mem(&em, "addxor"));
+    /* The return copy of a 16-aligned local may still use movups; the
+     * folded vadd/vxor path must not. */
+    emit_module_free(&em);
+}
+
+static void test_o0_vec_unaligned_ptr_movups(void) {
+    /* Pointer operands are not proved 16-aligned; must not use movaps. */
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef int V __attribute__((vector_size(16)));"
+        "void addxor_ptr(V *p, V *q) {"
+        "  V t = *p + *q;"
+        "  *p = t ^ *q;"
+        "}"
+        "int main() { return 0; }");
+    T_ASSERT(find_sym(&em, "addxor_ptr") != NULL);
+    T_ASSERT(fn_has_movups_mem(&em, "addxor_ptr"));
+    T_ASSERT(!fn_has_movaps_mem(&em, "addxor_ptr"));
+    emit_module_free(&em);
+}
+
+
+/* REX.W 89 /r to a memory operand with base %rbp: 8-byte spill of a GP
+ * SSA temp.  Named O0 i32 locals use 32-bit stores (no REX.W). */
+static int fn_has_movq_rbp(const EmitModule *em, const char *name) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 2 < n; i++) {
+        unsigned char rex = b[i];
+        if ((rex & 0xF8) != 0x48) continue; /* REX with W=1 */
+        if (b[i + 1] != 0x89) continue;
+        unsigned char modrm = b[i + 2];
+        int mod = (modrm >> 6) & 3, rm = modrm & 7;
+        if (mod == 3) continue;
+        if (rm == 5) return 1;                 /* [rbp+disp] */
+        if (rm == 4 && i + 3 < n) {
+            unsigned char sib = b[i + 3];
+            if ((sib & 7) == 5) return 1;      /* SIB base = rbp */
+        }
+    }
+    return 0;
+}
+
+/* a[i&3] += (i&7) must keep SIB addressing without spilling the i&3 SSA
+ * temp (not a named O0 local) to an 8-byte frame slot. */
+
+/* sub $imm, %rsp: REX.W 83 /5 ib, or REX.W 81 /5 id. */
+static int fn_has_sub_rsp_imm(const EmitModule *em, const char *name, int imm) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    for (size_t i = 0; i + 3 < n; i++) {
+        if (b[i] != 0x48) continue;
+        if (b[i + 1] == 0x83 && b[i + 2] == 0xEC
+            && b[i + 3] == (unsigned char)imm)
+            return 1;
+        if (b[i + 1] == 0x81 && b[i + 2] == 0xEC && i + 6 < n) {
+            int v = (int)(int32_t)((unsigned)b[i + 3]
+                | ((unsigned)b[i + 4] << 8)
+                | ((unsigned)b[i + 5] << 16)
+                | ((unsigned)b[i + 6] << 24));
+            if (v == imm) return 1;
+        }
+    }
+    return 0;
+}
+
+static void test_o0_masked_index_no_spill(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "int acc_mask(void) {"
+        "  int a[4]; int i; int s;"
+        "  for (i = 0; i < 4; i++) a[i] = i + 1;"
+        "  for (i = 0; i < 16; i++) a[i & 3] += (i & 7);"
+        "  s = 0;"
+        "  for (i = 0; i < 4; i++) s += a[i];"
+        "  return s;"
+        "}"
+        "int main() { return acc_mask(); }");
+    T_ASSERT(find_sym(&em, "acc_mask") != NULL);
+    T_ASSERT(text_has_sib_rbp_scale4(&em) || text_has_sib(&em, 0x0D));
+    T_ASSERT(fn_has_and_imm8(&em, "acc_mask", 3));
+    T_ASSERT(!fn_has_movq_rbp(&em, "acc_mask"));
+    emit_module_free(&em);
+}
+
+/* When (i&3) is also stored to a named local, that value must still be
+ * materialized; the index form of a[k] / a[i&3] stays a SIB. */
+static void test_o0_masked_index_named_keep(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "int with_k(void) {"
+        "  int a[4]; int i; int k; int s;"
+        "  for (i = 0; i < 4; i++) a[i] = 0;"
+        "  s = 0;"
+        "  for (i = 0; i < 8; i++) {"
+        "    k = i & 3;"
+        "    a[k] += k;"
+        "    a[i & 3] += 1;"
+        "    s += k;"
+        "  }"
+        "  return s + a[0] + a[1] + a[2] + a[3];"
+        "}"
+        "int main() { return with_k(); }");
+    T_ASSERT(find_sym(&em, "with_k") != NULL);
+    T_ASSERT(text_has_sib_rbp_scale4(&em) || text_has_sib(&em, 0x0D));
+    T_ASSERT(fn_has_and_imm8(&em, "with_k", 3));
+    emit_module_free(&em);
+}
+
+/* Same remat must hold under the register pressure of the vec benchmark
+ * shape: packed vadd/vxor plus b[i&3] += (i&15).  Without remat, the
+ * zext(i&3) SSA was spilled with movq to the frame. */
+static void test_o0_vec_masked_index_no_spill(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef int V __attribute__((vector_size(16)));"
+        "V addxor_idx(void) {"
+        "  V a, b, c; int i;"
+        "  a[0] = 1; a[1] = 2; a[2] = 3; a[3] = 4;"
+        "  b[0] = 5; b[1] = 6; b[2] = 7; b[3] = 8;"
+        "  for (i = 0; i < 16; i++) {"
+        "    c = a + b;"
+        "    a = c ^ b;"
+        "    b[i & 3] += (i & 15);"
+        "  }"
+        "  return a;"
+        "}"
+        "int main() { V r = addxor_idx(); return r[0]; }");
+    T_ASSERT(find_sym(&em, "addxor_idx") != NULL);
+    T_ASSERT(text_has_sib_rbp_scale4(&em) || text_has_sib(&em, 0x0D));
+    T_ASSERT(fn_has_and_imm8(&em, "addxor_idx", 3));
+    T_ASSERT(!fn_has_movq_rbp(&em, "addxor_idx"));
+    /* Pinned IR_ALLOCA dests must not reserve GP spill slots.  Three
+     * 16-byte vectors plus two i32s are 64 bytes of pinned area; with no
+     * real SSA spill the frame is $0x40, not the previous $0x60. */
+    T_ASSERT(fn_has_sub_rsp_imm(&em, "addxor_idx", 0x40));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "addxor_idx", 0x60));
+    emit_module_free(&em);
+}
+
+/* A leaf of only 4-byte pinned locals must not grow a phantom spill
+ * area just because the ALLOCA SSA values were in the GP class. */
+static void test_o0_scalar_locals_compact_frame(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "int sum4(void) {"
+        "  int a, b, c, d;"
+        "  a = 1; b = 2; c = 3; d = 4;"
+        "  return a + b + c + d;"
+        "}"
+        "int main() { return sum4(); }");
+    T_ASSERT(find_sym(&em, "sum4") != NULL);
+    /* Four i32s rounded to 8-byte slots = 32 bytes; no leftover $0x20+
+     * spill reservation from the alloca SSAs themselves. */
+    T_ASSERT(fn_has_sub_rsp_imm(&em, "sum4", 0x20));
+    emit_module_free(&em);
+}
+
+
+/* movq %reg, disp(%rbp): REX.W 89 /r with rm=rbp.  Used to prove
+ * INTEGER sret payloads land in a named local, not only in a spill. */
+static int fn_has_movq_reg_rbp(const EmitModule *em, const char *name, int reg) {
+    const unsigned char *b; size_t n;
+    if (!fn_bytes(em, name, &b, &n)) return 0;
+    unsigned r = (unsigned)reg & 7;
+    int rex_r = (reg >= 8);
+    for (size_t i = 0; i + 3 < n; i++) {
+        unsigned char rex = b[i];
+        if ((rex & 0xF8) != 0x48) continue;
+        if (rex_r && !(rex & 4)) continue;
+        if (!rex_r && (rex & 4)) continue;
+        if (b[i + 1] != 0x89) continue;
+        unsigned char modrm = b[i + 2];
+        int mod = (modrm >> 6) & 3, rm = modrm & 7, ro = (modrm >> 3) & 7;
+        if (mod == 0 || mod == 3 || ro != (int)r) continue;
+        if (rm == 5) return 1;
+        if (rm == 4 && i + 3 < n) {
+            unsigned char sib = b[i + 3];
+            if ((sib & 7) == 5) return 1;
+        }
+    }
+    return 0;
+}
+
+/* A 16-byte INTEGER-class struct returned in rax/rdx and stored into
+ * distinct destinations must not pin a dummy 8-byte "keep" alloca per
+ * call site.  Those slots were store-only (never reloaded) and pushed
+ * named locals past disp8.  IR_CALL.a is live after return instead. */
+static void test_o0_struct_ret_no_keep_slot(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef struct { int a; int b; long long c; } S;"
+        "S mk(long long x) { S s; s.a = (int)x; s.b = (int)x + 1; s.c = x; return s; }"
+        "S g[8];"
+        "void fill8(void) {"
+        "  g[0] = mk(0); g[1] = mk(1); g[2] = mk(2); g[3] = mk(3);"
+        "  g[4] = mk(4); g[5] = mk(5); g[6] = mk(6); g[7] = mk(7);"
+        "}"
+        "int main() { fill8(); return (int)g[7].c; }");
+    T_ASSERT(find_sym(&em, "fill8") != NULL);
+    /* Eight call sites used to reserve 64 bytes of keep slots, so the
+     * frame was around $0x50.  With no dummy keeps and no named locals
+     * besides possible spills, the prologue must stay well under that. */
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "fill8", 0x50));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "fill8", 0x60));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "fill8", 0x70));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "fill8", 0x80));
+    emit_module_free(&em);
+}
+
+/* Named O0 local destination must still receive the rax/rdx store.
+ * The frame holds the 16-byte local, not an extra keep slot beside it. */
+static void test_o0_struct_ret_named_local(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef struct { int a; int b; long long c; } S;"
+        "S mk(long long x) { S s; s.a = (int)x; s.b = 0; s.c = x; return s; }"
+        "long long use_tmp(void) {"
+        "  S t;"
+        "  t = mk(42);"
+        "  return t.c;"
+        "}"
+        "int main() { return (int)use_tmp(); }");
+    T_ASSERT(find_sym(&em, "use_tmp") != NULL);
+    /* Named 16-byte t sits in the frame; rax/rdx are stored to [rbp+off].
+     * A foldable INTEGER sret dest must not reserve a GP spill home, so
+     * the prologue is $0x10, not $0x20. */
+    T_ASSERT(fn_has_sub_rsp_imm(&em, "use_tmp", 0x10));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "use_tmp", 0x20));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "use_tmp", 0x30));
+    T_ASSERT(fn_has_movq_reg_rbp(&em, "use_tmp", 0)); /* rax */
+    T_ASSERT(fn_has_movq_reg_rbp(&em, "use_tmp", 2)); /* rdx */
+    emit_module_free(&em);
+}
+
+/* Independent named locals in separate switch cases: each INTEGER sret
+ * dest folds to [rbp+off], so RA must not reserve a spill home per site.
+ * Nine 16-byte locals plus the i32 selector fit in $0xa0; the previous
+ * 0x50 GP-spill reservation made the frame $0xf0. */
+static void test_o0_struct_ret_switch_no_spill(void) {
+    EmitModule em = compile_o0(
+        "package main;"
+        "typedef struct { int a; int b; long long c; } S;"
+        "S mk(long long x) { S s; s.a = (int)x; s.b = 0; s.c = x; return s; }"
+        "long long use_many(int k) {"
+        "  S a,b,c,d,e,f,g,h,i;"
+        "  switch (k) {"
+        "    case 0: a = mk(1); return a.c;"
+        "    case 1: b = mk(2); return b.c;"
+        "    case 2: c = mk(3); return c.c;"
+        "    case 3: d = mk(4); return d.c;"
+        "    case 4: e = mk(5); return e.c;"
+        "    case 5: f = mk(6); return f.c;"
+        "    case 6: g = mk(7); return g.c;"
+        "    case 7: h = mk(8); return h.c;"
+        "    default: i = mk(9); return i.c;"
+        "  }"
+        "}"
+        "int main() { return (int)use_many(3); }");
+    T_ASSERT(find_sym(&em, "use_many") != NULL);
+    T_ASSERT(fn_has_sub_rsp_imm(&em, "use_many", 0xa0));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "use_many", 0xf0));
+    T_ASSERT(!fn_has_sub_rsp_imm(&em, "use_many", 0xe0));
+    T_ASSERT(fn_has_movq_reg_rbp(&em, "use_many", 0));
+    T_ASSERT(fn_has_movq_reg_rbp(&em, "use_many", 2));
+    emit_module_free(&em);
+}
+
+
+/* A64 64-bit ADD xd,xn,#imm12 (unshifted, no flags). */
+static int a64_is_add_imm(uint32_t w, unsigned *imm) {
+    if ((w & 0xFF800000u) != 0x91000000u) return 0;
+    if ((w >> 22) & 1) return 0;
+    if (imm) *imm = (w >> 10) & 0xfffu;
+    return 1;
+}
+
+/* Unsigned-offset or unscaled store/load whose byte offset is `want`. */
+static int a64_is_mem_off(uint32_t w, unsigned want) {
+    /* STR/LDR 32- and 64-bit unsigned offset: imm12 is in elements. */
+    unsigned elem, base;
+    if ((w & 0xFFC00000u) == 0xB9000000u || /* str wt */
+        (w & 0xFFC00000u) == 0xB9400000u) { /* ldr wt */
+        elem = 4;
+        base = ((w >> 10) & 0xfffu) * elem;
+        return base == want;
+    }
+    if ((w & 0xFFC00000u) == 0xF9000000u || /* str xt */
+        (w & 0xFFC00000u) == 0xF9400000u) { /* ldr xt */
+        elem = 8;
+        base = ((w >> 10) & 0xfffu) * elem;
+        return base == want;
+    }
+    /* STUR/LDUR 32/64, 9-bit signed byte offset. */
+    if ((w & 0xFFE00C00u) == 0xB8000000u || /* stur wt */
+        (w & 0xFFE00C00u) == 0xB8400000u || /* ldur wt */
+        (w & 0xFFE00C00u) == 0xF8000000u || /* stur xt */
+        (w & 0xFFE00C00u) == 0xF8400000u) { /* ldur xt */
+        int imm9 = (int)((w >> 12) & 0x1ff);
+        if (imm9 & 0x100) imm9 |= ~0x1ff;
+        return imm9 == (int)want;
+    }
+    return 0;
+}
+
+static int a64_is_movz64_imm(uint32_t w, unsigned *imm, int *rd) {
+    if ((w & 0xFF800000u) != 0xD2800000u) return 0; /* movz xd, #imm, lsl #0 */
+    if ((w >> 21) & 3) return 0; /* hw != 0 */
+    if (imm) *imm = (w >> 5) & 0xffffu;
+    if (rd) *rd = (int)(w & 31);
+    return 1;
+}
+
+/* ADD xd, xn, xm (no shift). */
+static int a64_is_add_reg(uint32_t w, int *rd, int *rn, int *rm) {
+    if ((w & 0xFF200000u) != 0x8B000000u) return 0;
+    if ((w >> 10) & 0x3fu) return 0; /* shift amount */
+    if (rd) *rd = (int)(w & 31);
+    if (rn) *rn = (int)((w >> 5) & 31);
+    if (rm) *rm = (int)((w >> 16) & 31);
+    return 1;
+}
+
+static int a64_text_addresses_off(const EmitModule *em, unsigned off) {
+    const unsigned char *p = (const unsigned char *)em->text.data;
+    size_t n = em->text.len / 4;
+    uint32_t *ws = (uint32_t *)malloc(n * sizeof(uint32_t));
+    if (!ws) return 0;
+    for (size_t i = 0; i < n; i++) memcpy(&ws[i], p + i * 4, 4);
+    int found = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned imm = 0;
+        int rd = -1, rn = -1, rm = -1;
+        if (a64_is_add_imm(ws[i], &imm) && imm == off) { found = 1; break; }
+        if (a64_is_mem_off(ws[i], off)) { found = 1; break; }
+        /* isel of (aligned_base + 4) often uses movz #4 + add_reg. */
+        if (a64_is_movz64_imm(ws[i], &imm, &rd) && imm == off) {
+            for (size_t j = i + 1; j < i + 6 && j < n; j++) {
+                if (a64_is_add_reg(ws[j], NULL, &rn, &rm) && (rm == rd || rn == rd)) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (found) break;
+        }
+    }
+    free(ws);
+    return found;
+}
+
+/* Rematerializing &v[1] as AND(fp+slot+4, 32) overwrites v[0] on Darwin
+ * (AAPCS64 only 16-aligns SP).  The field addend must be applied after the
+ * mask, or addressed as [aligned_base, #4]. */
+static void test_a64_overalign_vector_field(void) {
+    const TargetDesc *saved = target_current();
+    target_set_current(target_arm64_macos());
+    const char *src =
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(32)));\n"
+        "int main(void) {\n"
+        "  V a;\n"
+        "  a[0] = 1;\n"
+        "  a[1] = 2;\n"
+        "  return a[1];\n"
+        "}";
+    EmitModule em0 = compile_o0(src);
+    T_ASSERT(a64_text_addresses_off(&em0, 4));
+    emit_module_free(&em0);
+
+    TokenArray arr;
+    token_array_init(&arr);
+    lex(src, "test.c", &arr);
+    TranslationUnit tu; tu_init(&tu);
+    parse(&arr, &tu);
+    sema_check(&tu, 1);
+    IRModule ir; ir_module_init(&ir);
+    ir_generate(&tu, &ir, 0);
+    opt(&ir, 1, 0);
+    EmitModule em1;
+    emit_module_init(&em1);
+    codegen(&ir, &em1, 0);
+    T_ASSERT(a64_text_addresses_off(&em1, 4));
+    emit_module_free(&em1);
+    ir_module_free(&ir);
+    token_array_free(&arr);
+    tu_free(&tu);
+    target_set_current(saved);
+}
+
 /* ---- main ---- */
+
 
 int main(void) {
     /* These cases pin the x86-64 ELF backend; a parallel arm64 suite will
@@ -405,5 +1068,21 @@ int main(void) {
     test_constructor_priority_slots();
     test_rol8_encoding();
     test_builtin_return_codegen();
+    test_o0_leaf_no_dead_cs_push();
+    test_o0_and_imm();
+    test_o0_or_imm_via_trunc();
+    test_o0_or_imm_rmw();
+    test_o0_shared_epilogue();
+    test_o0_vec_folded_no_dest_lea();
+    test_o0_vec_aligned_movaps();
+    test_o0_vec_unaligned_ptr_movups();
+    test_o0_masked_index_no_spill();
+    test_o0_masked_index_named_keep();
+    test_o0_vec_masked_index_no_spill();
+    test_o0_scalar_locals_compact_frame();
+    test_o0_struct_ret_no_keep_slot();
+    test_o0_struct_ret_named_local();
+    test_o0_struct_ret_switch_no_spill();
+    test_a64_overalign_vector_field();
     return t_finalize();
 }
