@@ -299,6 +299,7 @@ static void frame_store(C64 *c, int valrt, int off, int width, int aln);
 static void emit_fp_addr(C64 *c, int rd, int off);
 static void emit_fp_addr_aligned(C64 *c, int rd, int off, int aln);
 static int alloca_align_of(const C64 *c, IRValue slot, int nv);
+static void c64_emit_folded_ptr(C64 *c, int rd, int off, int addend, int aln);
 static void emit_mov_imm_w(A64Asm *a, int rd, int64_t imm, int is64);
 static void fmov_q(A64Asm *a, int rd, int rn);
 static void str_q(A64Asm *a, int rt, int rn, int byte_off);
@@ -379,11 +380,14 @@ static int c64_unique_def(const C64 *c, IRValue v) {
     return n == 1;
 }
 
-/* Unique-def &pinned_alloca (or ADDR+const / COPY of one) -> fp-relative
- * offset and alignment.  Mirrors codegen.c fold_ptr_off so a pointer that
- * never needs a register can still be rematerialized after a call. */
+/* Unique-def &pinned_alloca (or ADDR+const / COPY of one) -> the raw
+ * fp-relative slot offset, the slot's alignment, and a constant addend.
+ * The addend is kept separate because emit_fp_addr_aligned rounds the
+ * address down when aln > 16: AND(fp+slot+field, aln) is not equal to
+ * AND(fp+slot, aln)+field unless (fp+slot) is already aligned.  That
+ * mis-fold overwrote v[0] when storing v[1] of a 32-byte vector. */
 static int c64_fold_ptr_off(const C64 *c, IRValue v, int *out_off,
-                            int *out_aln, int depth) {
+                            int *out_aln, int *out_addend, int depth) {
     if (depth > 8 || !c || !c->fn || !c->def || !c->alloca_off
         || v < 0 || v >= c->fn->next_value_id)
         return 0;
@@ -391,37 +395,48 @@ static int c64_fold_ptr_off(const C64 *c, IRValue v, int *out_off,
     if (di < 0 || (size_t)di >= c->fn->insts.len) return 0;
     const IRInst *d = &c->fn->insts.data[di];
     int nv = c->fn->next_value_id;
-    if (d->op == IR_COPY && c64_unique_def(c, v))
-        return c64_fold_ptr_off(c, d->a, out_off, out_aln, depth + 1);
+    int addend = 0;
+    if (d->op == IR_COPY && c64_unique_def(c, v)) {
+        if (!c64_fold_ptr_off(c, d->a, out_off, out_aln, &addend, depth + 1))
+            return 0;
+        if (out_addend) *out_addend = addend;
+        return 1;
+    }
     if (d->op == IR_ALLOCA && d->alloca_bytes > 0
         && v < nv && c->alloca_off[v] != 0) {
         *out_off = c->alloca_off[v];
         if (out_aln) *out_aln = alloca_align_of(c, v, nv);
+        if (out_addend) *out_addend = 0;
         return 1;
     }
     if (d->op == IR_ADDR && d->a >= 0 && d->a < nv
         && c->alloca_off[d->a] != 0) {
         *out_off = c->alloca_off[d->a];
         if (out_aln) *out_aln = alloca_align_of(c, d->a, nv);
+        if (out_addend) *out_addend = 0;
         return 1;
     }
     if (d->op == IR_ADD) {
-        int base_off = 0, base_aln = 0;
+        int base_off = 0, base_aln = 0, base_add = 0;
         if (d->b >= 0 && d->b < nv && c->def[d->b] >= 0) {
             const IRInst *imm = &c->fn->insts.data[c->def[d->b]];
             if (imm->op == IR_CONST && !imm->is_float
-                && c64_fold_ptr_off(c, d->a, &base_off, &base_aln, depth + 1)) {
-                *out_off = base_off + (int)imm->imm;
+                && c64_fold_ptr_off(c, d->a, &base_off, &base_aln,
+                                    &base_add, depth + 1)) {
+                *out_off = base_off;
                 if (out_aln) *out_aln = base_aln;
+                if (out_addend) *out_addend = base_add + (int)imm->imm;
                 return 1;
             }
         }
         if (d->a >= 0 && d->a < nv && c->def[d->a] >= 0) {
             const IRInst *imm = &c->fn->insts.data[c->def[d->a]];
             if (imm->op == IR_CONST && !imm->is_float
-                && c64_fold_ptr_off(c, d->b, &base_off, &base_aln, depth + 1)) {
-                *out_off = base_off + (int)imm->imm;
+                && c64_fold_ptr_off(c, d->b, &base_off, &base_aln,
+                                    &base_add, depth + 1)) {
+                *out_off = base_off;
                 if (out_aln) *out_aln = base_aln;
+                if (out_addend) *out_addend = base_add + (int)imm->imm;
                 return 1;
             }
         }
@@ -445,10 +460,13 @@ static void value_home64(C64 *c, int v, DebugLocKind *kind,
     if (v < 0) return;
 
     {
-        int off = 0, aln = 0;
-        if (c64_fold_ptr_off(c, v, &off, &aln, 0) && off != 0) {
+        int off = 0, aln = 0, addend = 0;
+        /* aln > 16 is rounded down at run time; a static fbreg would miss
+         * the AND and also cannot encode AND(base)+field. */
+        if (c64_fold_ptr_off(c, v, &off, &aln, &addend, 0) && off != 0
+            && aln <= 16) {
             *kind = DBG_LOC_FBREG_VALUE;
-            *fbreg = off;
+            *fbreg = off + addend;
             return;
         }
     }
@@ -581,30 +599,32 @@ static int load_op(C64 *c, IRValue v, int other) {
         emit_mov_imm_w(c->as, scratch, d->imm, vw(c, v) == 8);
         return scratch;
     }
+    /* Prefer an existing home.  Rematerializing into x16/x17 first clobbered
+     * live scratches (float CAS desired bits in SCR0, then &expected). */
+    int r = home_reg(c, v);
+    if (r >= 0) return r;
     {
-        int off = 0, aln = 0;
-        if (c64_fold_ptr_off(c, v, &off, &aln, 0) && off != 0) {
-            emit_fp_addr_aligned(c, scratch, off, aln);
+        int off = 0, aln = 0, addend = 0;
+        if (c64_fold_ptr_off(c, v, &off, &aln, &addend, 0) && off != 0) {
+            c64_emit_folded_ptr(c, scratch, off, addend, aln);
             return scratch;
         }
     }
-    int r = home_reg(c, v);
-    if (r >= 0) return r;
     frame_load(c, scratch, spill_off(c, v), 8, 1, 0);
     return scratch;
 }
 
 static int load_ptrv(C64 *c, IRValue v, int other) {
     int scratch = (other == SCR0) ? SCR1 : SCR0;
+    int r = home_reg(c, v);
+    if (r >= 0) return r;
     {
-        int off = 0, aln = 0;
-        if (c64_fold_ptr_off(c, v, &off, &aln, 0) && off != 0) {
-            emit_fp_addr_aligned(c, scratch, off, aln);
+        int off = 0, aln = 0, addend = 0;
+        if (c64_fold_ptr_off(c, v, &off, &aln, &addend, 0) && off != 0) {
+            c64_emit_folded_ptr(c, scratch, off, addend, aln);
             return scratch;
         }
     }
-    int r = home_reg(c, v);
-    if (r >= 0) return r;
     frame_load(c, scratch, spill_off(c, v), 8, 1, 0);
     return scratch;
 }
@@ -643,6 +663,43 @@ static void emit_fp_addr(C64 *c, int rd, int off) {
 static void emit_fp_addr_aligned(C64 *c, int rd, int off, int aln) {
     emit_fp_addr(c, rd, off);
     if (aln > 16) a64_and_imm(c->as, rd, rd, ~(uint64_t)(aln - 1), 1);
+}
+
+/* rd += disp, using only rd.  Field offsets on over-aligned slots are
+ * applied after the AND, never baked into the pre-mask offset. */
+static void emit_addr_add(C64 *c, int rd, int disp) {
+    if (disp == 0) return;
+    int neg = disp < 0;
+    unsigned u = neg ? (unsigned)(-(int64_t)disp) : (unsigned)disp;
+    unsigned hi = u >> 12;
+    unsigned lo = u & 0xfffu;
+    if (hi > 4095) {
+        int tmp = (rd == SCR0) ? SCR1 : SCR0;
+        emit_mov_imm_w(c->as, tmp, disp, 1);
+        a64_add_reg(c->as, rd, rd, tmp, A64_LSL, 0, 1, 0);
+        return;
+    }
+    if (lo) {
+        if (neg)
+            a64_sub_imm12(c->as, rd, rd, lo, 0, 1, 0);
+        else
+            a64_add_imm12(c->as, rd, rd, lo, 0, 1, 0);
+    }
+    if (hi) {
+        if (neg)
+            a64_sub_imm12(c->as, rd, rd, hi, 1, 1, 0);
+        else
+            a64_add_imm12(c->as, rd, rd, hi, 1, 1, 0);
+    }
+}
+
+static void c64_emit_folded_ptr(C64 *c, int rd, int off, int addend, int aln) {
+    if (aln <= 16) {
+        emit_fp_addr_aligned(c, rd, off + addend, aln);
+        return;
+    }
+    emit_fp_addr_aligned(c, rd, off, aln);
+    emit_addr_add(c, rd, addend);
 }
 
 /* Alignment recorded for alloca `slot` (0 when it is not a pinned slot). */

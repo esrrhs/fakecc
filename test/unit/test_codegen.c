@@ -923,6 +923,127 @@ static void test_o0_struct_ret_switch_no_spill(void) {
     emit_module_free(&em);
 }
 
+
+/* A64 64-bit ADD xd,xn,#imm12 (unshifted, no flags). */
+static int a64_is_add_imm(uint32_t w, unsigned *imm) {
+    if ((w & 0xFF800000u) != 0x91000000u) return 0;
+    if ((w >> 22) & 1) return 0;
+    if (imm) *imm = (w >> 10) & 0xfffu;
+    return 1;
+}
+
+/* Unsigned-offset or unscaled store/load whose byte offset is `want`. */
+static int a64_is_mem_off(uint32_t w, unsigned want) {
+    /* STR/LDR 32- and 64-bit unsigned offset: imm12 is in elements. */
+    unsigned elem, base;
+    if ((w & 0xFFC00000u) == 0xB9000000u || /* str wt */
+        (w & 0xFFC00000u) == 0xB9400000u) { /* ldr wt */
+        elem = 4;
+        base = ((w >> 10) & 0xfffu) * elem;
+        return base == want;
+    }
+    if ((w & 0xFFC00000u) == 0xF9000000u || /* str xt */
+        (w & 0xFFC00000u) == 0xF9400000u) { /* ldr xt */
+        elem = 8;
+        base = ((w >> 10) & 0xfffu) * elem;
+        return base == want;
+    }
+    /* STUR/LDUR 32/64, 9-bit signed byte offset. */
+    if ((w & 0xFFE00C00u) == 0xB8000000u || /* stur wt */
+        (w & 0xFFE00C00u) == 0xB8400000u || /* ldur wt */
+        (w & 0xFFE00C00u) == 0xF8000000u || /* stur xt */
+        (w & 0xFFE00C00u) == 0xF8400000u) { /* ldur xt */
+        int imm9 = (int)((w >> 12) & 0x1ff);
+        if (imm9 & 0x100) imm9 |= ~0x1ff;
+        return imm9 == (int)want;
+    }
+    return 0;
+}
+
+static int a64_is_movz64_imm(uint32_t w, unsigned *imm, int *rd) {
+    if ((w & 0xFF800000u) != 0xD2800000u) return 0; /* movz xd, #imm, lsl #0 */
+    if ((w >> 21) & 3) return 0; /* hw != 0 */
+    if (imm) *imm = (w >> 5) & 0xffffu;
+    if (rd) *rd = (int)(w & 31);
+    return 1;
+}
+
+/* ADD xd, xn, xm (no shift). */
+static int a64_is_add_reg(uint32_t w, int *rd, int *rn, int *rm) {
+    if ((w & 0xFF200000u) != 0x8B000000u) return 0;
+    if ((w >> 10) & 0x3fu) return 0; /* shift amount */
+    if (rd) *rd = (int)(w & 31);
+    if (rn) *rn = (int)((w >> 5) & 31);
+    if (rm) *rm = (int)((w >> 16) & 31);
+    return 1;
+}
+
+static int a64_text_addresses_off(const EmitModule *em, unsigned off) {
+    const unsigned char *p = (const unsigned char *)em->text.data;
+    size_t n = em->text.len / 4;
+    uint32_t *ws = (uint32_t *)malloc(n * sizeof(uint32_t));
+    if (!ws) return 0;
+    for (size_t i = 0; i < n; i++) memcpy(&ws[i], p + i * 4, 4);
+    int found = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned imm = 0;
+        int rd = -1, rn = -1, rm = -1;
+        if (a64_is_add_imm(ws[i], &imm) && imm == off) { found = 1; break; }
+        if (a64_is_mem_off(ws[i], off)) { found = 1; break; }
+        /* isel of (aligned_base + 4) often uses movz #4 + add_reg. */
+        if (a64_is_movz64_imm(ws[i], &imm, &rd) && imm == off) {
+            for (size_t j = i + 1; j < i + 6 && j < n; j++) {
+                if (a64_is_add_reg(ws[j], NULL, &rn, &rm) && (rm == rd || rn == rd)) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (found) break;
+        }
+    }
+    free(ws);
+    return found;
+}
+
+/* Rematerializing &v[1] as AND(fp+slot+4, 32) overwrites v[0] on Darwin
+ * (AAPCS64 only 16-aligns SP).  The field addend must be applied after the
+ * mask, or addressed as [aligned_base, #4]. */
+static void test_a64_overalign_vector_field(void) {
+    const TargetDesc *saved = target_current();
+    target_set_current(target_arm64_macos());
+    const char *src =
+        "package main;\n"
+        "typedef int V __attribute__((vector_size(32)));\n"
+        "int main(void) {\n"
+        "  V a;\n"
+        "  a[0] = 1;\n"
+        "  a[1] = 2;\n"
+        "  return a[1];\n"
+        "}";
+    EmitModule em0 = compile_o0(src);
+    T_ASSERT(a64_text_addresses_off(&em0, 4));
+    emit_module_free(&em0);
+
+    TokenArray arr;
+    token_array_init(&arr);
+    lex(src, "test.c", &arr);
+    TranslationUnit tu; tu_init(&tu);
+    parse(&arr, &tu);
+    sema_check(&tu, 1);
+    IRModule ir; ir_module_init(&ir);
+    ir_generate(&tu, &ir, 0);
+    opt(&ir, 1, 0);
+    EmitModule em1;
+    emit_module_init(&em1);
+    codegen(&ir, &em1, 0);
+    T_ASSERT(a64_text_addresses_off(&em1, 4));
+    emit_module_free(&em1);
+    ir_module_free(&ir);
+    token_array_free(&arr);
+    tu_free(&tu);
+    target_set_current(saved);
+}
+
 /* ---- main ---- */
 
 
@@ -962,5 +1083,6 @@ int main(void) {
     test_o0_struct_ret_no_keep_slot();
     test_o0_struct_ret_named_local();
     test_o0_struct_ret_switch_no_spill();
+    test_a64_overalign_vector_field();
     return t_finalize();
 }
