@@ -1,6 +1,7 @@
 #include "fakecc/ast.h"
 #include "fakecc/target.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -471,10 +472,53 @@ const StructDef *struct_registry_find_c(const StructRegistry *r, const char *tag
     return struct_registry_find((StructRegistry *)r, tag);
 }
 
-/* Round up x to a multiple of align. */
-static long long align_up(long long x, long long align) {
-    if (align <= 1) return x;
-    return (x + align - 1) & ~(align - 1);
+/* Signed multiply/add that reject results not representable in long long. */
+static int muls_ok(long long a, long long b, long long *out) {
+    if (a == 0 || b == 0) { *out = 0; return 1; }
+    if (a < 0 || b < 0) return 0;
+    if (a > LLONG_MAX / b) return 0;
+    *out = a * b;
+    return 1;
+}
+
+static int adds_ok(long long a, long long b, long long *out) {
+    if (b > 0 && a > LLONG_MAX - b) return 0;
+    if (b < 0 && a < LLONG_MIN - b) return 0;
+    *out = a + b;
+    return 1;
+}
+
+static void layout_too_large(const StructDef *sd) {
+    die_at(sd ? sd->loc.file : NULL,
+           sd ? sd->loc.line : 0,
+           sd ? sd->loc.col : 0,
+           "struct is too large");
+}
+
+/* Round up x to a multiple of align.  Returns 0 if the result would
+ * overflow a signed long long (e.g. LLONG_MAX + 4).
+ * Use x + (align - 1), not (x + align) - 1: when x == LLONG_MAX - align + 1,
+ * x + align overflows even though the rounded value is representable. */
+static int align_up(long long x, long long align, long long *out) {
+    if (align <= 1) {
+        *out = x;
+        return 1;
+    }
+    if (x < 0 || align < 0) return 0;
+    if ((align - 1) > LLONG_MAX - x) return 0;
+    *out = (x + (align - 1)) & ~(align - 1);
+    return 1;
+}
+
+static void bump_struct_align(StructDef *sd, long long a) {
+    if (a > sd->align) sd->align = a;
+}
+
+/* in_unit + bit_width can overflow when unit_bits is near LLONG_MAX. */
+static int bitfield_crosses_unit(long long in_unit, int bit_width, long long unit_bits) {
+    if (bit_width <= 0) return 0;
+    if (bit_width > unit_bits) return 1;
+    return in_unit > unit_bits - bit_width;
 }
 
 /* Natural alignment of a type: 1/2/4/8 for scalars, the vector width for
@@ -969,8 +1013,14 @@ int host_has_avx512f(void) {
 
 static void close_bitfield_run(StructDef *sd) {
     if (!sd || sd->bf_unit_type == 0) return;
-    long long next_bit = sd->bf_unit_offset * 8 + sd->bf_unit_used;
-    long long bytes = (next_bit + 7) / 8;
+    long long next_bit, bytes;
+    if (!muls_ok(sd->bf_unit_offset, 8, &next_bit) ||
+        !adds_ok(next_bit, sd->bf_unit_used, &next_bit) ||
+        !adds_ok(next_bit, 7, &bytes)) {
+        layout_too_large(sd);
+        return;
+    }
+    bytes /= 8;
     if (bytes > sd->size) sd->size = bytes;
     sd->bf_unit_type = 0;
     sd->bf_unit_used = 0;
@@ -1011,8 +1061,8 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
     long long sz = type_size(ty);
     /* FAM / incomplete array: no allocated bytes; `[0]` is already 0. */
     if (sz < 0) sz = 0;
-    /* Track the max member alignment for final struct alignment. */
-    if (a > sd->align) sd->align = a;
+    /* Delay updating sd->align until the member is actually accepted, so a
+     * rejected oversized member cannot leave a poisoned alignment behind. */
     long long off;
     if (sd->is_union) {
         /* Union members all start at offset 0; total size is the max. */
@@ -1022,7 +1072,12 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
          * allocation unit.  Unnamed `: 0` is not a real member. */
         if (bit_width == 0) {
             close_bitfield_run(sd);
-            sd->size = align_up(sd->size, a > 0 ? a : 1);
+            if (fakecc_had_error()) return;
+            if (!align_up(sd->size, a > 0 ? a : 1, &sd->size)) {
+                layout_too_large(sd);
+                return;
+            }
+            bump_struct_align(sd, a);
             sd->members[sd->num_members].name = xstrdup(name ? name : "");
             sd->members[sd->num_members].type = type_clone(ty);
             sd->members[sd->num_members].offset = sd->size;
@@ -1036,21 +1091,40 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
          * declared type T must sit in one T-sized, T-aligned cell unless
          * the struct is packed (then bits concatenate with no padding). */
         long long unit = sz > 0 ? sz : 4;
-        long long unit_bits = unit * 8;
-        long long start_bit = (sd->bf_unit_type != 0)
-            ? (sd->bf_unit_offset * 8 + sd->bf_unit_used)
-            : (sd->size * 8);
+        long long unit_bits, start_bit, size_bits, off_bits, align_bits;
+        if (!muls_ok(unit, 8, &unit_bits) ||
+            !muls_ok(sd->size, 8, &size_bits) ||
+            !muls_ok(a > 0 ? a : 1, 8, &align_bits) ||
+            (sd->bf_unit_type != 0 &&
+             (!muls_ok(sd->bf_unit_offset, 8, &off_bits) ||
+              !adds_ok(off_bits, sd->bf_unit_used, &off_bits)))) {
+            layout_too_large(sd);
+            return;
+        }
+        start_bit = (sd->bf_unit_type != 0) ? off_bits : size_bits;
         if (!sd->is_packed) {
             long long in_unit = start_bit % unit_bits;
-            if (in_unit + bit_width > unit_bits)
-                start_bit += unit_bits - in_unit;
-            long long align_bits = (a > 0 ? a : 1) * 8;
+            if (bitfield_crosses_unit(in_unit, bit_width, unit_bits)) {
+                if (!adds_ok(start_bit, unit_bits - in_unit, &start_bit)) {
+                    layout_too_large(sd);
+                    return;
+                }
+            }
             long long unit_start = start_bit - (start_bit % unit_bits);
             if (align_bits > 0 && (unit_start % align_bits) != 0) {
-                start_bit = ((start_bit + align_bits - 1) / align_bits) * align_bits;
+                long long aligned;
+                if (!adds_ok(start_bit, align_bits - 1, &aligned)) {
+                    layout_too_large(sd);
+                    return;
+                }
+                start_bit = (aligned / align_bits) * align_bits;
                 in_unit = start_bit % unit_bits;
-                if (in_unit + bit_width > unit_bits)
-                    start_bit += unit_bits - in_unit;
+                if (bitfield_crosses_unit(in_unit, bit_width, unit_bits)) {
+                    if (!adds_ok(start_bit, unit_bits - in_unit, &start_bit)) {
+                        layout_too_large(sd);
+                        return;
+                    }
+                }
             }
         }
         long long container;
@@ -1062,15 +1136,31 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
             container = start_bit / 8;
             bit_off = (int)(start_bit % 8);
         } else {
-            container = (start_bit / unit_bits) * unit;
-            bit_off = (int)(start_bit - container * 8);
+            /* container * 8 == (start_bit / unit_bits) * unit_bits
+             * <= start_bit, so it cannot overflow if unit_bits == unit * 8
+             * and start_bit is representable.  Still use checked ops so a
+             * broken invariant is diagnosed instead of wrapping. */
+            long long q = start_bit / unit_bits;
+            long long container_bits;
+            if (!muls_ok(q, unit, &container) ||
+                !muls_ok(container, 8, &container_bits)) {
+                layout_too_large(sd);
+                return;
+            }
+            bit_off = (int)(start_bit - container_bits);
         }
-        long long end_bit = start_bit + bit_width;
-        long long end_bytes = (end_bit + 7) / 8;
+        long long end_bit, end_bytes;
+        if (!adds_ok(start_bit, bit_width, &end_bit) ||
+            !adds_ok(end_bit, 7, &end_bytes)) {
+            layout_too_large(sd);
+            return;
+        }
+        end_bytes /= 8;
         if (end_bytes > sd->size) sd->size = end_bytes;
         sd->bf_unit_type = 1;
         sd->bf_unit_offset = end_bit / 8;
         sd->bf_unit_used = (int)(end_bit % 8);
+        bump_struct_align(sd, a);
         sd->members[sd->num_members].bit_offset = bit_off;
         sd->members[sd->num_members].offset = container;
         sd->members[sd->num_members].bit_width = bit_width;
@@ -1084,8 +1174,25 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
          * Alignment padding is deferred to struct_def_finish() so trailing
          * members can pack into leftover bytes of a bitfield unit. */
         close_bitfield_run(sd);
-        off = align_up(sd->size, a);
+        if (fakecc_had_error()) return;
+        if (!align_up(sd->size, a, &off)) {
+            layout_too_large(sd);
+            return;
+        }
     }
+    /* Compute the new size before recording the member so an overflow
+     * cannot leave a partial invalid entry in sd->members. */
+    long long new_size = sd->size;
+    if (sd->is_union) {
+        /* Size grows to the largest member.  Final alignment is applied once
+         * in struct_def_finish(), not here — padding after every member would
+         * prevent later members from packing into the trailing gap. */
+        if (sz > new_size) new_size = sz;
+    } else if (!adds_ok(off, sz, &new_size)) {
+        layout_too_large(sd);
+        return;
+    }
+    bump_struct_align(sd, a);
     sd->members[sd->num_members].name = xstrdup(name);
     sd->members[sd->num_members].type = type_clone(ty);
     sd->members[sd->num_members].offset = off;
@@ -1093,18 +1200,7 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
     sd->members[sd->num_members].bit_offset = 0;
     sd->members[sd->num_members].align = align;
     sd->num_members++;
-    if (sd->is_union) {
-        /* Size grows to the largest member.  Final alignment is applied once
-         * in struct_def_finish(), not here — padding after every member would
-         * prevent later members from packing into the trailing gap. */
-        if (sz > sd->size) sd->size = sz;
-    } else {
-        /* Track the raw byte end of the member.  Alignment padding to the
-         * struct's natural boundary is deferred to struct_def_finish() so
-         * that a following member can still pack into any trailing gap
-         * (e.g. `struct { void *p; int a; int b; }` packs a,b at 8,12). */
-        sd->size = off + sz;
-    }
+    sd->size = new_size;
 }
 
 /* Finalize a struct/union definition: round the total size up to the struct's
@@ -1113,7 +1209,8 @@ void struct_def_push_member_aligned(StructDef *sd, const char *name, Type ty, in
  * break trailing-member packing. */
 void struct_def_finish(StructDef *sd) {
     if (sd->is_packed && sd->align < 1) sd->align = 1;
-    sd->size = align_up(sd->size, sd->align);
+    if (!align_up(sd->size, sd->align, &sd->size))
+        layout_too_large(sd);
 }
 
 void struct_def_apply_sso(StructDef *sd, int is_big_endian) {

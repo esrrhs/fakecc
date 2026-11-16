@@ -3,6 +3,7 @@
 #include "fakecc/common.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -197,9 +198,14 @@ static char *expand_template(const char *tmpl, const IAsmOperand *ops, int nops)
             else if (*p == 'k') { size_ovr = 4; p++; }
             else if (*p == 'q') { size_ovr = 8; p++; }
             else if (*p == 'h' || *p == 'c') { p++; } /* ignore rarely used */
-            int idx = 0;
+            long long idx = 0;
             while (isdigit((unsigned char)*p)) {
-                idx = idx * 10 + (*p - '0');
+                int dig = *p - '0';
+                if (idx > (LLONG_MAX - dig) / 10) {
+                    free(out);
+                    return NULL;
+                }
+                idx = idx * 10 + dig;
                 p++;
             }
             if (idx < 0 || idx >= nops) {
@@ -1121,6 +1127,9 @@ int iasm_emit_x86(Buffer *text, EmitModule *out,
     (void)file; (void)line; (void)col;
     if (!template || !*template) return 0;
     char *expanded = expand_template(template, ops, nops);
+    /* Keep expand failure non-fatal (same as origin/master). die_at would
+       regress compile-suite case pr98096.c: asm goto "# %0 %2" has a
+       label operand not counted in nops, so expand already returned NULL. */
     if (!expanded) return -1;
 
     LocLab labs[MAX_LOCLAB];

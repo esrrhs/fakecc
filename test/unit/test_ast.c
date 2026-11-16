@@ -1,10 +1,12 @@
 #include "fakecc/ast.h"
+#include "fakecc/common.h"
 #include "fakecc/target.h"
 #include "fakecc/lexer.h"
 #include "fakecc/parser.h"
 #include "fakecc/token.h"
 #include "test_framework.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -210,6 +212,158 @@ static void test_more_expr_helpers(void) {
     }
 }
 
+
+static void test_struct_layout_normal(void) {
+    StructRegistry r;
+    struct_registry_init(&r);
+    StructDef *sd = struct_registry_add(&r, "CI", loc());
+    Type ch = type_make_int(1, 0);
+    Type i32 = type_make_int(4, 0);
+    fakecc_clear_error();
+    struct_def_push_member(sd, "c", ch, -1);
+    struct_def_push_member(sd, "i", i32, -1);
+    struct_def_finish(sd);
+    T_ASSERT(!fakecc_had_error());
+    T_ASSERT_EQ_INT((int)sd->members[0].offset, 0);
+    T_ASSERT_EQ_INT((int)sd->members[1].offset, 4);
+    T_ASSERT_EQ_INT((int)sd->size, 8);
+    struct_registry_free(&r);
+}
+
+/* Logged UBSan site: align_up(LLONG_MAX, 4) did (LLONG_MAX + 4) - 1. */
+static void test_align_up_rejects_llong_max(void) {
+    StructRegistry r;
+    struct_registry_init(&r);
+    StructDef *sd = struct_registry_add(&r, "HugeAlign", loc());
+    sd->size = LLONG_MAX;
+    sd->align = 4;
+    fakecc_clear_error();
+    fakecc_set_quiet(1);
+    struct_def_finish(sd);
+    fakecc_set_quiet(0);
+    T_ASSERT(fakecc_had_error());
+    T_ASSERT(strstr(fakecc_error_message(), "too large") != NULL);
+    T_ASSERT(sd->size == LLONG_MAX);
+    struct_registry_free(&r);
+    fakecc_clear_error();
+}
+
+/* Logged UBSan site: unit_bits = type_size * 8 with 2049638230412172490. */
+static void test_bitfield_rejects_huge_unit(void) {
+    StructRegistry r;
+    struct_registry_init(&r);
+    StructDef *sd = struct_registry_add(&r, "HugeBF", loc());
+    Type huge = type_make_int(2049638230412172490LL, 0);
+    fakecc_clear_error();
+    fakecc_set_quiet(1);
+    struct_def_push_member(sd, "bf", huge, 1);
+    fakecc_set_quiet(0);
+    T_ASSERT(fakecc_had_error());
+    T_ASSERT(strstr(fakecc_error_message(), "too large") != NULL);
+    T_ASSERT(sd->size == 0);
+    T_ASSERT_EQ_INT(sd->num_members, 0);
+    T_ASSERT(sd->align == 1);
+    struct_registry_free(&r);
+    fakecc_clear_error();
+}
+
+/* LLONG_MAX-3 is already 4-aligned, so x+(align-1) is representable
+ * even though the left-associative (x+align)-1 overflows. */
+static void test_align_up_llong_max_minus_3(void) {
+    StructRegistry r;
+    struct_registry_init(&r);
+    StructDef *sd = struct_registry_add(&r, "AlignBdry", loc());
+    sd->size = LLONG_MAX - 3;
+    sd->align = 4;
+    fakecc_clear_error();
+    struct_def_finish(sd);
+    T_ASSERT(!fakecc_had_error());
+    T_ASSERT(sd->size == LLONG_MAX - 3);
+    struct_registry_free(&r);
+}
+
+/* Next 4-byte boundary would be LLONG_MAX+1; must reject without wrapping. */
+static void test_align_up_llong_max_minus_2(void) {
+    StructRegistry r;
+    struct_registry_init(&r);
+    StructDef *sd = struct_registry_add(&r, "AlignOverflow", loc());
+    sd->size = LLONG_MAX - 2;
+    sd->align = 4;
+    fakecc_clear_error();
+    fakecc_set_quiet(1);
+    struct_def_finish(sd);
+    fakecc_set_quiet(0);
+    T_ASSERT(fakecc_had_error());
+    T_ASSERT(strstr(fakecc_error_message(), "too large") != NULL);
+    T_ASSERT(sd->size == LLONG_MAX - 2);
+    struct_registry_free(&r);
+    fakecc_clear_error();
+}
+
+/* off+sz overflow must not leave a partial member or a bumped alignment. */
+static void test_member_size_overflow_not_added(void) {
+    StructRegistry r;
+    struct_registry_init(&r);
+    StructDef *sd = struct_registry_add(&r, "NoPartial", loc());
+    sd->size = LLONG_MAX - 3;
+    Type i32 = type_make_int(4, 0);
+    fakecc_clear_error();
+    fakecc_set_quiet(1);
+    struct_def_push_member(sd, "x", i32, -1);
+    fakecc_set_quiet(0);
+    T_ASSERT(fakecc_had_error());
+    T_ASSERT(strstr(fakecc_error_message(), "too large") != NULL);
+    T_ASSERT_EQ_INT(sd->num_members, 0);
+    T_ASSERT(sd->size == LLONG_MAX - 3);
+    T_ASSERT(sd->align == 1);
+    struct_registry_free(&r);
+    fakecc_clear_error();
+}
+
+/* unit == LLONG_MAX/8 is the largest value for which unit*8 is representable.
+ * A 1-bit field at offset 0 must compute container and container*8 without UB. */
+static void test_bitfield_unit_at_mul8_limit(void) {
+    StructRegistry r;
+    struct_registry_init(&r);
+    StructDef *sd = struct_registry_add(&r, "UnitLimit", loc());
+    Type unit = type_make_int(LLONG_MAX / 8, 0);
+    fakecc_clear_error();
+    fakecc_set_quiet(1);
+    struct_def_push_member(sd, "bf", unit, 1);
+    fakecc_set_quiet(0);
+    T_ASSERT(!fakecc_had_error());
+    T_ASSERT_EQ_INT(sd->num_members, 1);
+    T_ASSERT_EQ_INT((int)sd->members[0].offset, 0);
+    T_ASSERT_EQ_INT((int)sd->members[0].bit_width, 1);
+    T_ASSERT(sd->size == 1);
+    struct_registry_free(&r);
+}
+
+/* start_bit near the end of a max representable unit, bit_width large enough
+ * that the naive in_unit + bit_width overflows long long. */
+static void test_bitfield_in_unit_add_boundary(void) {
+    StructRegistry r;
+    struct_registry_init(&r);
+    StructDef *sd = struct_registry_add(&r, "InUnitAdd", loc());
+    sd->size = (LLONG_MAX / 8) - 1;
+    Type unit = type_make_int(LLONG_MAX / 8, 0);
+    fakecc_clear_error();
+    fakecc_set_quiet(1);
+    struct_def_push_member(sd, "bf", unit, 16);
+    fakecc_set_quiet(0);
+    T_ASSERT(!fakecc_had_error() || strstr(fakecc_error_message(), "too large") != NULL);
+    if (!fakecc_had_error()) {
+        T_ASSERT_EQ_INT(sd->num_members, 1);
+        T_ASSERT_EQ_INT((int)sd->members[0].bit_width, 16);
+    } else {
+        T_ASSERT_EQ_INT(sd->num_members, 0);
+        T_ASSERT(sd->size == (LLONG_MAX / 8) - 1);
+        T_ASSERT(sd->align == 1);
+    }
+    struct_registry_free(&r);
+    fakecc_clear_error();
+}
+
 int main(void) {
     test_align16_and_empty();
     test_typedef_and_func_equal();
@@ -217,5 +371,13 @@ int main(void) {
     test_fold_int128();
     test_stmt_and_expr_clone();
     test_more_expr_helpers();
+    test_struct_layout_normal();
+    test_align_up_rejects_llong_max();
+    test_bitfield_rejects_huge_unit();
+    test_align_up_llong_max_minus_3();
+    test_align_up_llong_max_minus_2();
+    test_member_size_overflow_not_added();
+    test_bitfield_unit_at_mul8_limit();
+    test_bitfield_in_unit_add_boundary();
     return t_finalize();
 }

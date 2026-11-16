@@ -66,6 +66,10 @@ add_executable(test_ast unit/test_ast.c)
 target_link_libraries(test_ast PRIVATE fakecc_core test_framework)
 add_test(NAME test_ast COMMAND test_ast)
 
+add_executable(test_iasm unit/test_iasm.c)
+target_link_libraries(test_iasm PRIVATE fakecc_core test_framework)
+add_test(NAME test_iasm COMMAND test_iasm)
+
 add_executable(test_rare unit/test_rare.c)
 target_link_libraries(test_rare PRIVATE fakecc_core test_framework)
 add_test(NAME test_rare COMMAND test_rare)
