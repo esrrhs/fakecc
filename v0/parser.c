@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -733,6 +734,7 @@ const char *pkg_suggest_export(const PkgContext *ctx, const char *name);
 char **pkg_list_sources(const char *dir, size_t *n_out);
 typedef struct FILE FILE;
 typedef long fpos_t;
+
 static TranslationUnit *g_parser_tu = ((void*)0);
 const StructRegistry *get_parser_structs(void) {
     return g_parser_tu ? &g_parser_tu->structs : ((void*)0);

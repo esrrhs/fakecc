@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -51,6 +52,7 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
+
 struct EmitModule;
 struct MachoDebug {
     Buffer abbrev;
@@ -292,7 +294,8 @@ enum DebugLocKind {
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
     DBG_LOC_ADDR = 3,
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    DBG_LOC_FBREG_VALUE = 5
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -520,6 +523,7 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
                                    const DebugCallSite *cs);
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
+
 typedef int IRValue;
 enum IROpcode {
     IR_CONST,
@@ -1384,6 +1388,11 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
+    if (!inst || inst->op != IR_CALL || inst->a < 0) return 0;
+    if (inst->x87_pair) return 1;
+    return inst->dst < 0 && inst->imm >= 1 && inst->imm <= 2;
+}
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
 }
@@ -1438,6 +1447,7 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
+
 enum A64GpReg {
     A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
     A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,

@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -194,6 +195,7 @@ void a64_str_d(A64Asm *a, int rt, int rn, int off);
 void a64_ldr_d(A64Asm *a, int rt, int rn, int off);
 void a64_str_s(A64Asm *a, int rt, int rn, int off);
 void a64_ldr_s(A64Asm *a, int rt, int rn, int off);
+
 typedef struct FILE FILE;
 typedef long fpos_t;
 void a64_init(A64Asm *a) {

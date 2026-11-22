@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -915,6 +916,11 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
+    if (!inst || inst->op != IR_CALL || inst->a < 0) return 0;
+    if (inst->x87_pair) return 1;
+    return inst->dst < 0 && inst->imm >= 1 && inst->imm <= 2;
+}
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
 }
@@ -1161,8 +1167,33 @@ static int value_is_ld(const IRFunction *fn, int v) {
     if (fn->value_is_float[v] == 4) return 0;
     return fn->value_width[v] == 16;
 }
+static char *ra_pinned_alloca_skip;
+static int ra_pinned_alloca_nv;
+static void ra_set_pinned_alloca_skip(const IRFunction *fn) {
+    int nv = fn && fn->next_value_id > 0 ? fn->next_value_id : 0;
+    runtime.free(ra_pinned_alloca_skip);
+    ra_pinned_alloca_skip = ((void*)0);
+    ra_pinned_alloca_nv = nv;
+    if (nv <= 0 || !fn) return;
+    ra_pinned_alloca_skip = xmalloc((size_t)nv);
+    runtime.memset(ra_pinned_alloca_skip, 0, (size_t)nv);
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *in = &fn->insts.data[i];
+        if (in->op == IR_ALLOCA && in->alloca_bytes > 0
+            && in->dst >= 0 && in->dst < nv)
+            ra_pinned_alloca_skip[in->dst] = 1;
+    }
+}
+static void ra_clear_pinned_alloca_skip(void) {
+    runtime.free(ra_pinned_alloca_skip);
+    ra_pinned_alloca_skip = ((void*)0);
+    ra_pinned_alloca_nv = 0;
+}
 static int value_in_class(const IRFunction *fn, int v, int float_class,
                           int exclude_16byte_ld) {
+    if (ra_pinned_alloca_skip && v >= 0 && v < ra_pinned_alloca_nv
+        && ra_pinned_alloca_skip[v])
+        return 0;
     if (float_class)
         return value_is_float_class(fn, v)
             && (!exclude_16byte_ld || !value_is_ld(fn, v));
@@ -1181,6 +1212,58 @@ static int *ra_build_defs(const IRFunction *fn) {
 static int def_op_is(const IRFunction *fn, const int *def, IRValue v, IROpcode op) {
     if (v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
     return fn->insts.data[def[v]].op == op;
+}
+static char *ra_build_unique_def(const IRFunction *fn) {
+    int nv = fn->next_value_id > 0 ? fn->next_value_id : 1;
+    unsigned char *cnt = xmalloc((size_t)nv);
+    runtime.memset(cnt, 0, (size_t)nv);
+    for (size_t i = 0; i < fn->insts.len; i++) {
+        const IRInst *in = &fn->insts.data[i];
+        if (in->dst >= 0 && in->dst < nv && cnt[in->dst] < 2)
+            cnt[in->dst]++;
+        if (ir_op_with_overflow(in->op) && in->c >= 0 && in->c < nv
+            && cnt[in->c] < 2)
+            cnt[in->c]++;
+    }
+    char *unique = xmalloc((size_t)nv);
+    for (int i = 0; i < nv; i++)
+        unique[i] = (cnt[i] == 1);
+    runtime.free(cnt);
+    return unique;
+}
+static int ra_ptr_folds_pinned_frame(const IRFunction *fn, const int *def,
+                                    const char *unique, IRValue v, int depth) {
+    if (depth > 8 || !fn || !def || !unique
+        || v < 0 || v >= fn->next_value_id || def[v] < 0)
+        return 0;
+    if (!unique[v]) return 0;
+    const IRInst *d = &fn->insts.data[def[v]];
+    if (d->op == IR_COPY)
+        return ra_ptr_folds_pinned_frame(fn, def, unique, d->a, depth + 1);
+    if (d->op == IR_ADDR) {
+        IRValue slot = d->a;
+        if (slot < 0 || slot >= fn->next_value_id || def[slot] < 0) return 0;
+        const IRInst *al = &fn->insts.data[def[slot]];
+        if (al->op != IR_ALLOCA || al->alloca_bytes <= 0) return 0;
+        if (al->imm >= 32) return 0;
+        return 1;
+    }
+    if (d->op == IR_ADD) {
+        if (d->b >= 0 && def_op_is(fn, def, d->b, IR_CONST)
+            && !fn->insts.data[def[d->b]].is_float)
+            return ra_ptr_folds_pinned_frame(fn, def, unique, d->a, depth + 1);
+        if (d->a >= 0 && def_op_is(fn, def, d->a, IR_CONST)
+            && !fn->insts.data[def[d->a]].is_float)
+            return ra_ptr_folds_pinned_frame(fn, def, unique, d->b, depth + 1);
+    }
+    return 0;
+}
+static int ra_call_ret_ptr_needs_live_after(const IRFunction *fn, const int *def,
+                                           const char *unique, const IRInst *inst) {
+    if (!ir_call_ret_ptr_live_after(inst)) return 0;
+    if (inst->x87_pair) return 1;
+    if (target_current()->arch != TARGET_ARCH_X86_64) return 1;
+    return !ra_ptr_folds_pinned_frame(fn, def, unique, inst->a, 0);
 }
 static int ra_is_stack_base(const IRFunction *fn, const int *def, IRValue v, int depth) {
     if (depth > 8 || v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
@@ -1559,6 +1642,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
     ig_init(g, nv);
     for (int v = 0; v < nv; v++) forbid_mask[v] = 0;
     int *ssa_def = ra_build_defs(fn);
+    char *unique_def = ra_build_unique_def(fn);
     if (!float_class && cls->nregs > 0) {
         uint32_t all = cls->nregs >= 32 ? 0xffffffffu
                                         : (1u << cls->nregs) - 1u;
@@ -1595,6 +1679,11 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             const IRInst *inst = &fn->insts.data[i - 1];
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
+            if (inst->op == IR_CALL
+                && ra_call_ret_ptr_needs_live_after(fn, ssa_def, unique_def, inst)
+                && inst->a < nv
+                && value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
+                bs_set(&live, inst->a);
             if (inst->op == IR_CALL || inst->op == IR_ASM) {
                 for (int over = 0; over < (&live)->nv; over++) if (bs_test((&live), over)) {
                     if ((int)over != inst->dst && (int)over != inst->b &&
@@ -1687,6 +1776,11 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
             const IRInst *inst = &fn->insts.data[i - 1];
         if (inst->op == IR_LABEL || inst->op == IR_BR ||
             inst->op == IR_DBG_VALUE) continue;
+            if (inst->op == IR_CALL
+                && ra_call_ret_ptr_needs_live_after(fn, ssa_def, unique_def, inst)
+                && inst->a < nv
+                && value_in_class(fn, inst->a, float_class, cls->exclude_16byte_ld))
+                bs_set(&live, inst->a);
             if (inst->dst >= 0 && inst->dst < nv &&
                 value_in_class(fn, inst->dst, float_class, cls->exclude_16byte_ld)
                 && !ir_op_vec_store(inst->op)) {
@@ -1800,6 +1894,7 @@ static void build_interf_graph_cfg(const IRFunction *fn, const CFG *cfg,
     }
     runtime.free(use_b); runtime.free(def_b); runtime.free(in_b); runtime.free(out_b);
     runtime.free(ssa_def);
+    runtime.free(unique_def);
 }
 static int *compute_mcs_order(const InterfGraph *g) {
     int n = g->n;
@@ -2025,15 +2120,22 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
                                 const RegClass *cls) {
     int nv = fn->next_value_id;
     if (nv <= 0) return ((void*)0);
+    ra_set_pinned_alloca_skip(fn);
     {
         int any = 0;
         for (int v = 0; v < nv; v++) {
             if (value_in_class(fn, v, float_class, cls->exclude_16byte_ld)) { any = 1; break; }
         }
-        if (!any) return ((void*)0);
+        if (!any) {
+            ra_clear_pinned_alloca_skip();
+            return ((void*)0);
+        }
     }
     LiveInfo *liv = compute_liveness(fn);
-    if (!liv) return ((void*)0);
+    if (!liv) {
+        ra_clear_pinned_alloca_skip();
+        return ((void*)0);
+    }
     CFG cfg;
     cfg_build(&cfg, &fn->insts);
     InterfGraph g;
@@ -2074,6 +2176,7 @@ static RAResult *ra_alloc_class(const IRFunction *fn, int float_class,
     ig_free(&g);
     liv_free(liv, nv);
     cfg_free(&cfg);
+    ra_clear_pinned_alloca_skip();
     return ra;
 }
 RAResult *reg_alloc(const IRFunction *fn) {

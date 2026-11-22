@@ -8,6 +8,7 @@ static void __fakecc_va_copy(void *dst, void *src){
     for(int i = 0; i < 24; i++) d[i] = s[i];
 }
 
+
 typedef long ptrdiff_t;
 typedef unsigned long size_t;
 typedef long ssize_t;
@@ -116,7 +117,8 @@ enum DebugLocKind {
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
     DBG_LOC_ADDR = 3,
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    DBG_LOC_FBREG_VALUE = 5
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -334,6 +336,7 @@ int iasm_assemble_body(EmitModule *out, const char *body,
 int assemble_s_file(const char *src, const char *filename, EmitModule *out);
 typedef struct FILE FILE;
 typedef long fpos_t;
+
 enum {
     R_RAX = 0, R_RCX = 1, R_RDX = 2, R_RBX = 3,
     R_RSP = 4, R_RBP = 5, R_RSI = 6, R_RDI = 7,

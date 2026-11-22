@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -915,9 +916,15 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
+    if (!inst || inst->op != IR_CALL || inst->a < 0) return 0;
+    if (inst->x87_pair) return 1;
+    return inst->dst < 0 && inst->imm >= 1 && inst->imm <= 2;
+}
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
 }
+
 enum TargetArch {
     TARGET_ARCH_UNKNOWN = 0,
     TARGET_ARCH_X86_64 = 1,
@@ -953,6 +960,7 @@ const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
 const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
+
 int dfp_from_str(const char *text, int width,
                  unsigned long long *lo, unsigned long long *hi);
 void dfp_neg_bits(int width, unsigned long long *lo, unsigned long long *hi);
@@ -969,6 +977,7 @@ int dfp_from_int(unsigned long long val, unsigned long long val_hi,
 int dfp_convert_width(int src_w, unsigned long long slo, unsigned long long shi,
                       int dst_w, unsigned long long *dlo, unsigned long long *dhi);
 enum { DFP_ADD = 0, DFP_SUB = 1, DFP_MUL = 2, DFP_DIV = 3 };
+
 typedef struct FILE FILE;
 typedef long fpos_t;
 IRModule *g_ir_module = ((void*)0);
@@ -9522,8 +9531,6 @@ IRValue hi;
             inst.is_unsigned = 1;
             ir_inst_array_push(&fn->insts, inst);
             restore_big_copy(fn, big_copy_sp, e->loc);
-            IRValue keep = emit_alloca(fn, 8, 8, 1, e->loc);
-            emit_inst_w(fn, IR_STORE, -1, keep, slot_addr, 0, 8, 1, e->loc);
             runtime.free(arg_vals);
             runtime.free(arg_on_stack);
             runtime.free(arg_nbytes);
@@ -9548,8 +9555,6 @@ IRValue hi;
                 inst.width = 8;
                 inst.is_unsigned = 1;
                 ir_inst_array_push(&fn->insts, inst);
-                IRValue keep = emit_alloca(fn, 8, 8, 1, e->loc);
-                emit_inst_w(fn, IR_STORE, -1, keep, slot_addr, 0, 8, 1, e->loc);
                 runtime.free(arg_vals);
                 runtime.free(arg_on_stack);
                 runtime.free(arg_nbytes);
