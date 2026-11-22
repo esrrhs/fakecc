@@ -150,7 +150,8 @@ enum DebugLocKind {
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
     DBG_LOC_ADDR = 3,
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    DBG_LOC_FBREG_VALUE = 5
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -351,6 +352,7 @@ void link_set_image_base(uint64_t base);
 uint64_t link_image_base(void);
 int link_kernel_multiboot(const char **obj_paths, size_t npaths,
                           const char *out_path);
+
 typedef struct FILE FILE;
 typedef long fpos_t;
 static uint16_t ru16(const unsigned char *p) {

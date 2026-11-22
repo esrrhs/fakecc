@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -116,7 +117,8 @@ enum DebugLocKind {
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
     DBG_LOC_ADDR = 3,
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    DBG_LOC_FBREG_VALUE = 5
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -319,6 +321,7 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
                           const char *out_path);
 typedef struct FILE FILE;
 typedef long fpos_t;
+
 enum {
     ELFCLASS64 = 2,
     ET_REL = 1,

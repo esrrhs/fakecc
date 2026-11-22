@@ -8,6 +8,7 @@ static void __fakecc_va_copy(void *dst, void *src){
     for(int i = 0; i < 24; i++) d[i] = s[i];
 }
 
+
 typedef long ptrdiff_t;
 typedef unsigned long size_t;
 typedef long ssize_t;
@@ -42,6 +43,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -732,6 +734,7 @@ struct PkgContext;
 int parse(const TokenArray *tokens, TranslationUnit *tu);
 int parse_in_pkg(const TokenArray *tokens, TranslationUnit *tu,
                  struct PkgContext *ctx);
+
 enum TargetArch {
     TARGET_ARCH_UNKNOWN = 0,
     TARGET_ARCH_X86_64 = 1,
@@ -767,6 +770,7 @@ const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
 const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
+
 typedef struct FILE FILE;
 typedef long fpos_t;
 void pkg_ctx_init(PkgContext *ctx) {

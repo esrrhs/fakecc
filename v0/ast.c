@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -700,6 +701,7 @@ const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
 const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
+
 typedef struct FILE FILE;
 typedef long fpos_t;
 Type type_clone(Type t) {

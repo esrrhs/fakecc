@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -116,7 +117,8 @@ enum DebugLocKind {
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
     DBG_LOC_ADDR = 3,
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    DBG_LOC_FBREG_VALUE = 5
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -1181,6 +1183,11 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
+    if (!inst || inst->op != IR_CALL || inst->a < 0) return 0;
+    if (inst->x87_pair) return 1;
+    return inst->dst < 0 && inst->imm >= 1 && inst->imm <= 2;
+}
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
 }
@@ -1209,6 +1216,7 @@ enum NasmFormat {
 int assemble_nasm(const char *src, const char *filename,
                   NasmFormat fmt, const char *out_path);
 int is_nasm_input(const char *path);
+
 enum LdScriptKind {
     LDSCRIPT_KIND_UNKNOWN = 0,
     LDSCRIPT_KIND_KERNEL_HH,

@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -116,7 +117,8 @@ enum DebugLocKind {
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
     DBG_LOC_ADDR = 3,
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    DBG_LOC_FBREG_VALUE = 5
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -1181,9 +1183,15 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
+    if (!inst || inst->op != IR_CALL || inst->a < 0) return 0;
+    if (inst->x87_pair) return 1;
+    return inst->dst < 0 && inst->imm >= 1 && inst->imm <= 2;
+}
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
 }
+
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug);
 enum {
     A64_EQ = 0, A64_NE = 1, A64_CS = 2, A64_CC = 3,
@@ -1439,6 +1447,7 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
+
 enum A64GpReg {
     A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
     A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,
@@ -1463,6 +1472,7 @@ enum A64VecReg {
     A64_V_NONE = -1,
 };typedef enum A64VecReg A64VecReg;
 const RaRegClasses *ra_classes_arm64(void);
+
 enum TargetArch {
     TARGET_ARCH_UNKNOWN = 0,
     TARGET_ARCH_X86_64 = 1,
@@ -1684,6 +1694,7 @@ static void frame_store(C64 *c, int valrt, int off, int width, int aln);
 static void emit_fp_addr(C64 *c, int rd, int off);
 static void emit_fp_addr_aligned(C64 *c, int rd, int off, int aln);
 static int alloca_align_of(const C64 *c, IRValue slot, int nv);
+static void c64_emit_folded_ptr(C64 *c, int rd, int off, int addend, int aln);
 static void emit_mov_imm_w(A64Asm *a, int rd, int64_t imm, int is64);
 static void fmov_q(A64Asm *a, int rd, int rn);
 static void str_q(A64Asm *a, int rt, int rn, int byte_off);
@@ -1730,12 +1741,89 @@ struct C64DbgObs {
     int value;
     size_t pc;
 };typedef struct C64DbgObs C64DbgObs;
+static int c64_unique_def(const C64 *c, IRValue v) {
+    if (!c || !c->fn || v < 0) return 0;
+    int n = 0;
+    for (size_t i = 0; i < c->fn->insts.len; i++) {
+        const IRInst *in = &c->fn->insts.data[i];
+        if (in->dst == v) n++;
+        if (ir_op_with_overflow(in->op) && in->c == v) n++;
+        if (n > 1) return 0;
+    }
+    return n == 1;
+}
+static int c64_fold_ptr_off(const C64 *c, IRValue v, int *out_off,
+                            int *out_aln, int *out_addend, int depth) {
+    if (depth > 8 || !c || !c->fn || !c->def || !c->alloca_off
+        || v < 0 || v >= c->fn->next_value_id)
+        return 0;
+    int di = c->def[v];
+    if (di < 0 || (size_t)di >= c->fn->insts.len) return 0;
+    const IRInst *d = &c->fn->insts.data[di];
+    int nv = c->fn->next_value_id;
+    int addend = 0;
+    if (d->op == IR_COPY && c64_unique_def(c, v)) {
+        if (!c64_fold_ptr_off(c, d->a, out_off, out_aln, &addend, depth + 1))
+            return 0;
+        if (out_addend) *out_addend = addend;
+        return 1;
+    }
+    if (d->op == IR_ALLOCA && d->alloca_bytes > 0
+        && v < nv && c->alloca_off[v] != 0) {
+        *out_off = c->alloca_off[v];
+        if (out_aln) *out_aln = alloca_align_of(c, v, nv);
+        if (out_addend) *out_addend = 0;
+        return 1;
+    }
+    if (d->op == IR_ADDR && d->a >= 0 && d->a < nv
+        && c->alloca_off[d->a] != 0) {
+        *out_off = c->alloca_off[d->a];
+        if (out_aln) *out_aln = alloca_align_of(c, d->a, nv);
+        if (out_addend) *out_addend = 0;
+        return 1;
+    }
+    if (d->op == IR_ADD) {
+        int base_off = 0, base_aln = 0, base_add = 0;
+        if (d->b >= 0 && d->b < nv && c->def[d->b] >= 0) {
+            const IRInst *imm = &c->fn->insts.data[c->def[d->b]];
+            if (imm->op == IR_CONST && !imm->is_float
+                && c64_fold_ptr_off(c, d->a, &base_off, &base_aln,
+                                    &base_add, depth + 1)) {
+                *out_off = base_off;
+                if (out_aln) *out_aln = base_aln;
+                if (out_addend) *out_addend = base_add + (int)imm->imm;
+                return 1;
+            }
+        }
+        if (d->a >= 0 && d->a < nv && c->def[d->a] >= 0) {
+            const IRInst *imm = &c->fn->insts.data[c->def[d->a]];
+            if (imm->op == IR_CONST && !imm->is_float
+                && c64_fold_ptr_off(c, d->b, &base_off, &base_aln,
+                                    &base_add, depth + 1)) {
+                *out_off = base_off;
+                if (out_aln) *out_aln = base_aln;
+                if (out_addend) *out_addend = base_add + (int)imm->imm;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
 static void value_home64(C64 *c, int v, DebugLocKind *kind,
                          int *fbreg, int *dwarf_reg) {
     *kind = DBG_LOC_NONE;
     *fbreg = 0;
     *dwarf_reg = -1;
     if (v < 0) return;
+    {
+        int off = 0, aln = 0, addend = 0;
+        if (c64_fold_ptr_off(c, v, &off, &aln, &addend, 0) && off != 0
+            && aln <= 16) {
+            *kind = DBG_LOC_FBREG_VALUE;
+            *fbreg = off + addend;
+            return;
+        }
+    }
     if (scalar_fp_val(c, v) || vec16_val(c, v)) {
         if (!c->ra_fp || v >= c->ra_fp->num_values) return;
         if (c->ra_fp->reg[v] >= 0) {
@@ -1847,13 +1935,27 @@ static int load_op(C64 *c, IRValue v, int other) {
     }
     int r = home_reg(c, v);
     if (r >= 0) return r;
+    {
+        int off = 0, aln = 0, addend = 0;
+        if (c64_fold_ptr_off(c, v, &off, &aln, &addend, 0) && off != 0) {
+            c64_emit_folded_ptr(c, scratch, off, addend, aln);
+            return scratch;
+        }
+    }
     frame_load(c, scratch, spill_off(c, v), 8, 1, 0);
     return scratch;
 }
 static int load_ptrv(C64 *c, IRValue v, int other) {
+    int scratch = (other == A64_X16) ? A64_X17 : A64_X16;
     int r = home_reg(c, v);
     if (r >= 0) return r;
-    int scratch = (other == A64_X16) ? A64_X17 : A64_X16;
+    {
+        int off = 0, aln = 0, addend = 0;
+        if (c64_fold_ptr_off(c, v, &off, &aln, &addend, 0) && off != 0) {
+            c64_emit_folded_ptr(c, scratch, off, addend, aln);
+            return scratch;
+        }
+    }
     frame_load(c, scratch, spill_off(c, v), 8, 1, 0);
     return scratch;
 }
@@ -1875,6 +1977,39 @@ static void emit_fp_addr(C64 *c, int rd, int off) {
 static void emit_fp_addr_aligned(C64 *c, int rd, int off, int aln) {
     emit_fp_addr(c, rd, off);
     if (aln > 16) a64_and_imm(c->as, rd, rd, ~(uint64_t)(aln - 1), 1);
+}
+static void emit_addr_add(C64 *c, int rd, int disp) {
+    if (disp == 0) return;
+    int neg = disp < 0;
+    unsigned u = neg ? (unsigned)(-(int64_t)disp) : (unsigned)disp;
+    unsigned hi = u >> 12;
+    unsigned lo = u & 0xfffu;
+    if (hi > 4095) {
+        int tmp = (rd == A64_X16) ? A64_X17 : A64_X16;
+        emit_mov_imm_w(c->as, tmp, disp, 1);
+        a64_add_reg(c->as, rd, rd, tmp, A64_LSL, 0, 1, 0);
+        return;
+    }
+    if (lo) {
+        if (neg)
+            a64_sub_imm12(c->as, rd, rd, lo, 0, 1, 0);
+        else
+            a64_add_imm12(c->as, rd, rd, lo, 0, 1, 0);
+    }
+    if (hi) {
+        if (neg)
+            a64_sub_imm12(c->as, rd, rd, hi, 1, 1, 0);
+        else
+            a64_add_imm12(c->as, rd, rd, hi, 1, 1, 0);
+    }
+}
+static void c64_emit_folded_ptr(C64 *c, int rd, int off, int addend, int aln) {
+    if (aln <= 16) {
+        emit_fp_addr_aligned(c, rd, off + addend, aln);
+        return;
+    }
+    emit_fp_addr_aligned(c, rd, off, aln);
+    emit_addr_add(c, rd, addend);
 }
 static int alloca_align_of(const C64 *c, IRValue slot, int nv) {
     if (!c->alloca_aln || slot < 0 || slot >= nv) return 0;

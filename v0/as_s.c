@@ -116,7 +116,8 @@ enum DebugLocKind {
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
     DBG_LOC_ADDR = 3,
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    DBG_LOC_FBREG_VALUE = 5
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -334,6 +335,7 @@ int iasm_assemble_body(EmitModule *out, const char *body,
 int assemble_s_file(const char *src, const char *filename, EmitModule *out);
 typedef struct FILE FILE;
 typedef long fpos_t;
+
 struct Macro {
     char *name;
     char **formals;

@@ -42,6 +42,7 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -116,7 +117,8 @@ enum DebugLocKind {
     DBG_LOC_FBREG = 1,
     DBG_LOC_REG = 2,
     DBG_LOC_ADDR = 3,
-    DBG_LOC_ENTRY_VALUE = 4
+    DBG_LOC_ENTRY_VALUE = 4,
+    DBG_LOC_FBREG_VALUE = 5
 };typedef enum DebugLocKind DebugLocKind;
 struct DebugLocRange {
     size_t pc_start;
@@ -1181,6 +1183,11 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals);
 void ir_disable_builtin(const char *name);
 int ir_builtin_disabled(const char *name);
 const StructRegistry *get_ir_structs(void);
+static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
+    if (!inst || inst->op != IR_CALL || inst->a < 0) return 0;
+    if (inst->x87_pair) return 1;
+    return inst->dst < 0 && inst->imm >= 1 && inst->imm <= 2;
+}
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
 }
@@ -1188,6 +1195,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug);
 void codegen_set_code_model(int kernel);
 int codegen_code_model_is_kernel(void);
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug);
+
 DebugTypeTag ir_type_tag(int type_kind, int is_bool);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,
@@ -2592,6 +2600,120 @@ static size_t emit_arith_imm8_abs32(Buffer *b, int ext, int32_t imm, int index,
     emit_byte(b, (uint8_t)imm);
     return patch;
 }
+static size_t emit_arith_imm_abs32(Buffer *b, int ext, int32_t imm, int index,
+                                   int scale2, int width) {
+    if (width == 1)
+        return emit_arith_imm8_abs32(b, ext, imm, index, scale2);
+    if (width != 2) width = 4;
+    int imm8 = (imm >= -128 && imm <= 127);
+    if (width == 2) emit_byte(b, 0x66);
+    uint8_t opc = imm8 ? 0x83 : 0x81;
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        if (index >= 8) emit_byte(b, 0x41);
+        emit_byte(b, opc);
+        emit_modrm(b, 2, ext, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        if (idx >= 8) emit_byte(b, 0x42);
+        emit_byte(b, opc);
+        emit_modrm(b, 0, ext, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    if (imm8)
+        emit_byte(b, (uint8_t)imm);
+    else if (width == 2) {
+        emit_byte(b, (uint8_t)imm);
+        emit_byte(b, (uint8_t)(imm >> 8));
+    } else
+        emit_int32(b, imm);
+    return patch;
+}
+static size_t emit_arith_r_abs32(Buffer *b, int op, int src, int index,
+                                 int scale2, int width) {
+    if (width == 1)
+        return emit_arith_r8_abs32(b, op, src, index, scale2);
+    if (width == 2) emit_byte(b, 0x66);
+    if (index >= 0 && scale2 == 0 && (index & 7) != 4) {
+        emit_rex_if(b, 0, src, 0, index);
+        emit_byte(b, (uint8_t)op);
+        emit_modrm(b, 2, src & 7, index & 7);
+    } else {
+        int idx = index < 0 ? 4 : index;
+        int sc = index < 0 ? 0 : (scale2 & 3);
+        emit_rex_if(b, 0, src, idx, 0);
+        emit_byte(b, (uint8_t)op);
+        emit_modrm(b, 0, src & 7, 4);
+        emit_byte(b, (uint8_t)((sc << 6) | ((idx & 7) << 3) | 5));
+    }
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static void emit_arith_imm16_disp(Buffer *b, int ext, int base, int32_t imm,
+                                  int off) {
+    int imm8 = (imm >= -128 && imm <= 127);
+    emit_byte(b, 0x66);
+    if (base >= 8) emit_byte(b, 0x41);
+    emit_byte(b, imm8 ? 0x83 : 0x81);
+    emit_modrm_disp(b, ext, base, off);
+    if (imm8)
+        emit_byte(b, (uint8_t)imm);
+    else {
+        emit_byte(b, (uint8_t)imm);
+        emit_byte(b, (uint8_t)(imm >> 8));
+    }
+}
+static void emit_arith_r16_disp(Buffer *b, int op, int base, int src, int off) {
+    emit_byte(b, 0x66);
+    if (src >= 8 || base >= 8) emit_rex_wrb(b, 0, src, base);
+    emit_byte(b, (uint8_t)op);
+    emit_modrm_disp(b, src, base, off);
+}
+static size_t emit_arith_imm16_rip(Buffer *b, int ext, int32_t imm) {
+    int imm8 = (imm >= -128 && imm <= 127);
+    emit_byte(b, 0x66);
+    emit_byte(b, imm8 ? 0x83 : 0x81);
+    emit_modrm(b, 0, ext, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    if (imm8)
+        emit_byte(b, (uint8_t)imm);
+    else {
+        emit_byte(b, (uint8_t)imm);
+        emit_byte(b, (uint8_t)(imm >> 8));
+    }
+    return patch;
+}
+static size_t emit_arith_r16_rip(Buffer *b, int op, int src) {
+    emit_byte(b, 0x66);
+    emit_rex_if(b, 0, src, 0, 0);
+    emit_byte(b, (uint8_t)op);
+    emit_modrm(b, 0, src & 7, 5);
+    size_t patch = b->len;
+    emit_int32(b, 0);
+    return patch;
+}
+static void emit_arith_imm_disp_w(Buffer *b, int ext, int base, int32_t imm,
+                                  int off, int width) {
+    if (width == 1)
+        emit_arith_imm8_disp(b, ext, base, imm, off);
+    else if (width == 2)
+        emit_arith_imm16_disp(b, ext, base, imm, off);
+    else
+        emit_arith_imm32_disp(b, ext, base, imm, off);
+}
+static void emit_arith_r_disp_w(Buffer *b, int op, int base, int src, int off,
+                                int width) {
+    if (width == 1)
+        emit_arith_r8_disp(b, op, base, src, off);
+    else if (width == 2)
+        emit_arith_r16_disp(b, op, base, src, off);
+    else
+        emit_arith_r32_disp(b, op, base, src, off);
+}
 static size_t emit_store_imm_rip(Buffer *b, int32_t imm, int width) {
     size_t patch;
     if (width == 1) {
@@ -3213,10 +3335,23 @@ static int gp_home(const RAResult *ra, IRValue v) {
     int r = ra->reg[v];
     return (r >= 0 && r < 16) ? r : -1;
 }
+static int remat_sib_index(Buffer *b, const IRFunction *fn, const int *def,
+                          const RAResult *ra, const int *alloca_off,
+                          IRValue v, int dst, int depth);
+static const IRFunction *sib_remat_fn;
+static const int *sib_remat_def;
+static const int *sib_remat_alloca;
+static const char *sib_remat_skip;
 static int ensure_index(Buffer *b, IRValue v, const RAResult *ra) {
     int home = gp_home(ra, v);
     if (home >= 0 && home != REG_RSP)
         return home;
+    if (sib_remat_fn && sib_remat_def && sib_remat_alloca && sib_remat_skip
+        && v >= 0 && v < sib_remat_fn->next_value_id
+        && sib_remat_def[v] >= 0 && sib_remat_skip[sib_remat_def[v]]
+        && remat_sib_index(b, sib_remat_fn, sib_remat_def, ra, sib_remat_alloca,
+                           v, REG_RCX, 0))
+        return REG_RCX;
     ensure_reg(b, v, REG_RCX, ra);
     return REG_RCX;
 }
@@ -3240,6 +3375,7 @@ static void finish_gp_dst(Buffer *b, int acc, int dr, int dst, const RAResult *r
     spill_if_needed(b, dst, dr >= 0 ? dr : acc, ra);
 }
 static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_t *imm);
+static int ssa_const_imm_chain(const IRFunction *fn, const int *def, IRValue v, int64_t *imm);
 static int imm_fits_i32(int64_t imm);
 static int imm_fits_bitwise_u32(int64_t imm);
 static int remat_add_imm(Buffer *b, const IRFunction *fn, const int *def,
@@ -3270,17 +3406,32 @@ static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_
                         IRValue v, int *out_off, int depth);
 static int remat_sole_frame_load(Buffer *b, const IRFunction *fn, const int *def,
                                  const int *alloca_off, IRValue v, int dst) {
-    if (!fn || !def || !alloca_off || v < 0 || v >= fn->next_value_id
-        || def[v] < 0 || !value_unique_def(fn, v))
-        return 0;
-    const IRInst *ld = &fn->insts.data[def[v]];
-    if (ld->op != IR_LOAD && ld->op != IR_LOAD_PTR) return 0;
-    int off = 0;
-    if (!fold_ptr_off(fn, def, alloca_off, ld->a, &off, 0) || off == 0)
-        return 0;
-    int w = ld->width > 0 ? ld->width : 4;
-    emit_load_disp(b, dst, REG_RBP, off, w, ld->is_unsigned);
-    return 1;
+    if (!fn || !def || !alloca_off) return 0;
+    int peel_w = 0, peel_u = 1;
+    for (int depth = 0; depth < 6; depth++) {
+        if (v < 0 || v >= fn->next_value_id || def[v] < 0
+            || !value_unique_def(fn, v))
+            return 0;
+        const IRInst *d = &fn->insts.data[def[v]];
+        if (d->op == IR_COPY && d->a >= 0) {
+            v = d->a;
+            continue;
+        }
+        if (d->op == IR_TRUNC && !d->is_float && d->a >= 0) {
+            if (d->width > 0) peel_w = d->width;
+            peel_u = d->is_unsigned;
+            v = d->a;
+            continue;
+        }
+        if (d->op != IR_LOAD && d->op != IR_LOAD_PTR) return 0;
+        int off = 0;
+        if (!fold_ptr_off(fn, def, alloca_off, d->a, &off, 0) || off == 0)
+            return 0;
+        int w = peel_w > 0 ? peel_w : (d->width > 0 ? d->width : 4);
+        emit_load_disp(b, dst, REG_RBP, off, w, peel_w > 0 ? peel_u : d->is_unsigned);
+        return 1;
+    }
+    return 0;
 }
 static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
                        const int *def, const RAResult *ra, const int *alloca_off,
@@ -3289,11 +3440,13 @@ static void isel_arith(Buffer *b, const IRInst *inst, const IRFunction *fn,
     int64_t imm_a = 0, imm_b = 0;
     int bitwise = !is_mul && (inst->op == IR_BAND || inst->op == IR_BOR
                               || inst->op == IR_BXOR);
-    int fb = ssa_const_imm(fn, def, inst->b, &imm_b)
+    int fb = (bitwise ? ssa_const_imm_chain(fn, def, inst->b, &imm_b)
+                      : ssa_const_imm(fn, def, inst->b, &imm_b))
              && (imm_fits_i32(imm_b)
                  || (bitwise && imm_fits_bitwise_u32(imm_b)));
     int fa = !is_mul && inst->op != IR_SUB &&
-             ssa_const_imm(fn, def, inst->a, &imm_a)
+             (bitwise ? ssa_const_imm_chain(fn, def, inst->a, &imm_a)
+                      : ssa_const_imm(fn, def, inst->a, &imm_a))
              && (imm_fits_i32(imm_a)
                  || (bitwise && imm_fits_bitwise_u32(imm_a)));
     if (is_mul)
@@ -3467,7 +3620,7 @@ static void isel_shift(Buffer *b, const IRInst *inst, const IRFunction *fn,
     int width = inst->width > 0 ? inst->width : 8;
     int64_t imm = 0;
     int acc;
-    if (ssa_const_imm(fn, def, inst->b, &imm) && imm >= 0 && imm < 64) {
+    if (ssa_const_imm_chain(fn, def, inst->b, &imm) && imm >= 0 && imm < 64) {
         acc = pick_alu_acc(dr, -1);
         if (!remat_sole_frame_load(b, fn, def, alloca_off, inst->a, acc))
             ensure_reg(b, inst->a, acc, ra);
@@ -3594,7 +3747,9 @@ struct DbgObs {
     size_t pc;
 };typedef struct DbgObs DbgObs;
 static void collect_callee_saved(const RAResult *ra, const IRFunction *fn,
-                                 int used[5]) {
+                                 int used[5],
+                                 const char *skip_body, const char *fused_skip,
+                                 const int *param_home_off, int nparams) {
     used[0] = used[1] = used[2] = used[3] = used[4] = 0;
     if (!ra) return;
     int is_win = (target_current()->os == TOS_WINDOWS);
@@ -3607,6 +3762,35 @@ static void collect_callee_saved(const RAResult *ra, const IRFunction *fn,
             if ((in->op == IR_ALLOCA || in->op == IR_ADDR)
                 && in->dst >= 0 && in->dst < ra->num_values)
                 skip[in->dst] = 1;
+        }
+        if (param_home_off && nparams > 0) {
+            for (size_t j = 0; j < fn->insts.len; j++) {
+                const IRInst *in = &fn->insts.data[j];
+                if (in->op != IR_PARAM) continue;
+                int p = (int)in->imm;
+                if (p < 0 || p >= nparams) continue;
+                if (param_home_off[p] == 0) continue;
+                if (in->dst >= 0 && in->dst < ra->num_values)
+                    skip[in->dst] = 1;
+            }
+        }
+        if (skip_body || fused_skip) {
+            char *emitted = xmalloc((size_t)ra->num_values);
+            runtime.memset(emitted, 0, (size_t)ra->num_values);
+            for (size_t j = 0; j < fn->insts.len; j++) {
+                if ((skip_body && skip_body[j]) || (fused_skip && fused_skip[j]))
+                    continue;
+                const IRInst *in = &fn->insts.data[j];
+                if (in->dst >= 0 && in->dst < ra->num_values)
+                    emitted[in->dst] = 1;
+                if (ir_op_with_overflow(in->op) && in->c >= 0
+                    && in->c < ra->num_values)
+                    emitted[in->c] = 1;
+            }
+            for (int v = 0; v < ra->num_values; v++) {
+                if (!emitted[v]) skip[v] = 1;
+            }
+            runtime.free(emitted);
         }
     }
     for (int v = 0; v < ra->num_values; v++) {
@@ -3709,6 +3893,61 @@ static void emit_sse_movaps_base_off(Buffer *b, int xmm, int base, int off, int 
         if (need_sib) emit_byte(b, 0x24);
         emit_int32(b, off);
     }
+}
+static void emit_vec16_move_disp(Buffer *b, int xmm, int base, int off,
+                                 int store, int aligned) {
+    if (aligned)
+        emit_sse_movaps_base_off(b, xmm, base, off, store);
+    else if (store)
+        emit_movups_store_disp(b, base, xmm, off);
+    else
+        emit_movups_load_disp(b, xmm, base, off);
+}
+static void emit_vec16_packed_op(Buffer *b, const IRInst *inst, int dst_xmm,
+                                 int src_is_mem, int src_xmm_or_base, int off) {
+    int elem_sz = (int)inst->imm;
+    int is_float = inst->is_float;
+    int rm = src_xmm_or_base;
+    if (is_float) {
+        if (elem_sz >= 8) emit_byte(b, 0x66);
+        emit_rex_wrb(b, 0, dst_xmm, rm);
+        emit_byte(b, 0x0F);
+        if (inst->op == IR_VADD) emit_byte(b, 0x58);
+        else if (inst->op == IR_VSUB) emit_byte(b, 0x5C);
+        else if (inst->op == IR_VMUL) emit_byte(b, 0x59);
+        else if (inst->op == IR_VDIV) emit_byte(b, 0x5E);
+        else if (inst->op == IR_VBAND) emit_byte(b, 0x54);
+        else if (inst->op == IR_VBOR) emit_byte(b, 0x56);
+        else emit_byte(b, 0x57);
+        if (src_is_mem) emit_modrm_disp(b, dst_xmm, rm, off);
+        else emit_modrm(b, 3, dst_xmm, rm);
+        return;
+    }
+    emit_byte(b, 0x66);
+    emit_rex_wrb(b, 0, dst_xmm, rm);
+    emit_byte(b, 0x0F);
+    if (inst->op == IR_VBAND)
+        emit_byte(b, 0xDB);
+    else if (inst->op == IR_VBOR)
+        emit_byte(b, 0xEB);
+    else if (inst->op == IR_VBXOR)
+        emit_byte(b, 0xEF);
+    else if (elem_sz == 1)
+        emit_byte(b, inst->op == IR_VSUB ? 0xF8 : 0xFC);
+    else if (elem_sz == 2) {
+        if (inst->op == IR_VADD) emit_byte(b, 0xFD);
+        else if (inst->op == IR_VSUB) emit_byte(b, 0xF9);
+        else emit_byte(b, 0xD5);
+    } else if (elem_sz == 4) {
+        if (inst->op == IR_VMUL) {
+            emit_byte(b, 0x38);
+            emit_byte(b, 0x40);
+        } else
+            emit_byte(b, (inst->op == IR_VSUB) ? 0xFA : 0xFE);
+    } else
+        emit_byte(b, (inst->op == IR_VSUB) ? 0xFB : 0xD4);
+    if (src_is_mem) emit_modrm_disp(b, dst_xmm, rm, off);
+    else emit_modrm(b, 3, dst_xmm, rm);
 }
 static void emit_fill_apply_args(Buffer *b, int base) {
     emit_store_rsp_off(b, REG_RAX, base + 8);
@@ -4136,11 +4375,20 @@ static int reg_to_dwarf(int r) {
     return -1;
 }
 static void value_home(const IRFunction *fn, int v, int gp_spill_area,
+                       const int *def, const int *alloca_off,
                        DebugLocKind *kind, int *rbp_offset, int *dwarf_reg) {
     *kind = DBG_LOC_NONE;
     *rbp_offset = 0;
     *dwarf_reg = -1;
     if (v < 0) return;
+    if (def && alloca_off) {
+        int off = 0;
+        if (fold_ptr_off(fn, def, alloca_off, v, &off, 0) && off != 0) {
+            *kind = DBG_LOC_FBREG_VALUE;
+            *rbp_offset = off;
+            return;
+        }
+    }
     if (value_is_float_class(fn, v)) {
         const RAResult *ra_xmm = (const RAResult *)fn->ra_xmm;
         if (!ra_xmm || v >= ra_xmm->num_values) return;
@@ -4399,6 +4647,85 @@ static int alloca_dyn_align(const IRFunction *fn, const int *def, IRValue slot) 
     const IRInst *al = &fn->insts.data[def[slot]];
     return al->op == IR_ALLOCA && al->imm >= 32;
 }
+static int param_will_get_frame_home(const IRFunction *fn, const int *ssa_def,
+                                     int p, int *out_slot, int *out_field_off,
+                                     int *out_store_i) {
+    if (!fn || !ssa_def || p < 0 || (size_t)p >= fn->insts.len) return 0;
+    const IRInst *pi = &fn->insts.data[p];
+    if (pi->op != IR_PARAM) return 0;
+    IRValue v = pi->dst;
+    if (v < 0 || value_is_ld(fn, v)) return 0;
+    if (param_is_mem_blob(pi)) return 0;
+    int store_i = -1, nstore = 0, other = 0;
+    for (size_t j = 0; j < fn->insts.len; j++) {
+        const IRInst *in = &fn->insts.data[j];
+        if (in->op == IR_DBG_VALUE || in->op == IR_PARAM ||
+            in->op == IR_LABEL || in->op == IR_BR)
+            continue;
+        if (in->op == IR_STORE_PTR && in->b == v) {
+            nstore++;
+            store_i = (int)j;
+            continue;
+        }
+        if (in->a == v) { other = 1; break; }
+        if (in->op != IR_CBR && in->op != IR_CALL && in->op != IR_ASM && in->b == v) {
+            other = 1;
+            break;
+        }
+        if (in->op == IR_CALL) {
+            if (in->call_callee == v) { other = 1; break; }
+            for (int k = 0; k < in->call_nargs; k++) {
+                if (in->call_args[k] == v) { other = 1; break; }
+            }
+            if (other) break;
+        }
+    }
+    if (other || nstore != 1 || store_i < 0) return 0;
+    const IRInst *st = &fn->insts.data[store_i];
+    IRValue ptr = st->a;
+    if (ptr < 0 || ptr >= fn->next_value_id || ssa_def[ptr] < 0) return 0;
+    int slot = -1, field_off = 0;
+    const IRInst *ad = &fn->insts.data[ssa_def[ptr]];
+    if (ad->op == IR_ADDR) {
+        slot = ad->a;
+        field_off = 0;
+    } else if (ad->op == IR_ADD) {
+        IRValue base_ptr = -1;
+        int64_t imm = 0;
+        if (ad->a >= 0 && ad->a < fn->next_value_id && ssa_def[ad->a] >= 0
+            && ad->b >= 0 && ad->b < fn->next_value_id && ssa_def[ad->b] >= 0) {
+            const IRInst *xa = &fn->insts.data[ssa_def[ad->a]];
+            const IRInst *xb = &fn->insts.data[ssa_def[ad->b]];
+            if (xa->op == IR_ADDR && xb->op == IR_CONST && !xb->is_float) {
+                base_ptr = ad->a;
+                imm = xb->imm;
+            } else if (xb->op == IR_ADDR && xa->op == IR_CONST && !xa->is_float) {
+                base_ptr = ad->b;
+                imm = xa->imm;
+            }
+        }
+        if (base_ptr < 0 || ssa_def[base_ptr] < 0) return 0;
+        const IRInst *ba = &fn->insts.data[ssa_def[base_ptr]];
+        if (ba->op != IR_ADDR) return 0;
+        slot = ba->a;
+        field_off = (int)imm;
+    } else {
+        return 0;
+    }
+    if (slot < 0 || slot >= fn->next_value_id || ssa_def[slot] < 0) return 0;
+    const IRInst *al = &fn->insts.data[ssa_def[slot]];
+    if (al->op != IR_ALLOCA) return 0;
+    if (alloca_dyn_align(fn, ssa_def, slot)) return 0;
+    int store_w = st->width ? st->width : 4;
+    int param_w = pi->width ? pi->width : 4;
+    if (store_w != param_w) return 0;
+    if (field_off < 0 || al->alloca_bytes < field_off + store_w) return 0;
+    if (al->alloca_bytes <= 0) return 0;
+    if (out_slot) *out_slot = slot;
+    if (out_field_off) *out_field_off = field_off;
+    if (out_store_i) *out_store_i = store_i;
+    return 1;
+}
 static int *g_def_count;
 static int g_def_count_n;
 static int value_unique_def(const IRFunction *fn, IRValue v);
@@ -4458,12 +4785,120 @@ static int fold_ptr_off(const IRFunction *fn, const int *def, const int *alloca_
     }
     return 0;
 }
+static int fold_ptr_alloca_align(const IRFunction *fn, const int *def,
+                                 const int *alloca_off, IRValue v, int depth) {
+    if (depth > 8 || v < 0 || v >= fn->next_value_id || !fn || !def || !alloca_off)
+        return 0;
+    int di = def[v];
+    if (di < 0) return 0;
+    const IRInst *d = &fn->insts.data[di];
+    if (d->op == IR_COPY && value_unique_def(fn, v))
+        return fold_ptr_alloca_align(fn, def, alloca_off, d->a, depth + 1);
+    if (d->op == IR_ADDR && d->a >= 0 && d->a < fn->next_value_id
+        && alloca_off[d->a] != 0 && def[d->a] >= 0) {
+        const IRInst *al = &fn->insts.data[def[d->a]];
+        if (al->op != IR_ALLOCA) return 0;
+        return (int)al->imm;
+    }
+    if (d->op == IR_ADD) {
+        if (d->b >= 0 && d->b < fn->next_value_id && def[d->b] >= 0) {
+            const IRInst *imm = &fn->insts.data[def[d->b]];
+            if (imm->op == IR_CONST && !imm->is_float)
+                return fold_ptr_alloca_align(fn, def, alloca_off, d->a, depth + 1);
+        }
+        if (d->a >= 0 && d->a < fn->next_value_id && def[d->a] >= 0) {
+            const IRInst *imm = &fn->insts.data[def[d->a]];
+            if (imm->op == IR_CONST && !imm->is_float)
+                return fold_ptr_alloca_align(fn, def, alloca_off, d->b, depth + 1);
+        }
+    }
+    return 0;
+}
+static int frame_off_sse_aligned(const IRFunction *fn, const int *def,
+                                 const int *alloca_off, IRValue v, int off) {
+    if ((off & 15) != 0) return 0;
+    return fold_ptr_alloca_align(fn, def, alloca_off, v, 0) == 16;
+}
 static int ssa_const_imm(const IRFunction *fn, const int *def, IRValue v, int64_t *imm) {
     if (!fn || !def || v < 0 || v >= fn->next_value_id || def[v] < 0) return 0;
     const IRInst *d = &fn->insts.data[def[v]];
     if (d->op != IR_CONST || d->is_float) return 0;
     *imm = d->imm;
     return 1;
+}
+static int ssa_const_imm_chain(const IRFunction *fn, const int *def, IRValue v,
+                               int64_t *imm) {
+    int trunc_w = 0;
+    for (int depth = 0; depth < 8; depth++) {
+        if (!fn || !def || v < 0 || v >= fn->next_value_id || def[v] < 0)
+            return 0;
+        if (!value_unique_def(fn, v)) return 0;
+        const IRInst *d = &fn->insts.data[def[v]];
+        if (d->op == IR_CONST && !d->is_float) {
+            int64_t val = d->imm;
+            if (trunc_w > 0 && trunc_w < 8) {
+                int bits = trunc_w * 8;
+                uint64_t mask = (bits == 64) ? ~0ULL : ((1ULL << bits) - 1);
+                val = (int64_t)((uint64_t)val & mask);
+            }
+            *imm = val;
+            return 1;
+        }
+        if (d->is_float) return 0;
+        if (d->op == IR_COPY && d->a >= 0) {
+            v = d->a;
+            continue;
+        }
+        if (d->op == IR_ZEXT && d->a >= 0) {
+            v = d->a;
+            continue;
+        }
+        if (d->op == IR_TRUNC && d->a >= 0) {
+            if (d->width > 0)
+                trunc_w = (trunc_w > 0 && trunc_w < d->width) ? trunc_w : d->width;
+            v = d->a;
+            continue;
+        }
+        return 0;
+    }
+    return 0;
+}
+static void skip_const_imm_chain(const IRFunction *fn, const int *ssa_def,
+                                 char *fused_skip, char *needed,
+                                 const int *raw_uses, int nvals, IRValue v) {
+    for (int depth = 0; depth < 8 && v >= 0 && v < nvals; depth++) {
+        if (!value_unique_def(fn, v) || ssa_def[v] < 0) return;
+        if (raw_uses && raw_uses[v] != 1) return;
+        int di = ssa_def[v];
+        const IRInst *d = &fn->insts.data[di];
+        if (fused_skip) fused_skip[di] = 1;
+        if (needed) needed[v] = 0;
+        if (d->op == IR_CONST) return;
+        if ((d->op == IR_COPY || d->op == IR_ZEXT || d->op == IR_TRUNC)
+            && d->a >= 0) {
+            v = d->a;
+            continue;
+        }
+        return;
+    }
+}
+static void unskip_const_imm_chain(const IRFunction *fn, const int *ssa_def,
+                                   char *fused_skip, char *needed,
+                                   int nvals, IRValue v) {
+    for (int depth = 0; depth < 8 && v >= 0 && v < nvals; depth++) {
+        if (!value_unique_def(fn, v) || ssa_def[v] < 0) return;
+        int di = ssa_def[v];
+        const IRInst *d = &fn->insts.data[di];
+        if (fused_skip) fused_skip[di] = 0;
+        if (needed) needed[v] = 1;
+        if (d->op == IR_CONST) return;
+        if ((d->op == IR_COPY || d->op == IR_ZEXT || d->op == IR_TRUNC)
+            && d->a >= 0) {
+            v = d->a;
+            continue;
+        }
+        return;
+    }
 }
 static int ssa_extended_const(const IRFunction *fn, const int *def,
                               IRValue v, int64_t *imm) {
@@ -4606,9 +5041,6 @@ static int remat_add_imm(Buffer *b, const IRFunction *fn, const int *def,
         base = d->b;
     else
         return 0;
-    int sh = gp_home(ra, base);
-    if (sh >= 0)
-        return emit_lea_reg_disp(b, dst, sh, (int32_t)imm, width);
     if (!alloca_off || base < 0 || base >= fn->next_value_id || def[base] < 0
         || !value_unique_def(fn, base))
         return 0;
@@ -4771,7 +5203,7 @@ static int fold_gep(const IRFunction *fn, const int *def,
                             is_frame = 1;
                             break;
                         }
-                        return 0;
+                        break;
                     }
                     int64_t bc;
                     if (ssa_const_imm(fn, def, bd->b, &bc)) {
@@ -5000,7 +5432,11 @@ static int alu_folds_imm(const IRInst *inst, int which, const IRFunction *fn,
                          const int *def) {
     IRValue v = which ? inst->b : inst->a;
     int64_t imm;
-    if (!ssa_const_imm(fn, def, v, &imm)) return 0;
+    int ok = (inst->op == IR_BAND || inst->op == IR_BOR || inst->op == IR_BXOR
+              || inst->op == IR_SHL || inst->op == IR_SHR || inst->op == IR_ROL)
+             ? ssa_const_imm_chain(fn, def, v, &imm)
+             : ssa_const_imm(fn, def, v, &imm);
+    if (!ok) return 0;
     switch (inst->op) {
     case IR_BAND:
     case IR_BOR:
@@ -5125,7 +5561,18 @@ static int pure_addr_op(int op) {
 }
 static int is_foldable_addr_copy(const IRFunction *fn, const int *def,
                                 const IRInst *u) {
-    (void)fn; (void)def; (void)u;
+    if (!u || u->op != IR_COPY || u->a < 0 || u->a >= fn->next_value_id)
+        return 0;
+    IRValue cur = u->a;
+    for (int depth = 0; depth < 4 && cur >= 0 && cur < fn->next_value_id;
+         depth++) {
+        if (def[cur] < 0) return 0;
+        const IRInst *d = &fn->insts.data[def[cur]];
+        if (d->op == IR_ADDR || d->op == IR_GADDR || d->op == IR_GADDR_TLS)
+            return 1;
+        if (d->op == IR_COPY) { cur = d->a; continue; }
+        return 0;
+    }
     return 0;
 }
 static int call_integer_sret_folds(const IRFunction *fn, const int *def,
@@ -5245,9 +5692,17 @@ static void fused_skip_remat_tree(char *fused_skip, const IRFunction *fn,
 static int remat_rmw_operand(Buffer *b, const IRFunction *fn, const int *def,
                              const RAResult *ra, const int *alloca_off,
                              IRValue v, int dst, int depth) {
-    if (depth > 10 || !fn || !def || v < 0 || v >= fn->next_value_id
-        || def[v] < 0 || !value_unique_def(fn, v))
+    if (depth > 10 || !fn || !def || v < 0 || v >= fn->next_value_id)
         return 0;
+    if (def[v] < 0 || !value_unique_def(fn, v)) {
+        int home = gp_home(ra, v);
+        if (home >= 0) {
+            if (b && home != dst)
+                emit_mov_rr(b, dst, home);
+            return 1;
+        }
+        return 0;
+    }
     const IRInst *d = &fn->insts.data[def[v]];
     int width = d->width > 0 ? d->width : 4;
     if (d->op == IR_COPY || d->op == IR_ZEXT || d->op == IR_SEXT
@@ -5255,12 +5710,14 @@ static int remat_rmw_operand(Buffer *b, const IRFunction *fn, const int *def,
         return remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst,
                                  depth + 1);
     if (d->op == IR_CONST && !d->is_float) {
-        if (d->imm == 0)
-            emit_xor_rr(b, dst);
-        else if (imm_fits_i32(d->imm))
-            emit_mov_imm32(b, dst, (int32_t)d->imm);
-        else
-            emit_mov_imm64(b, dst, d->imm);
+        if (b) {
+            if (d->imm == 0)
+                emit_xor_rr(b, dst);
+            else if (imm_fits_i32(d->imm))
+                emit_mov_imm32(b, dst, (int32_t)d->imm);
+            else
+                emit_mov_imm64(b, dst, d->imm);
+        }
         return 1;
     }
     if (d->op == IR_LOAD || d->op == IR_LOAD_PTR) {
@@ -5268,19 +5725,19 @@ static int remat_rmw_operand(Buffer *b, const IRFunction *fn, const int *def,
         if (!fold_ptr_off(fn, def, alloca_off, d->a, &off, 0) || off == 0)
             return 0;
         int lw = d->width > 0 ? d->width : width;
-        emit_load_disp(b, dst, REG_RBP, off, lw, d->is_unsigned);
+        if (b) emit_load_disp(b, dst, REG_RBP, off, lw, d->is_unsigned);
         return 1;
     }
     if (d->op == IR_BNOT) {
         if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst, depth + 1))
             return 0;
-        emit_unary_f7_w(b, 2, dst, width);
+        if (b) emit_unary_f7_w(b, 2, dst, width);
         return 1;
     }
     if (d->op == IR_NEG) {
         if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst, depth + 1))
             return 0;
-        emit_unary_f7_w(b, 3, dst, width);
+        if (b) emit_unary_f7_w(b, 3, dst, width);
         return 1;
     }
     {
@@ -5310,21 +5767,41 @@ static int remat_rmw_operand(Buffer *b, const IRFunction *fn, const int *def,
                 ew = 4;
                 enc = (int32_t)(uint32_t)imm;
             }
-            emit_arith_imm_w(b, ext, dst, enc, ew);
+            if (b) emit_arith_imm_w(b, ext, dst, enc, ew);
+            return 1;
+        }
+        if (base >= 0 && d->op == IR_MUL && !d->is_float && imm_fits_i32(imm)) {
+            if (!remat_rmw_operand(b, fn, def, ra, alloca_off, base, dst,
+                                   depth + 1))
+                return 0;
+            if (imm == 1)
+                return 1;
+            if (imm == 2 || imm == 4 || imm == 8) {
+                uint8_t sh = (uint8_t)(imm == 2 ? 1 : imm == 4 ? 2 : 3);
+                if (b) emit_shift_imm_w(b, 4, dst, sh, width);
+                return 1;
+            }
+            if (imm == 0) {
+                if (b) emit_xor_rr(b, dst);
+                return 1;
+            }
+            if (b) emit_imul_imm_w(b, dst, (int32_t)imm, width);
             return 1;
         }
         if (base >= 0 && d->op == IR_SHL && imm >= 0 && imm < 64) {
             if (!remat_rmw_operand(b, fn, def, ra, alloca_off, base, dst,
                                    depth + 1))
                 return 0;
-            emit_shift_imm_w(b, 4, dst, (uint8_t)imm, width);
+            if (b) emit_shift_imm_w(b, 4, dst, (uint8_t)imm, width);
             return 1;
         }
         if (base >= 0 && d->op == IR_SHR && imm >= 0 && imm < 64) {
             if (!remat_rmw_operand(b, fn, def, ra, alloca_off, base, dst,
                                    depth + 1))
                 return 0;
-            emit_shift_imm_w(b, d->is_unsigned ? 5 : 7, dst, (uint8_t)imm, width);
+            if (b)
+                emit_shift_imm_w(b, d->is_unsigned ? 5 : 7, dst, (uint8_t)imm,
+                                 width);
             return 1;
         }
         if (d->op == IR_SHL) {
@@ -5335,12 +5812,503 @@ static int remat_rmw_operand(Buffer *b, const IRFunction *fn, const int *def,
             if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst,
                                    depth + 1))
                 return 0;
-            emit_shift_cl_w(b, 4, dst, width);
+            if (b) emit_shift_cl_w(b, 4, dst, width);
+            return 1;
+        }
+        if ((d->op == IR_ADD || d->op == IR_SUB || d->op == IR_BAND
+             || d->op == IR_BOR || d->op == IR_BXOR) && !d->is_float) {
+            int scratch = (dst == REG_RDX) ? REG_RCX : REG_RDX;
+            if (scratch == dst) return 0;
+            if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->a, dst,
+                                   depth + 1))
+                return 0;
+            if (!remat_rmw_operand(b, fn, def, ra, alloca_off, d->b, scratch,
+                                   depth + 1))
+                return 0;
+            if (b) {
+                uint8_t op = 0x01;
+                if (d->op == IR_SUB) op = 0x29;
+                else if (d->op == IR_BAND) op = 0x21;
+                else if (d->op == IR_BOR) op = 0x09;
+                else if (d->op == IR_BXOR) op = 0x31;
+                emit_arith_rr_w(b, op, dst, scratch, width);
+            }
             return 1;
         }
     }
-    (void)ra;
+    if (d->op == IR_ADD || d->op == IR_SUB || d->op == IR_MUL
+        || d->op == IR_SHL || d->op == IR_SHR || d->op == IR_BAND
+        || d->op == IR_BOR || d->op == IR_BXOR || d->op == IR_BNOT
+        || d->op == IR_NEG)
+        return 0;
+    {
+        int home = gp_home(ra, v);
+        if (home >= 0) {
+            if (b && home != dst)
+                emit_mov_rr(b, dst, home);
+            return 1;
+        }
+    }
     return 0;
+}
+static int can_remat_rmw_operand(const IRFunction *fn, const int *def,
+                                 const RAResult *ra, const int *alloca_off,
+                                 IRValue v) {
+    return remat_rmw_operand(((void*)0), fn, def, ra, alloca_off, v, REG_RAX, 0);
+}
+static void emit_movsxd_rr(Buffer *b, int dst, int src) {
+    emit_rex_wrb(b, 1, dst, src);
+    emit_byte(b, 0x63);
+    emit_modrm(b, 3, dst & 7, src & 7);
+}
+static int remat_sib_index(Buffer *b, const IRFunction *fn, const int *def,
+                           const RAResult *ra, const int *alloca_off,
+                           IRValue v, int dst, int depth) {
+    int need_sext = 0;
+    (void)ra;
+    if (depth > 10 || !fn || !def || v < 0 || v >= fn->next_value_id)
+        return 0;
+    if (def[v] < 0 || !value_unique_def(fn, v))
+        return 0;
+    {
+        IRValue cur = v;
+        int peel;
+        for (peel = 0; peel < 8 && cur >= 0 && cur < fn->next_value_id
+             && def[cur] >= 0 && value_unique_def(fn, cur); peel++) {
+            const IRInst *p = &fn->insts.data[def[cur]];
+            if (p->op == IR_COPY || p->op == IR_ZEXT || p->op == IR_TRUNC) {
+                cur = p->a;
+                continue;
+            }
+            if (p->op == IR_SEXT) {
+                need_sext = 1;
+                cur = p->a;
+                continue;
+            }
+            break;
+        }
+        v = cur;
+    }
+    if (v < 0 || v >= fn->next_value_id || def[v] < 0
+        || !value_unique_def(fn, v))
+        return 0;
+    {
+        const IRInst *d = &fn->insts.data[def[v]];
+        int width = d->width > 0 ? d->width : 4;
+        if (d->op == IR_CONST && !d->is_float && imm_fits_i32(d->imm)) {
+            if (b) {
+                if (d->imm == 0)
+                    emit_xor_rr(b, dst);
+                else
+                    emit_mov_imm32(b, dst, (int32_t)d->imm);
+                if (need_sext)
+                    emit_movsxd_rr(b, dst, dst);
+            }
+            return 1;
+        }
+        if (d->op == IR_LOAD || d->op == IR_LOAD_PTR) {
+            int off = 0;
+            if (!fold_ptr_off(fn, def, alloca_off, d->a, &off, 0) || off == 0)
+                return 0;
+            int lw = d->width > 0 ? d->width : width;
+            if (b) {
+                emit_load_disp(b, dst, REG_RBP, off, lw, d->is_unsigned);
+                if (need_sext)
+                    emit_movsxd_rr(b, dst, dst);
+            }
+            return 1;
+        }
+        {
+            int64_t imm = 0;
+            IRValue base = -1;
+            if (ssa_const_imm(fn, def, d->b, &imm))
+                base = d->a;
+            else if (d->op != IR_SHL && d->op != IR_SHR && d->op != IR_SUB
+                     && d->op != IR_ROL
+                     && ssa_const_imm(fn, def, d->a, &imm))
+                base = d->b;
+            if (base >= 0 && (d->op == IR_BAND || d->op == IR_BOR
+                              || d->op == IR_BXOR)
+                && (imm_fits_i32(imm)
+                    || imm_fits_bitwise_u32(imm))) {
+                if (!remat_sib_index(b, fn, def, ra, alloca_off, base, dst,
+                                     depth + 1))
+                    return 0;
+                int ew = width;
+                int32_t enc = (int32_t)imm;
+                int ext = (d->op == IR_BAND) ? 4 : (d->op == IR_BOR) ? 1 : 6;
+                if (!imm_fits_i32(imm) && imm_fits_bitwise_u32(imm)) {
+                    ew = 4;
+                    enc = (int32_t)(uint32_t)imm;
+                }
+                if (b) emit_arith_imm_w(b, ext, dst, enc, ew);
+                if (b && need_sext)
+                    emit_movsxd_rr(b, dst, dst);
+                return 1;
+            }
+            if (base >= 0 && (d->op == IR_SHL || d->op == IR_SHR)
+                && imm >= 0 && imm < 64) {
+                if (!remat_sib_index(b, fn, def, ra, alloca_off, base, dst,
+                                     depth + 1))
+                    return 0;
+                if (b) {
+                    int ext = 4;
+                    if (d->op == IR_SHR)
+                        ext = d->is_unsigned ? 5 : 7;
+                    emit_shift_imm_w(b, ext, dst, (uint8_t)imm, width);
+                    if (need_sext)
+                        emit_movsxd_rr(b, dst, dst);
+                }
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+static int can_remat_sib_index(const IRFunction *fn, const int *def,
+                               const RAResult *ra, const int *alloca_off,
+                               IRValue v) {
+    return remat_sib_index(((void*)0), fn, def, ra, alloca_off, v, REG_RCX, 0);
+}
+static IRValue memop_folded_sib_idx(const IRModule *ir, const IRFunction *fn,
+                                    const int *def, const int *alloca_off,
+                                    const int *raw_uses, const IRInst *inst,
+                                    size_t ii) {
+    IRValue ptr = -1, val = -1;
+    if (!inst) return -1;
+    if (inst->op == IR_LOAD_PTR) {
+        ptr = inst->a;
+        val = inst->dst;
+    } else if (inst->op == IR_STORE_PTR) {
+        ptr = inst->a;
+        val = inst->b;
+    } else
+        return -1;
+    {
+        int off = 0;
+        if (fold_ptr_off(fn, def, alloca_off, ptr, &off, 0))
+            return -2;
+    }
+    {
+        int fp_scalar = value_is_float_class(fn, val)
+                        && (inst->width == 4 || inst->width == 8);
+        int gp_scalar = !value_is_float_class(fn, val)
+                        && !value_is_ld(fn, val)
+                        && (inst->width == 1 || inst->width == 2
+                            || inst->width == 4 || inst->width == 8);
+        if (!(fp_scalar || gp_scalar))
+            return -1;
+    }
+    {
+        IRValue af_base = -1, af_idx = -1;
+        int af_sc = 0, af_disp = 0, af_kind = AF_NONE;
+        int af_sole = ptr < 0 || !raw_uses || raw_uses[ptr] <= 1;
+        int af_adj = ptr >= 0 && ptr < fn->next_value_id
+                     && def[ptr] >= 0
+                     && (size_t)def[ptr] + 1 == ii
+                     && af_sole;
+        if (local_abs_af(ir, fn, def, alloca_off, ptr,
+                         &af_base, &af_idx, &af_sc, &af_disp))
+            af_kind = AF_SIB;
+        else {
+            int k = classify_ptr_addr(fn, def, alloca_off, ptr,
+                                      &af_base, &af_idx, &af_sc, &af_disp);
+            if (k == AF_RBP_IDX || (k != AF_NONE && af_adj))
+                af_kind = k;
+        }
+        if (af_kind == AF_NONE)
+            return -1;
+        if (af_idx >= 0) {
+            IRValue inner = af_idx;
+            int psc = 0;
+            if (peel_sib_scale(fn, def, af_idx, &inner, &psc))
+                af_idx = inner;
+        }
+        return af_idx;
+    }
+}
+static int idx_chain_reaches(const IRFunction *fn, const int *def,
+                             IRValue from, IRValue to, int depth) {
+    if (from == to) return 1;
+    if (depth > 8 || !fn || !def) return 0;
+    if (from < 0 || from >= fn->next_value_id || def[from] < 0)
+        return 0;
+    {
+        const IRInst *d = &fn->insts.data[def[from]];
+        if (d->op == IR_COPY || d->op == IR_ZEXT || d->op == IR_SEXT
+            || d->op == IR_TRUNC)
+            return idx_chain_reaches(fn, def, d->a, to, depth + 1);
+    }
+    {
+        IRValue inner = -1;
+        int psc = 0;
+        if (peel_sib_scale(fn, def, from, &inner, &psc) && inner != from)
+            return idx_chain_reaches(fn, def, inner, to, depth + 1);
+    }
+    return 0;
+}
+static int inst_uses_val(const IRInst *u, IRValue v) {
+    int k;
+    if (!u || v < 0) return 0;
+    if (u->op != IR_ADDR && u->a == v) return 1;
+    if (u->op != IR_CBR && u->op != IR_CALL && u->op != IR_ASM && u->b == v)
+        return 1;
+    if (u->op == IR_CALL || u->op == IR_ASM) {
+        if (u->op == IR_CALL && u->call_callee == v) return 1;
+        for (k = 0; k < u->call_nargs; k++)
+            if (u->call_args[k] == v) return 1;
+    }
+    return 0;
+}
+static int value_only_used_as_folded_addr(const IRModule *ir,
+                                          const IRFunction *fn, const int *def,
+                                          const int *alloca_off,
+                                          const int *raw_uses,
+                                          const char *skip_body,
+                                          IRValue v, char *memo, int depth);
+static int value_only_used_as_sib_index(const IRModule *ir,
+                                        const IRFunction *fn, const int *def,
+                                        const int *alloca_off,
+                                        const int *raw_uses,
+                                        const char *skip_body,
+                                        IRValue v, char *memo_idx,
+                                        char *memo_addr, int depth);
+static int folded_users_idx_reaches(const IRModule *ir, const IRFunction *fn,
+                                    const int *def, const int *alloca_off,
+                                    const int *raw_uses, const char *skip_body,
+                                    IRValue addr, IRValue idx, int depth) {
+    size_t uj;
+    if (depth > 12 || !fn || addr < 0) return 0;
+    for (uj = 0; uj < fn->insts.len; uj++) {
+        const IRInst *u;
+        if (skip_body && skip_body[uj]) continue;
+        u = &fn->insts.data[uj];
+        if (u->op == IR_LOAD_PTR || u->op == IR_STORE_PTR) {
+            IRValue ix;
+            if (u->a != addr) continue;
+            ix = memop_folded_sib_idx(ir, fn, def, alloca_off,
+                                      raw_uses, u, uj);
+            if (ix >= 0 && idx_chain_reaches(fn, def, ix, idx, 0))
+                return 1;
+        } else if (u->op == IR_ADD && u->dst >= 0
+                   && (u->a == addr || u->b == addr)) {
+            if (folded_users_idx_reaches(ir, fn, def, alloca_off, raw_uses,
+                                         skip_body, u->dst, idx, depth + 1))
+                return 1;
+        }
+    }
+    return 0;
+}
+static int value_only_used_as_folded_addr(const IRModule *ir,
+                                          const IRFunction *fn, const int *def,
+                                          const int *alloca_off,
+                                          const int *raw_uses,
+                                          const char *skip_body,
+                                          IRValue v, char *memo, int depth) {
+    size_t uj;
+    int uses = 0, ok = 0;
+    if (depth > 16 || !fn || !def || v < 0 || v >= fn->next_value_id)
+        return 0;
+    if (memo) {
+        if (memo[v] == 1) return 1;
+        if (memo[v] == 2) return 0;
+    }
+    if (!value_unique_def(fn, v)) {
+        if (memo) memo[v] = 2;
+        return 0;
+    }
+    for (uj = 0; uj < fn->insts.len; uj++) {
+        const IRInst *u;
+        if (skip_body && skip_body[uj]) continue;
+        u = &fn->insts.data[uj];
+        if (u->op == IR_LABEL || u->op == IR_BR || u->op == IR_DBG_VALUE)
+            continue;
+        if (!inst_uses_val(u, v)) continue;
+        uses++;
+        if ((u->op == IR_LOAD_PTR || u->op == IR_STORE_PTR) && u->a == v) {
+            IRValue ix = memop_folded_sib_idx(ir, fn, def, alloca_off,
+                                              raw_uses, u, uj);
+            if (ix != -1) {
+                ok++;
+                continue;
+            }
+        }
+        if (u->op == IR_ADD && u->dst >= 0
+            && value_only_used_as_folded_addr(ir, fn, def, alloca_off,
+                                              raw_uses, skip_body, u->dst,
+                                              memo, depth + 1)) {
+            ok++;
+            continue;
+        }
+        if (memo) memo[v] = 2;
+        return 0;
+    }
+    if (uses > 0 && uses == ok) {
+        if (memo) memo[v] = 1;
+        return 1;
+    }
+    if (memo) memo[v] = 2;
+    return 0;
+}
+static int alu_imm_of(const IRFunction *fn, const int *def, const IRInst *d,
+                      IRValue v) {
+    int64_t imm = 0;
+    if (!d || d->is_float) return 0;
+    if (d->op != IR_BAND && d->op != IR_BOR && d->op != IR_BXOR
+        && d->op != IR_SHL && d->op != IR_SHR)
+        return 0;
+    if (d->a == v && ssa_const_imm(fn, def, d->b, &imm)) return 1;
+    if (d->b == v && d->op != IR_SHL && d->op != IR_SHR
+        && ssa_const_imm(fn, def, d->a, &imm))
+        return 1;
+    return 0;
+}
+static int value_only_used_as_sib_index(const IRModule *ir,
+                                        const IRFunction *fn, const int *def,
+                                        const int *alloca_off,
+                                        const int *raw_uses,
+                                        const char *skip_body,
+                                        IRValue v, char *memo_idx,
+                                        char *memo_addr, int depth) {
+    size_t uj;
+    int uses = 0, ok = 0;
+    if (depth > 16 || !fn || !def || v < 0 || v >= fn->next_value_id)
+        return 0;
+    if (memo_idx) {
+        if (memo_idx[v] == 1) return 1;
+        if (memo_idx[v] == 2) return 0;
+    }
+    if (!value_unique_def(fn, v)) {
+        if (memo_idx) memo_idx[v] = 2;
+        return 0;
+    }
+    for (uj = 0; uj < fn->insts.len; uj++) {
+        const IRInst *u;
+        if (skip_body && skip_body[uj]) continue;
+        u = &fn->insts.data[uj];
+        if (u->op == IR_LABEL || u->op == IR_BR || u->op == IR_DBG_VALUE)
+            continue;
+        if (!inst_uses_val(u, v)) continue;
+        uses++;
+        if (u->op == IR_STORE_PTR && u->b == v)
+            goto fail;
+        if (u->op == IR_STORE && u->b == v)
+            goto fail;
+        if (u->op == IR_RETURN && u->a == v)
+            goto fail;
+        if (u->op == IR_CALL || u->op == IR_ASM)
+            goto fail;
+        if ((u->op == IR_LOAD_PTR || u->op == IR_STORE_PTR) && u->a != v) {
+            goto fail;
+        }
+        if ((u->op == IR_LOAD_PTR || u->op == IR_STORE_PTR) && u->a == v) {
+            IRValue ix = memop_folded_sib_idx(ir, fn, def, alloca_off,
+                                              raw_uses, u, uj);
+            if (ix >= 0 && idx_chain_reaches(fn, def, ix, v, 0)) {
+                ok++;
+                continue;
+            }
+            goto fail;
+        }
+        if (u->op == IR_COPY || u->op == IR_ZEXT || u->op == IR_SEXT
+            || u->op == IR_TRUNC) {
+            if (value_only_used_as_sib_index(ir, fn, def, alloca_off, raw_uses,
+                                             skip_body, u->dst, memo_idx,
+                                             memo_addr, depth + 1)) {
+                ok++;
+                continue;
+            }
+            goto fail;
+        }
+        if (u->op == IR_MUL || u->op == IR_ADD) {
+            if (value_only_used_as_folded_addr(ir, fn, def, alloca_off,
+                                               raw_uses, skip_body, u->dst,
+                                               memo_addr, depth + 1)
+                && folded_users_idx_reaches(ir, fn, def, alloca_off, raw_uses,
+                                            skip_body, u->dst, v, 0)) {
+                ok++;
+                continue;
+            }
+            goto fail;
+        }
+        if (alu_imm_of(fn, def, u, v)
+            && value_only_used_as_sib_index(ir, fn, def, alloca_off, raw_uses,
+                                            skip_body, u->dst, memo_idx,
+                                            memo_addr, depth + 1)) {
+            ok++;
+            continue;
+        }
+        goto fail;
+    }
+    if (uses > 0 && uses == ok) {
+        if (memo_idx) memo_idx[v] = 1;
+        return 1;
+    }
+fail:
+    if (memo_idx) memo_idx[v] = 2;
+    return 0;
+}
+static void fused_skip_sib_index_tree(char *fused_skip, const IRModule *ir,
+                                      const IRFunction *fn, const int *def,
+                                      const int *raw_uses, const char *skip_body,
+                                      int nvals, const int *alloca_off,
+                                      const RAResult *ra, char *memo_idx,
+                                      char *memo_addr, IRValue v, int depth) {
+    const IRInst *d;
+    int di;
+    if (depth > 12 || !fused_skip || !fn || !def || v < 0 || v >= nvals)
+        return;
+    if (!value_unique_def(fn, v) || def[v] < 0) return;
+    di = def[v];
+    if (fused_skip[di]) return;
+    d = &fn->insts.data[di];
+    if (d->op == IR_ALLOCA || d->op == IR_ADDR || d->op == IR_GADDR
+        || d->op == IR_GADDR_TLS || d->op == IR_FADDR || d->op == IR_PARAM)
+        return;
+    if (d->op != IR_CONST
+        && !can_remat_sib_index(fn, def, ra, alloca_off, v))
+        return;
+    if (!value_only_used_as_sib_index(ir, fn, def, alloca_off, raw_uses,
+                                      skip_body, v, memo_idx, memo_addr, 0))
+        return;
+    fused_skip[di] = 1;
+    switch (d->op) {
+    case IR_CONST:
+        return;
+    case IR_COPY:
+    case IR_ZEXT:
+    case IR_SEXT:
+    case IR_TRUNC:
+        fused_skip_sib_index_tree(fused_skip, ir, fn, def, raw_uses, skip_body,
+                                  nvals, alloca_off, ra, memo_idx, memo_addr,
+                                  d->a, depth + 1);
+        return;
+    case IR_BAND:
+    case IR_BOR:
+    case IR_BXOR:
+    case IR_SHL:
+    case IR_SHR:
+        fused_skip_sib_index_tree(fused_skip, ir, fn, def, raw_uses, skip_body,
+                                  nvals, alloca_off, ra, memo_idx, memo_addr,
+                                  d->a, depth + 1);
+        fused_skip_sib_index_tree(fused_skip, ir, fn, def, raw_uses, skip_body,
+                                  nvals, alloca_off, ra, memo_idx, memo_addr,
+                                  d->b, depth + 1);
+        return;
+    case IR_LOAD:
+    case IR_LOAD_PTR:
+        if (d->a >= 0 && d->a < nvals && raw_uses && raw_uses[d->a] == 1
+            && def[d->a] >= 0) {
+            int ai = def[d->a];
+            int aop = fn->insts.data[ai].op;
+            if (aop != IR_ALLOCA && aop != IR_ADDR && aop != IR_GADDR
+                && aop != IR_PARAM)
+                fused_skip[ai] = 1;
+        }
+        return;
+    default:
+        return;
+    }
 }
 static int sext_folds_frame_load(const IRFunction *fn, const int *def,
                                  const int *alloca_off, const int *raw_uses,
@@ -6074,8 +7042,25 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 emit_module_add_dbg_line(out, fn->loc.file, fn->loc.line,
                                          fn->loc.col, start_offset);
         }
+        int nparams = 0;
+        for (size_t j = 0; j < fn->insts.len; j++) {
+            if (fn->insts.data[j].op == IR_PARAM) nparams++;
+            else break;
+        }
+        if (nparams > 1024) nparams = 1024;
+        int *ssa_def = codegen_build_defs(fn);
+        codegen_set_def_count(fn);
+        int *param_home_hint = ((void*)0);
+        if (nparams > 0) {
+            param_home_hint = xmalloc((size_t)nparams * sizeof(int));
+            runtime.memset(param_home_hint, 0, (size_t)nparams * sizeof(int));
+            for (int p = 0; p < nparams; p++)
+                if (param_will_get_frame_home(fn, ssa_def, p, ((void*)0), ((void*)0), ((void*)0)))
+                    param_home_hint[p] = 1;
+        }
         int cs_used[5];
-        collect_callee_saved(ra, fn, cs_used);
+        collect_callee_saved(ra, fn, cs_used, ((void*)0), ((void*)0), param_home_hint, nparams);
+        runtime.free(param_home_hint);
         int cs_count = cs_used[0] + cs_used[1] + cs_used[2] + cs_used[3] + cs_used[4];
         curr_cs_count = cs_count;
         int cs_save_area = 8 * cs_count;
@@ -6162,11 +7147,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         if (want_debug && dbg_func_idx >= 0)
             emit_module_dbg_func_frame(out, dbg_func_idx, after_push_rbp_pc,
                                        after_mov_rbp_pc);
-        if (cs_used[0]) emit_push_r(&out->text, REG_RBX);
-        if (cs_used[1]) emit_push_r(&out->text, REG_R12);
-        if (cs_used[2]) emit_push_r(&out->text, REG_R13);
-        if (cs_used[3]) emit_push_r(&out->text, REG_RSI);
-        if (cs_used[4]) emit_push_r(&out->text, REG_RDI);
         }
         int8_t win_pushed[8];
         int win_npushed = 0;
@@ -6179,12 +7159,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (cs_used[4]) win_pushed[win_npushed++] = 7;
         }
         (void)win_npushed;
-        int nparams = 0;
-        for (size_t j = 0; j < fn->insts.len; j++) {
-            if (fn->insts.data[j].op == IR_PARAM) nparams++;
-            else break;
-        }
-        if (nparams > 1024) nparams = 1024;
         int *arrive_reg = ((void*)0);
         int *arrive_is_xmm = ((void*)0);
         int *stack_off = ((void*)0);
@@ -6283,8 +7257,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
             }
         }
-        int *ssa_def = codegen_build_defs(fn);
-        codegen_set_def_count(fn);
         char *skip_body = xmalloc(fn->insts.len ? fn->insts.len : 1);
         runtime.memset(skip_body, 0, fn->insts.len ? fn->insts.len : 1);
         int *param_home_off = ((void*)0);
@@ -6293,74 +7265,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             runtime.memset(param_home_off, 0, (size_t)nparams * sizeof(int));
         }
         for (int p = 0; p < nparams; p++) {
-            const IRInst *pi = &fn->insts.data[p];
-            IRValue v = pi->dst;
-            if (v < 0 || value_is_ld(fn, v)) continue;
-            if (param_is_mem_blob(pi)) continue;
-            int store_i = -1, nstore = 0, other = 0;
-            for (size_t j = 0; j < fn->insts.len; j++) {
-                const IRInst *in = &fn->insts.data[j];
-                if (in->op == IR_DBG_VALUE || in->op == IR_PARAM ||
-                    in->op == IR_LABEL || in->op == IR_BR)
-                    continue;
-                if (in->op == IR_STORE_PTR && in->b == v) {
-                    nstore++;
-                    store_i = (int)j;
-                    continue;
-                }
-                if (in->a == v) { other = 1; break; }
-                if (in->op != IR_CBR && in->op != IR_CALL && in->op != IR_ASM && in->b == v) {
-                    other = 1;
-                    break;
-                }
-                if (in->op == IR_CALL) {
-                    if (in->call_callee == v) { other = 1; break; }
-                    for (int k = 0; k < in->call_nargs; k++) {
-                        if (in->call_args[k] == v) { other = 1; break; }
-                    }
-                    if (other) break;
-                }
-            }
-            if (other || nstore != 1 || store_i < 0) continue;
-            const IRInst *st = &fn->insts.data[store_i];
-            IRValue ptr = st->a;
-            if (ptr < 0 || ptr >= fn->next_value_id || ssa_def[ptr] < 0) continue;
-            int slot = -1, field_off = 0;
-            const IRInst *ad = &fn->insts.data[ssa_def[ptr]];
-            if (ad->op == IR_ADDR) {
-                slot = ad->a;
-                field_off = 0;
-            } else if (ad->op == IR_ADD) {
-                IRValue base_ptr = -1;
-                int64_t imm = 0;
-                if (ad->a >= 0 && ad->a < fn->next_value_id && ssa_def[ad->a] >= 0
-                    && ad->b >= 0 && ad->b < fn->next_value_id && ssa_def[ad->b] >= 0) {
-                    const IRInst *xa = &fn->insts.data[ssa_def[ad->a]];
-                    const IRInst *xb = &fn->insts.data[ssa_def[ad->b]];
-                    if (xa->op == IR_ADDR && xb->op == IR_CONST && !xb->is_float) {
-                        base_ptr = ad->a;
-                        imm = xb->imm;
-                    } else if (xb->op == IR_ADDR && xa->op == IR_CONST && !xa->is_float) {
-                        base_ptr = ad->b;
-                        imm = xa->imm;
-                    }
-                }
-                if (base_ptr < 0 || ssa_def[base_ptr] < 0) continue;
-                const IRInst *ba = &fn->insts.data[ssa_def[base_ptr]];
-                if (ba->op != IR_ADDR) continue;
-                slot = ba->a;
-                field_off = (int)imm;
-            } else {
+            int slot = -1, field_off = 0, store_i = -1;
+            if (!param_will_get_frame_home(fn, ssa_def, p, &slot, &field_off,
+                                           &store_i))
                 continue;
-            }
-            if (slot < 0 || slot >= fn->next_value_id || ssa_def[slot] < 0) continue;
-            const IRInst *al = &fn->insts.data[ssa_def[slot]];
-            if (al->op != IR_ALLOCA) continue;
-            if (alloca_dyn_align(fn, ssa_def, slot)) continue;
-            int store_w = st->width ? st->width : 4;
-            int param_w = pi->width ? pi->width : 4;
-            if (store_w != param_w) continue;
-            if (field_off < 0 || al->alloca_bytes < field_off + store_w) continue;
             int off = alloca_off[slot];
             if (off == 0) continue;
             if (arrive_reg && arrive_reg[p] < 0 && field_off == 0
@@ -6722,22 +7630,31 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 comm = 0;
             else
                 continue;
-            for (int side = 0; side < (comm ? 2 : 1); side++) {
+            int skipped_imm = 0;
+            for (int side = 0; side < (comm ? 2 : 1) && !skipped_imm; side++) {
                 IRValue cv = side ? ad->a : ad->b;
                 if (cv < 0 || cv >= nvals_f || raw_uses[cv] != 1
                     || !value_unique_def(fn, cv) || ssa_def[cv] < 0)
                     continue;
                 int64_t imm = 0;
-                if (!ssa_const_imm(fn, ssa_def, cv, &imm)) continue;
+                int bitwise = (ad->op == IR_BAND || ad->op == IR_BOR
+                               || ad->op == IR_BXOR);
+                int shift = (ad->op == IR_SHL || ad->op == IR_SHR
+                             || ad->op == IR_ROL);
+                if (bitwise || shift) {
+                    if (!ssa_const_imm_chain(fn, ssa_def, cv, &imm)) continue;
+                } else if (!ssa_const_imm(fn, ssa_def, cv, &imm)) {
+                    continue;
+                }
                 int ok = imm_fits_i32(imm);
+                if (bitwise)
+                    ok = ok || imm_fits_bitwise_u32(imm);
                 if ((ad->op == IR_SHL || ad->op == IR_SHR || ad->op == IR_ROL)
                     && (imm < 0 || imm >= 64))
                     ok = 0;
                 if (!ok) continue;
-                int ci = ssa_def[cv];
-                if (!skip_body[ci] && !fused_skip[ci])
-                    fused_skip[ci] = 1;
-                needed[cv] = 0;
+                skip_const_imm_chain(fn, ssa_def, fused_skip, needed, raw_uses, nvals_f, cv);
+                skipped_imm = 1;
             }
         }
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
@@ -6896,7 +7813,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (skip_body[uj] || fused_skip[uj]) continue;
             if (st->op == IR_STORE_PTR && store_imm[uj]) continue;
             if (st->op != IR_STORE_PTR && st->op != IR_STORE) continue;
-            if (st->width != 4 && st->width != 1) continue;
+            if (st->width != 4 && st->width != 2 && st->width != 1) continue;
             int poff = 0;
             const char *st_gname = ((void*)0);
             IRValue st_idx = -1;
@@ -7031,27 +7948,41 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
             if (li < 0 || other < 0) continue;
+            if (st_gname && st_idx >= 0
+                && !can_remat_rmw_operand(fn, ssa_def, ra, alloca_off, st_idx))
+                continue;
             int64_t immv = 0;
             IRValue imm_src = other;
+            int got_imm = 0;
             if (!value_unique_def(fn, other))
                 imm_src = -1;
-            for (int depth = 0; imm_src >= 0 && imm_src < nvals_f && depth < 3;
-                 depth++) {
-                if (!value_unique_def(fn, imm_src)) { imm_src = -1; break; }
-                if (ssa_const_imm(fn, ssa_def, imm_src, &immv)) break;
-                if (ssa_def[imm_src] < 0) { imm_src = -1; break; }
-                const IRInst *d = &fn->insts.data[ssa_def[imm_src]];
-                if (d->op != IR_ZEXT && d->op != IR_SEXT && d->op != IR_COPY)
-                    { imm_src = -1; break; }
-                imm_src = d->a;
+            else if ((ad->op == IR_BAND || ad->op == IR_BOR || ad->op == IR_BXOR)
+                     && ssa_const_imm_chain(fn, ssa_def, other, &immv)) {
+                got_imm = 1;
+            } else {
+                for (int depth = 0; imm_src >= 0 && imm_src < nvals_f && depth < 3;
+                     depth++) {
+                    if (!value_unique_def(fn, imm_src)) { imm_src = -1; break; }
+                    if (ssa_const_imm(fn, ssa_def, imm_src, &immv)) {
+                        got_imm = 1;
+                        break;
+                    }
+                    if (ssa_def[imm_src] < 0) { imm_src = -1; break; }
+                    const IRInst *d = &fn->insts.data[ssa_def[imm_src]];
+                    if (d->op != IR_ZEXT && d->op != IR_SEXT && d->op != IR_COPY)
+                        { imm_src = -1; break; }
+                    imm_src = d->a;
+                }
             }
-            int imm_ok = imm_src >= 0 && (imm_fits_i32(immv)
+            int imm_ok = got_imm && (imm_fits_i32(immv)
                 || ((ad->op == IR_BAND || ad->op == IR_BOR || ad->op == IR_BXOR)
                     && imm_fits_bitwise_u32(immv))
                 || (st->width == 1 && immv == (int64_t)(uint32_t)immv));
             if (imm_ok) {
                 if (st->width == 1)
                     immv = (int64_t)(int8_t)(uint32_t)immv;
+                else if (st->width == 2)
+                    immv = (int64_t)(int16_t)immv;
                 else if (!imm_fits_i32(immv) && imm_fits_bitwise_u32(immv))
                     immv = (int64_t)(int32_t)(uint32_t)immv;
                 mem_rmw[uj] = (char)(1 + ext);
@@ -7074,7 +8005,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         const IRInst *d = &fn->insts.data[ci];
                         if (d->op == IR_CONST) break;
                         if (d->op != IR_ZEXT && d->op != IR_SEXT
-                            && d->op != IR_COPY)
+                            && d->op != IR_COPY && d->op != IR_TRUNC)
                             break;
                         c = d->a;
                     }
@@ -7121,13 +8052,17 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         fused_skip[ssa_def[fn->insts.data[li].a]] = 1;
                 }
                 mark_reg(needed, ssa_uses_f, nvals_f, other);
+                unskip_const_imm_chain(fn, ssa_def, fused_skip, needed,
+                                       nvals_f, other);
                 if (st_idx >= 0)
                     mark_reg(needed, ssa_uses_f, nvals_f, st_idx);
                 if (st_gname && st_idx >= 0) {
-                    fused_skip_remat_tree(fused_skip, fn, ssa_def, raw_uses,
-                                          nvals_f, alloca_off, other, 0);
-                    fused_skip_remat_tree(fused_skip, fn, ssa_def, raw_uses,
-                                          nvals_f, alloca_off, st_idx, 0);
+                    int remat_ok =
+                        can_remat_rmw_operand(fn, ssa_def, ra, alloca_off,
+                                              other)
+                        && can_remat_rmw_operand(fn, ssa_def, ra, alloca_off,
+                                                 st_idx);
+                    IRValue lix_skip = -1;
                     if (fn->insts.data[li].op == IR_LOAD_PTR
                         && fn->insts.data[li].a >= 0) {
                         IRValue lb = -1, lix = -1;
@@ -7135,10 +8070,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         if (local_abs_af(ir, fn, ssa_def, alloca_off,
                                          fn->insts.data[li].a,
                                          &lb, &lix, &lsc, &ldisp)
-                            && lix >= 0)
+                            && lix >= 0) {
+                            if (!can_remat_rmw_operand(fn, ssa_def, ra,
+                                                       alloca_off, lix))
+                                remat_ok = 0;
+                            else
+                                lix_skip = lix;
+                        }
+                    }
+                    if (remat_ok) {
+                        fused_skip_remat_tree(fused_skip, fn, ssa_def, raw_uses,
+                                              nvals_f, alloca_off, other, 0);
+                        fused_skip_remat_tree(fused_skip, fn, ssa_def, raw_uses,
+                                              nvals_f, alloca_off, st_idx, 0);
+                        if (lix_skip >= 0)
                             fused_skip_remat_tree(fused_skip, fn, ssa_def,
                                                   raw_uses, nvals_f,
-                                                  alloca_off, lix, 0);
+                                                  alloca_off, lix_skip, 0);
                     }
                 }
             }
@@ -7229,7 +8177,6 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         base = d->b;
                     else
                         continue;
-                    int base_home = gp_home(ra, base);
                     int base_frame = 0;
                     int base_ldi = -1;
                     if (base >= 0 && base < nvals_f
@@ -7243,7 +8190,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             base_ldi = ssa_def[base];
                         }
                     }
-                    if (base_home < 0 && !base_frame) continue;
+                    if (!base_frame) continue;
                     fused_skip[di] = 1;
                     if (base_frame && base >= 0 && base < nvals_f
                         && raw_uses[base] == 1) {
@@ -7294,22 +8241,39 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 continue;
             if (al->is_float) continue;
             int64_t ia = 0, ib = 0;
-            int fa = ssa_const_imm(fn, ssa_def, al->a, &ia);
-            int fb = ssa_const_imm(fn, ssa_def, al->b, &ib);
+            int fa = ssa_const_imm_chain(fn, ssa_def, al->a, &ia);
+            int fb = ssa_const_imm_chain(fn, ssa_def, al->b, &ib);
             if (fa == fb) continue;
             if ((al->op == IR_SHR || al->op == IR_SHL) && !fb) continue;
             IRValue sv = fb ? al->a : al->b;
-            if (sv < 0 || sv >= nvals_f || raw_uses[sv] != 1) continue;
-            if (!value_unique_def(fn, sv) || ssa_def[sv] < 0) continue;
-            int li = ssa_def[sv];
-            if (skip_body[li] || fused_skip[li]) continue;
+            int chain[8], nchain = 0, li = -1;
+            IRValue cur = sv;
+            for (int depth = 0; depth < 8 && cur >= 0 && cur < nvals_f; depth++) {
+                if (raw_uses[cur] != 1 || !value_unique_def(fn, cur)
+                    || ssa_def[cur] < 0)
+                    break;
+                int di = ssa_def[cur];
+                if (skip_body[di] || fused_skip[di]) break;
+                const IRInst *d = &fn->insts.data[di];
+                chain[nchain++] = di;
+                if (d->op == IR_COPY || d->op == IR_TRUNC) {
+                    cur = d->a;
+                    continue;
+                }
+                if (d->op == IR_LOAD || d->op == IR_LOAD_PTR) {
+                    li = di;
+                }
+                break;
+            }
+            if (li < 0) continue;
             const IRInst *ld = &fn->insts.data[li];
             int off = 0;
             if ((ld->op != IR_LOAD && ld->op != IR_LOAD_PTR)
                 || !fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &off, 0)
                 || off == 0)
                 continue;
-            fused_skip[li] = 1;
+            for (int k = 0; k < nchain; k++)
+                fused_skip[chain[k]] = 1;
             if (ld->op == IR_LOAD_PTR && ld->a >= 0 && ld->a < nvals_f
                 && raw_uses[ld->a] == 1 && ssa_def[ld->a] >= 0)
                 fused_skip[ssa_def[ld->a]] = 1;
@@ -7393,6 +8357,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             }
             if (!blocked) call_cbr_rax[cb->a] = 1;
         }
+        char *vec_folded = xmalloc(ninst_f ? ninst_f : 1);
+        runtime.memset(vec_folded, 0, ninst_f ? ninst_f : 1);
         for (size_t uj = 0; uj < fn->insts.len; uj++) {
             const IRInst *v = &fn->insts.data[uj];
             if (skip_body[uj] || fused_skip[uj]) continue;
@@ -7416,18 +8382,51 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 const IRInst *ad = &fn->insts.data[k];
                 if (ad->op == IR_ADDR && ad->dst == v->dst
                     && ad->a >= 0 && ad->a < fn->next_value_id
-                    && alloca_off[ad->a] != 0) {
+                    && alloca_off[ad->a] != 0
+                    && !alloca_dyn_align(fn, ssa_def, ad->a)) {
                     od = alloca_off[ad->a];
                     fd = 1;
                     break;
                 }
             }
             if (!fd || od == 0) continue;
+            vec_folded[uj] = 1;
             if (v->a >= 0 && v->a < nvals_f && raw_uses[v->a] == 1)
                 needed[v->a] = 0;
             if (v->b >= 0 && v->b < nvals_f && raw_uses[v->b] == 1)
                 needed[v->b] = 0;
         }
+        for (size_t uj = 0; uj < fn->insts.len; uj++) {
+            const IRInst *ad = &fn->insts.data[uj];
+            if (skip_body[uj] || fused_skip[uj]) continue;
+            if (ad->op != IR_ADDR || ad->dst < 0 || ad->dst >= nvals_f)
+                continue;
+            if (ad->a < 0 || ad->a >= nvals_f || alloca_off[ad->a] == 0)
+                continue;
+            int ok = 1, saw = 0;
+            for (size_t k = 0; k < fn->insts.len && ok; k++) {
+                if (skip_body[k] || fused_skip[k]) continue;
+                const IRInst *u = &fn->insts.data[k];
+                if (u->op == IR_DBG_VALUE) continue;
+                if (u->op == IR_ADDR && u->dst == ad->dst) continue;
+                if (u->call_args && u->call_nargs > 0) {
+                    for (int ai = 0; ai < u->call_nargs; ai++) {
+                        if (u->call_args[ai] == ad->dst) { ok = 0; break; }
+                    }
+                    if (!ok) break;
+                }
+                if (u->a != ad->dst && u->b != ad->dst && u->c != ad->dst
+                    && u->dst != ad->dst)
+                    continue;
+                if (!vec_folded[k]) { ok = 0; break; }
+                saw = 1;
+            }
+            if (ok && saw) {
+                fused_skip[uj] = 1;
+                needed[ad->dst] = 0;
+            }
+        }
+        runtime.free(vec_folded);
         int *call_store_off = xmalloc((size_t)nvals_f * sizeof(int));
         int *call_store_w = xmalloc((size_t)nvals_f * sizeof(int));
         runtime.memset(call_store_off, 0, (size_t)nvals_f * sizeof(int));
@@ -7550,6 +8549,40 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 va_gp_offset = 8 * gp_reg_idx;
                 va_fp_offset = 48 + 16 * xmm_reg_idx;
                 va_overflow_off = 16 + 8 * stack_arg_idx;
+            }
+        }
+        {
+            int layout_cs = cs_count;
+            if (!naked && (skip_body || fused_skip)) {
+                int refined[5];
+                collect_callee_saved(ra, fn, refined, skip_body, fused_skip,
+                                     param_home_off, nparams);
+                int refined_n = refined[0] + refined[1] + refined[2]
+                              + refined[3] + refined[4];
+                if (refined_n <= layout_cs) {
+                    cs_used[0] = refined[0];
+                    cs_used[1] = refined[1];
+                    cs_used[2] = refined[2];
+                    cs_used[3] = refined[3];
+                    cs_used[4] = refined[4];
+                    prologue_stack += 8 * (layout_cs - refined_n);
+                    if (target_current()->os == TOS_WINDOWS) {
+                        win_npushed = 0;
+                        runtime.memset(win_pushed, -1, sizeof win_pushed);
+                        if (cs_used[0]) win_pushed[win_npushed++] = 3;
+                        if (cs_used[1]) win_pushed[win_npushed++] = 12;
+                        if (cs_used[2]) win_pushed[win_npushed++] = 13;
+                        if (cs_used[3]) win_pushed[win_npushed++] = 6;
+                        if (cs_used[4]) win_pushed[win_npushed++] = 7;
+                    }
+                }
+            }
+            if (!naked) {
+                if (cs_used[0]) emit_push_r(&out->text, REG_RBX);
+                if (cs_used[1]) emit_push_r(&out->text, REG_R12);
+                if (cs_used[2]) emit_push_r(&out->text, REG_R13);
+                if (cs_used[3]) emit_push_r(&out->text, REG_RSI);
+                if (cs_used[4]) emit_push_r(&out->text, REG_RDI);
             }
         }
         if (target_current()->os == TOS_WINDOWS && prologue_stack >= 4096) {
@@ -7743,6 +8776,56 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         int x87_st0_v = -1;
         int x87_st1_v = -1;
         int rax_holder = -1;
+        int n_returns = 0, last_ret = -1, needs_ret = 0;
+        if (fn->insts.len == 0) {
+            needs_ret = 1;
+        } else {
+            IROpcode lastop = fn->insts.data[fn->insts.len - 1].op;
+            if (lastop != IR_RETURN && lastop != IR_BR && lastop != IR_CBR
+                && lastop != IR_BR_TABLE && lastop != IR_JMP_PTR
+                && !(fn->is_naked && lastop == IR_ASM))
+                needs_ret = 1;
+        }
+        for (size_t rj = 0; rj < fn->insts.len; rj++) {
+            if (fn->insts.data[rj].op == IR_RETURN) {
+                n_returns++;
+                last_ret = (int)rj;
+            }
+        }
+        int share_epi = !fn->is_naked && (n_returns + needs_ret) >= 2;
+        size_t *epi_jmps = ((void*)0);
+        int n_epi_jmps = 0, cap_epi_jmps = 0;
+        size_t epi_off = (size_t)-1;
+        sib_remat_fn = fn;
+        sib_remat_def = ssa_def;
+        sib_remat_alloca = alloca_off;
+        sib_remat_skip = fused_skip;
+        if (ra) {
+            char *memo_idx = xmalloc((size_t)nvals_f);
+            char *memo_addr = xmalloc((size_t)nvals_f);
+            runtime.memset(memo_idx, 0, (size_t)nvals_f);
+            runtime.memset(memo_addr, 0, (size_t)nvals_f);
+            for (size_t uj = 0; uj < fn->insts.len; uj++) {
+                IRValue ix;
+                if (skip_body[uj] || fused_skip[uj]) continue;
+                ix = memop_folded_sib_idx(ir, fn, ssa_def, alloca_off,
+                                          raw_uses, &fn->insts.data[uj], uj);
+                if (ix < 0) continue;
+                if (gp_home(ra, ix) >= 0 && gp_home(ra, ix) != REG_RSP)
+                    continue;
+                if (!can_remat_sib_index(fn, ssa_def, ra, alloca_off, ix))
+                    continue;
+                if (!value_only_used_as_sib_index(ir, fn, ssa_def, alloca_off,
+                                                  raw_uses, skip_body, ix,
+                                                  memo_idx, memo_addr, 0))
+                    continue;
+                fused_skip_sib_index_tree(fused_skip, ir, fn, ssa_def, raw_uses,
+                                          skip_body, nvals_f, alloca_off, ra,
+                                          memo_idx, memo_addr, ix, 0);
+            }
+            runtime.free(memo_idx);
+            runtime.free(memo_addr);
+        }
         for (size_t j = 0; j < fn->insts.len; j++) {
             const IRInst *inst = &fn->insts.data[j];
             if (inst->op == IR_DBG_VALUE) {
@@ -8381,24 +9464,18 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 if (inst->a >= 0 && inst->a < fn->next_value_id
                     && alloca_off[inst->a] != 0 && mem_rmw[j] >= 1
                     && mem_rmw[j] <= 7) {
-                    if (inst->width == 1)
-                        emit_arith_imm8_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
-                                             mem_rmw_imm[j], alloca_off[inst->a]);
-                    else
-                        emit_arith_imm32_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
-                                              mem_rmw_imm[j], alloca_off[inst->a]);
+                    emit_arith_imm_disp_w(&out->text, mem_rmw[j] - 1, REG_RBP,
+                                          mem_rmw_imm[j], alloca_off[inst->a],
+                                          inst->width);
                     break;
                 }
                 if (inst->a >= 0 && inst->a < fn->next_value_id
                     && alloca_off[inst->a] != 0 && mem_rmw[j] >= 10) {
                     IRValue ov = (IRValue)mem_rmw_imm[j];
                     ensure_reg(&out->text, ov, REG_RAX, ra);
-                    if (inst->width == 1)
-                        emit_arith_r8_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
-                                           REG_RAX, alloca_off[inst->a]);
-                    else
-                        emit_arith_r32_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
-                                            REG_RAX, alloca_off[inst->a]);
+                    emit_arith_r_disp_w(&out->text, mem_rmw[j] - 10, REG_RBP,
+                                        REG_RAX, alloca_off[inst->a],
+                                        inst->width);
                     break;
                 }
                 if (inst->a >= 0 && inst->a < fn->next_value_id
@@ -9001,7 +10078,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                                    is_float);
                     }
                 } else if (mem_rmw_gname[j] && mem_rmw_idx[j] >= 0
-                           && mem_rmw[j] >= 1 && inst->width == 1) {
+                           && mem_rmw[j] >= 1
+                           && (inst->width == 1 || inst->width == 2
+                               || inst->width == 4)) {
                     int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
                     IRValue ix = mem_rmw_idx[j];
                     int isc = mem_rmw_sc[j];
@@ -9014,31 +10093,41 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (gsym >= 0 && out->syms[gsym].shndx != 0) {
                         size_t patch;
                         if (mem_rmw[j] <= 7) {
-                            int idx_r = ensure_index(&out->text, ix, ra);
-                            patch = emit_arith_imm8_abs32(
+                            int idx_r = REG_RSI;
+                            if (!remat_rmw_operand(&out->text, fn, ssa_def, ra,
+                                                   alloca_off, ix, idx_r, 0))
+                                idx_r = ensure_index(&out->text, ix, ra);
+                            else {
+                                emit_rex_wrb(&out->text, 1, idx_r, idx_r);
+                                emit_byte(&out->text, 0x63);
+                                emit_modrm(&out->text, 3, idx_r & 7, idx_r & 7);
+                            }
+                            patch = emit_arith_imm_abs32(
                                 &out->text, mem_rmw[j] - 1, mem_rmw_imm[j],
-                                idx_r, isc);
+                                idx_r, isc, inst->width);
                         } else {
                             IRValue ov = (IRValue)mem_rmw_imm[j];
-                            int val_r = REG_RAX;
-                            if (!remat_rmw_operand(&out->text, fn, ssa_def, ra,
-                                                   alloca_off, ov, val_r, 0))
-                                ensure_reg(&out->text, ov, val_r, ra);
                             int idx_r = REG_RSI;
                             if (!remat_rmw_operand(&out->text, fn, ssa_def, ra,
                                                    alloca_off, ix, idx_r, 0)) {
                                 idx_r = ensure_index(&out->text, ix, ra);
-                                if (idx_r == val_r) {
-                                    emit_mov_rr(&out->text, REG_RDX, val_r);
-                                    val_r = REG_RDX;
-                                }
                             } else {
                                 emit_rex_wrb(&out->text, 1, idx_r, idx_r);
                                 emit_byte(&out->text, 0x63);
                                 emit_modrm(&out->text, 3, idx_r & 7, idx_r & 7);
                             }
-                            patch = emit_arith_r8_abs32(
-                                &out->text, mem_rmw[j] - 10, val_r, idx_r, isc);
+                            int val_r = REG_RAX;
+                            if (idx_r == val_r) val_r = REG_RDX;
+                            if (!remat_rmw_operand(&out->text, fn, ssa_def, ra,
+                                                   alloca_off, ov, val_r, 0))
+                                ensure_reg(&out->text, ov, val_r, ra);
+                            if (val_r == idx_r) {
+                                emit_mov_rr(&out->text, REG_RDX, val_r);
+                                val_r = REG_RDX;
+                            }
+                            patch = emit_arith_r_abs32(
+                                &out->text, mem_rmw[j] - 10, val_r, idx_r, isc,
+                                inst->width);
                         }
                         emit_module_add_reloc(out, patch, 11,
                                               gsym, mem_rmw_disp[j]);
@@ -9113,21 +10202,13 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         }
                     }
                 } else if (folded && mem_rmw[j] >= 1 && mem_rmw[j] <= 7) {
-                    if (inst->width == 1)
-                        emit_arith_imm8_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
-                                             mem_rmw_imm[j], ptr_off);
-                    else
-                        emit_arith_imm32_disp(&out->text, mem_rmw[j] - 1, REG_RBP,
-                                              mem_rmw_imm[j], ptr_off);
+                    emit_arith_imm_disp_w(&out->text, mem_rmw[j] - 1, REG_RBP,
+                                          mem_rmw_imm[j], ptr_off, inst->width);
                 } else if (folded && mem_rmw[j] >= 10) {
                     IRValue ov = (IRValue)mem_rmw_imm[j];
                     ensure_reg(&out->text, ov, REG_RAX, ra);
-                    if (inst->width == 1)
-                        emit_arith_r8_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
-                                           REG_RAX, ptr_off);
-                    else
-                        emit_arith_r32_disp(&out->text, mem_rmw[j] - 10, REG_RBP,
-                                            REG_RAX, ptr_off);
+                    emit_arith_r_disp_w(&out->text, mem_rmw[j] - 10, REG_RBP,
+                                        REG_RAX, ptr_off, inst->width);
                 } else if (mem_rmw_gname[j] && mem_rmw_idx[j] < 0
                            && mem_rmw[j] >= 1 && mem_rmw[j] <= 7) {
                     int gsym = emit_module_find_symbol(out, mem_rmw_gname[j]);
@@ -9139,6 +10220,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             patch = emit_arith_imm8_rip(
                                 &out->text, mem_rmw[j] - 1, imm);
                             addend = -5;
+                        } else if (inst->width == 2) {
+                            patch = emit_arith_imm16_rip(
+                                &out->text, mem_rmw[j] - 1, imm);
+                            addend = (imm >= -128 && imm <= 127) ? -5 : -6;
                         } else {
                             patch = emit_arith_imm32_rip(
                                 &out->text, mem_rmw[j] - 1, imm);
@@ -9153,11 +10238,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     IRValue ov = (IRValue)mem_rmw_imm[j];
                     ensure_reg(&out->text, ov, REG_RAX, ra);
                     if (gsym >= 0 && out->syms[gsym].shndx != 0) {
-                        size_t patch = (inst->width == 1)
-                            ? emit_arith_r8_rip(&out->text, mem_rmw[j] - 10,
-                                                REG_RAX)
-                            : emit_arith_r32_rip(&out->text, mem_rmw[j] - 10,
-                                                 REG_RAX);
+                        size_t patch;
+                        if (inst->width == 1)
+                            patch = emit_arith_r8_rip(
+                                &out->text, mem_rmw[j] - 10, REG_RAX);
+                        else if (inst->width == 2)
+                            patch = emit_arith_r16_rip(
+                                &out->text, mem_rmw[j] - 10, REG_RAX);
+                        else
+                            patch = emit_arith_r32_rip(
+                                &out->text, mem_rmw[j] - 10, REG_RAX);
                         emit_module_add_reloc(out, patch, 2,
                                               gsym, -4);
                     }
@@ -9258,12 +10348,15 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     int fb = fold_ptr_off(fn, ssa_def, alloca_off, inst->b,
                                          &off_b, 0);
                     int fd = 0;
+                    IRValue dest_slot = -1;
                     for (size_t k = 0; k < j; k++) {
                         const IRInst *ad = &fn->insts.data[k];
                         if (ad->op == IR_ADDR && ad->dst == inst->dst
                             && ad->a >= 0 && ad->a < fn->next_value_id
-                            && alloca_off[ad->a] != 0) {
+                            && alloca_off[ad->a] != 0
+                            && !alloca_dyn_align(fn, ssa_def, ad->a)) {
                             off_d = alloca_off[ad->a];
+                            dest_slot = ad->a;
                             fd = 1;
                             break;
                         }
@@ -9272,59 +10365,30 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         && !(inst->op == IR_VDIV
                              || (inst->op == IR_VMUL && !is_float
                                  && (elem_sz == 1 || elem_sz >= 8)))) {
-                        emit_movups_load_disp(&out->text, 14,
-                                              REG_RBP, off_a);
-                        emit_movups_load_disp(&out->text, 15,
-                                              REG_RBP, off_b);
-                        if (is_float) {
-                            if (elem_sz >= 8) emit_byte(&out->text, 0x66);
-                            emit_rex_wrb(&out->text, 0, 14,
-                                         15);
-                            emit_byte(&out->text, 0x0F);
-                            if (inst->op == IR_VADD) emit_byte(&out->text, 0x58);
-                            else if (inst->op == IR_VSUB) emit_byte(&out->text, 0x5C);
-                            else if (inst->op == IR_VMUL) emit_byte(&out->text, 0x59);
-                            else if (inst->op == IR_VDIV) emit_byte(&out->text, 0x5E);
-                            else if (inst->op == IR_VBAND) emit_byte(&out->text, 0x54);
-                            else if (inst->op == IR_VBOR) emit_byte(&out->text, 0x56);
-                            else emit_byte(&out->text, 0x57);
-                            emit_modrm(&out->text, 3, 14, 15);
-                        } else {
-                            emit_byte(&out->text, 0x66);
-                            emit_rex_wrb(&out->text, 0, 14,
-                                         15);
-                            emit_byte(&out->text, 0x0F);
-                            if (inst->op == IR_VBAND)
-                                emit_byte(&out->text, 0xDB);
-                            else if (inst->op == IR_VBOR)
-                                emit_byte(&out->text, 0xEB);
-                            else if (inst->op == IR_VBXOR)
-                                emit_byte(&out->text, 0xEF);
-                            else if (elem_sz == 1)
-                                emit_byte(&out->text,
-                                          inst->op == IR_VSUB ? 0xF8 : 0xFC);
-                            else if (elem_sz == 2) {
-                                if (inst->op == IR_VADD)
-                                    emit_byte(&out->text, 0xFD);
-                                else if (inst->op == IR_VSUB)
-                                    emit_byte(&out->text, 0xF9);
-                                else
-                                    emit_byte(&out->text, 0xD5);
-                            } else if (elem_sz == 4) {
-                                if (inst->op == IR_VMUL) {
-                                    emit_byte(&out->text, 0x38);
-                                    emit_byte(&out->text, 0x40);
-                                } else
-                                    emit_byte(&out->text,
-                                              (inst->op == IR_VSUB) ? 0xFA
-                                                                     : 0xFE);
-                            } else
-                                emit_byte(&out->text,
-                                          (inst->op == IR_VSUB) ? 0xFB : 0xD4);
-                            emit_modrm(&out->text, 3, 14, 15);
+                        int a_al = frame_off_sse_aligned(fn, ssa_def, alloca_off,
+                                                         inst->a, off_a);
+                        int b_al = frame_off_sse_aligned(fn, ssa_def, alloca_off,
+                                                         inst->b, off_b);
+                        int d_al = 0;
+                        if (dest_slot >= 0 && ssa_def[dest_slot] >= 0
+                            && (off_d & 15) == 0) {
+                            const IRInst *al = &fn->insts.data[ssa_def[dest_slot]];
+                            if (al->op == IR_ALLOCA && (int)al->imm == 16)
+                                d_al = 1;
                         }
-                        emit_movups_store_disp(&out->text, REG_RBP,
-                                               14, off_d);
+                        emit_vec16_move_disp(&out->text, 14, REG_RBP,
+                                             off_a, 0, a_al);
+                        if (b_al) {
+                            emit_vec16_packed_op(&out->text, inst, 14,
+                                                 1, REG_RBP, off_b);
+                        } else {
+                            emit_vec16_move_disp(&out->text, 15, REG_RBP,
+                                                 off_b, 0, 0);
+                            emit_vec16_packed_op(&out->text, inst, 14,
+                                                 0, 15, 0);
+                        }
+                        emit_vec16_move_disp(&out->text, 14, REG_RBP,
+                                             off_d, 1, d_al);
                         break;
                     }
                 }
@@ -10660,7 +11724,20 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                         ensure_reg(&out->text, inst->a, REG_RAX, ra);
                 }
                 rax_holder = -1;
-                do { if (fn->is_naked) emit_byte(&out->text, 0xC3); else emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca); } while (0);
+                if (fn->is_naked)
+                    emit_byte(&out->text, 0xC3);
+                else if (share_epi && !((int)j == last_ret && !needs_ret)) {
+                    if (n_epi_jmps >= cap_epi_jmps) {
+                        cap_epi_jmps = cap_epi_jmps ? cap_epi_jmps * 2 : 8;
+                        epi_jmps = xrealloc(epi_jmps, (size_t)cap_epi_jmps * sizeof(size_t));
+                    }
+                    epi_jmps[n_epi_jmps++] = emit_jmp_rel32(&out->text);
+                } else {
+                    if (share_epi && epi_off == (size_t)-1)
+                        epi_off = out->text.len;
+                    emit_epilogue(&out->text, prologue_stack, cs_used,
+                                  fn->has_dyn_alloca);
+                }
                 break;
             }
             case IR_FADD:
@@ -11070,18 +12147,16 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             if (leave_in_rax)
                 rax_holder = inst->dst;
         }
-        int needs_ret = 0;
-        if (fn->insts.len == 0) {
-            needs_ret = 1;
-        } else {
-            IROpcode last = fn->insts.data[fn->insts.len - 1].op;
-            if (last != IR_RETURN && last != IR_BR && last != IR_CBR
-                && last != IR_BR_TABLE && last != IR_JMP_PTR
-                && !(fn->is_naked && last == IR_ASM))
-                needs_ret = 1;
-        }
-        if (needs_ret && !fn->is_naked)
+        if (needs_ret && !fn->is_naked) {
+            if (share_epi && epi_off == (size_t)-1)
+                epi_off = out->text.len;
             emit_epilogue(&out->text, prologue_stack, cs_used, fn->has_dyn_alloca);
+        }
+        if (share_epi && n_epi_jmps > 0 && epi_off != (size_t)-1) {
+            for (int k = 0; k < n_epi_jmps; k++)
+                patch_rel32(&out->text, epi_jmps[k], epi_off);
+        }
+        runtime.free(epi_jmps);
         if (want_debug && dbg_func_idx >= 0) {
             size_t fn_end_pc = out->text.len;
             emit_module_dbg_func_end(out, dbg_func_idx, fn_end_pc,
@@ -11174,7 +12249,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
 int off;
 int dreg;
                     value_home(fn, dbg_obs[k].value, gp_spill_area,
-                               &lk, &off, &dreg);
+                               ssa_def, alloca_off, &lk, &off, &dreg);
                     dbg_var_add_range(&dv, dbg_obs[k].pc, end, lk, off, dreg);
                 }
                 emit_module_add_dbg_var(out, dbg_func_idx, &dv);
@@ -11233,6 +12308,10 @@ int dreg;
         runtime.free(ovf_keep_flags);
         runtime.free(ovf_wrap_off);
         runtime.free(ovf_wrap_w);
+        sib_remat_fn = ((void*)0);
+        sib_remat_def = ((void*)0);
+        sib_remat_alloca = ((void*)0);
+        sib_remat_skip = ((void*)0);
         runtime.free(fused_skip);
         runtime.free(carry_hi_at);
         runtime.free(carry_is_sub);
