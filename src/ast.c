@@ -1,6 +1,7 @@
 #include "fakecc/ast.h"
 #include "fakecc/target.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,6 +114,15 @@ static const StructRegistry *current_structs(void) {
 extern const TranslationUnit *get_sema_tu(void);
 extern const TranslationUnit *get_ir_tu(void);
 
+/* count * elem, or -1 when the product is not a representable size.
+ * A wrapped product becomes a multi-gigabyte positive int at the int
+ * truncation in ir, and calloc of that buffer is what SIGKILLs fuzz. */
+static long long size_mul(long long count, long long elem) {
+    if (count < 0 || elem < 0) return -1;
+    if (elem != 0 && count > LLONG_MAX / elem) return -1;
+    return count * elem;
+}
+
 long long type_size(Type t) {
     if (t.is_vector) return t.width;
     /* Walk array nesting through a pointer instead of recursing on the
@@ -124,25 +134,26 @@ long long type_size(Type t) {
     long long count = 1;
     while (p->kind == TY_ARRAY && p->elem_type) {
         if (p->vla_dim || p->length < 0) return -1;
-        count *= p->length;
+        count = size_mul(count, p->length);
+        if (count < 0) return -1;
         p = p->elem_type;
     }
-    if (p->is_vector) return count * p->width;
+    if (p->is_vector) return size_mul(count, p->width);
     switch (p->kind) {
     case TY_VOID:   return 0;
-    case TY_INT:    return count * p->width;
-    case TY_FLOAT:  return count * p->width;  /* 4 for float, 8 for double */
-    case TY_PTR:    return count * 8;
+    case TY_INT:    return size_mul(count, p->width);
+    case TY_FLOAT:  return size_mul(count, p->width);  /* 4 for float, 8 for double */
+    case TY_PTR:    return size_mul(count, 8);
     case TY_ARRAY:  return 0;   /* array without an element type — malformed */
     case TY_STRUCT: {
         if (p->tag) {
             const StructRegistry *reg = current_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
-                if (sd && sd->size > 0) return count * sd->size;
+                if (sd && sd->size > 0) return size_mul(count, sd->size);
             }
         }
-        return count * p->width;
+        return size_mul(count, p->width);
     }
     case TY_FUNC:   return 0;        /* sizeof a function is undefined */
     }

@@ -4353,10 +4353,18 @@ static int c64_eval_offset(C64 *c, int v, int64_t *out, int depth) {
         return 1;
     }
     if (s->op == IR_MUL || s->op == IR_ADD) {
-        int64_t x, y;
+        int64_t x, y, r;
         if (!c64_eval_offset(c, s->a, &x, depth + 1)) return 0;
         if (!c64_eval_offset(c, s->b, &y, depth + 1)) return 0;
-        *out = (s->op == IR_MUL) ? x * y : x + y;
+        /* A folded page offset that overflows int64 is not a usable addend.
+         * UBSan reports it (fuzz_differential) and the wrapped value can
+         * still pass the 24-bit check below and corrupt the relocation. */
+        if (s->op == IR_MUL) {
+            if (__builtin_mul_overflow(x, y, &r)) return 0;
+        } else if (__builtin_add_overflow(x, y, &r)) {
+            return 0;
+        }
+        *out = r;
         return 1;
     }
     return 0;
