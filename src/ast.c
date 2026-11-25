@@ -1,7 +1,6 @@
 #include "fakecc/ast.h"
 #include "fakecc/target.h"
 
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,10 +115,12 @@ extern const TranslationUnit *get_ir_tu(void);
 
 /* count * elem, or -1 when the product is not a representable size.
  * A wrapped product becomes a multi-gigabyte positive int at the int
- * truncation in ir, and calloc of that buffer is what SIGKILLs fuzz. */
+ * truncation in ir, and calloc of that buffer is what SIGKILLs fuzz.
+ * The bound is 2^63-1 written out: v0/translate.py preprocesses with
+ * gcc -nostdinc, so <limits.h> / LLONG_MAX is not available. */
 static long long size_mul(long long count, long long elem) {
     if (count < 0 || elem < 0) return -1;
-    if (elem != 0 && count > LLONG_MAX / elem) return -1;
+    if (elem != 0 && count > (9223372036854775807LL / elem)) return -1;
     return count * elem;
 }
 
