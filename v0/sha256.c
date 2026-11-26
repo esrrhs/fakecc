@@ -33,7 +33,6 @@ void sha256_update(SHA256Ctx *ctx, const void *data, size_t len);
 void sha256_final(SHA256Ctx *ctx, unsigned char out[32]);
 void sha256_buf(const void *data, size_t len,
                 unsigned char out[32]);
-
 static const uint32_t sha256_k[64] = {
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
     0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,

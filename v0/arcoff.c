@@ -352,7 +352,6 @@ void link_set_image_base(uint64_t base);
 uint64_t link_image_base(void);
 int link_kernel_multiboot(const char **obj_paths, size_t npaths,
                           const char *out_path);
-
 typedef struct FILE FILE;
 typedef long fpos_t;
 static uint16_t ru16(const unsigned char *p) {

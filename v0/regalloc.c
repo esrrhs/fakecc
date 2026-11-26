@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -1970,25 +1969,34 @@ static int find_block_for_inst(const CFG *cfg, int inst_idx) {
     }
     return 0;
 }
-static int ssa_is_frame_ext(const IRFunction *fn, int v) {
+static int *build_def_index(const IRFunction *fn) {
+    int n = fn ? fn->next_value_id : 0;
+    int *idx;
+    size_t i;
+    if (n < 0) n = 0;
+    idx = xmalloc((size_t)n * sizeof(int));
+    for (i = 0; i < (size_t)n; i++) idx[i] = -1;
+    if (!fn) return idx;
+    for (i = 0; i < fn->insts.len; i++) {
+        int d = fn->insts.data[i].dst;
+        if (d >= 0 && d < n) idx[d] = (int)i;
+    }
+    return idx;
+}
+static int ssa_is_frame_ext(const IRFunction *fn, int v, const int *def_at) {
     int depth;
-    if (!fn || v < 0 || v >= fn->next_value_id) return 0;
+    if (!fn || !def_at || v < 0 || v >= fn->next_value_id) return 0;
     for (depth = 0; depth < 6; depth++) {
-        size_t i;
-        const IRInst *d = ((void*)0);
-        for (i = fn->insts.len; i > 0; ) {
-            i--;
-            if (fn->insts.data[i].dst == v) {
-                d = &fn->insts.data[i];
-                break;
-            }
-        }
-        if (!d) return 0;
+        int at = def_at[v];
+        const IRInst *d;
+        if (at < 0 || (size_t)at >= fn->insts.len) return 0;
+        d = &fn->insts.data[at];
         if (d->op == IR_LOAD || d->op == IR_LOAD_PTR)
             return 1;
         if (d->op == IR_COPY || d->op == IR_SEXT || d->op == IR_ZEXT
             || d->op == IR_TRUNC) {
             v = d->a;
+            if (v < 0 || v >= fn->next_value_id) return 0;
             continue;
         }
         return 0;
@@ -1996,7 +2004,7 @@ static int ssa_is_frame_ext(const IRFunction *fn, int v) {
     return 0;
 }
 static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg,
-                              const IRFunction *fn) {
+                              const IRFunction *fn, const int *def_at) {
     const LiveInfo *l = &liv[v];
     int cost = 0;
     for (size_t i = 0; i < l->num_uses; i++) {
@@ -2008,7 +2016,7 @@ static int compute_spill_cost(int v, const LiveInfo *liv, const CFG *cfg,
         cost += 1 + estimate_loop_depth(blk, cfg) * 10;
     }
     if (cost <= 0) cost = 1;
-    if (ssa_is_frame_ext(fn, v))
+    if (ssa_is_frame_ext(fn, v, def_at))
         cost *= 64;
     return cost;
 }
@@ -2023,9 +2031,11 @@ static void greedy_color(const InterfGraph *g, const int *order,
         runtime.fprintf(runtime.stderr, "fakecc: register class has %d regs (max 32)\n", k);
         runtime.exit(1);
     }
+    int *def_at = build_def_index(fn);
     int *spill_cost = xmalloc(n * sizeof(int));
     for (int v = 0; v < n; v++)
-        spill_cost[v] = compute_spill_cost(v, liv, cfg, fn);
+        spill_cost[v] = compute_spill_cost(v, liv, cfg, fn, def_at);
+    runtime.free(def_at);
     for (int v = 0; v < n; v++) colors[v] = -1;
     int next_spill = 0;
     for (int i = 0; i < n; i++) {

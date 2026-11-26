@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -1216,7 +1215,6 @@ enum NasmFormat {
 int assemble_nasm(const char *src, const char *filename,
                   NasmFormat fmt, const char *out_path);
 int is_nasm_input(const char *path);
-
 enum LdScriptKind {
     LDSCRIPT_KIND_UNKNOWN = 0,
     LDSCRIPT_KIND_KERNEL_HH,

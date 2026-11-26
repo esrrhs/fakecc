@@ -43,7 +43,6 @@ const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
 const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
-
 static const TargetDesc TARGET_X86_64_LINUX = {
     TARGET_ARCH_X86_64,
     TOS_LINUX,
@@ -86,7 +85,7 @@ static const TargetDesc *host_default(void) {
             if (t) return t;
         }
     }
-    return &TARGET_ARM64_MACOS;
+    return &TARGET_X86_64_LINUX;
 }
 static const TargetDesc *g_current = NULL;
 const TargetDesc *target_current(void) {

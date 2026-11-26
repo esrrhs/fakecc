@@ -352,7 +352,6 @@ void link_set_image_base(uint64_t base);
 uint64_t link_image_base(void);
 int link_kernel_multiboot(const char **obj_paths, size_t npaths,
                           const char *out_path);
-
 DebugTypeTag ir_type_tag(int type_kind, int is_bool);
 void debug_emit_dwarf(const EmitModule *m, uint64_t text_base_vaddr,
                       Buffer *debug_abbrev, Buffer *debug_info,

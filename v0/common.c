@@ -43,7 +43,6 @@ int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
 
-
 typedef struct FILE FILE;
 typedef long fpos_t;
 void buffer_init(Buffer *b) {

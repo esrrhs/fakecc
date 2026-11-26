@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -321,7 +320,6 @@ int link_kernel_multiboot(const char **obj_paths, size_t npaths,
                           const char *out_path);
 typedef struct FILE FILE;
 typedef long fpos_t;
-
 enum {
     ELFCLASS64 = 2,
     ET_REL = 1,
