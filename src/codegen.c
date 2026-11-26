@@ -8141,6 +8141,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 int dirty = 0;
                 if (st_gname || (ad->op != IR_ADD && ad->op != IR_SUB))
                     continue;
+                if (ad->width != 8)
+                    continue;
+                if (li < 0 || li >= (int)uj || ai < li || ai >= (int)uj)
+                    continue;
                 if (st->is_volatile || fn->insts.data[li].is_volatile)
                     continue;
                 for (int k = li + 1; k < (int)uj; k++) {
@@ -8247,19 +8251,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     fused_skip[peel_skip[k]] = 1;
                 for (int k = 0; k < ntrunc; k++)
                     fused_skip[trunc_skip[k]] = 1;
-                /* Skip a private const / zext chain only. */
-                if (raw_uses[other] == 1) {
-                    for (IRValue c = other; c >= 0 && c < nvals_f; ) {
-                        int ci = ssa_def[c];
-                        if (ci < 0 || fused_skip[ci]) break;
+                /* Skip a private const / ext chain; stop before any shared SSA. */
+                for (IRValue c = other; c >= 0 && c < nvals_f; ) {
+                    if (raw_uses[c] != 1 || !value_unique_def(fn, c)) break;
+                    int ci = ssa_def[c];
+                    if (ci < 0 || fused_skip[ci]) break;
+                    const IRInst *d = &fn->insts.data[ci];
+                    if (d->op == IR_CONST) {
                         fused_skip[ci] = 1;
-                        const IRInst *d = &fn->insts.data[ci];
-                        if (d->op == IR_CONST) break;
-                        if (d->op != IR_ZEXT && d->op != IR_SEXT
-                            && d->op != IR_COPY && d->op != IR_TRUNC)
-                            break;
-                        c = d->a;
+                        needed[c] = 0;
+                        break;
                     }
+                    if (d->op != IR_ZEXT && d->op != IR_SEXT
+                        && d->op != IR_COPY && d->op != IR_TRUNC)
+                        break;
+                    fused_skip[ci] = 1;
+                    needed[c] = 0;
+                    c = d->a;
                 }
                 /* Only skip a STORE_PTR address ADDR; IR_STORE's a is the
                  * alloca itself and must stay.  Rip/indexed RMW: load+store

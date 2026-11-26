@@ -1093,6 +1093,14 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
             strcmp(fn_name, "map_anon") == 0) {
             return;
         }
+        /* Word-at-a-time string scans load an 8-byte aligned granule that may
+         * extend past the NUL inside a partial shadow granule (1..7); check
+         * the granule's leading byte here and let the byte tail check up to
+         * the terminating NUL or mismatch. */
+        if (!is_write && width == 8 &&
+            (strcmp(fn_name, "strlen") == 0 || strcmp(fn_name, "strcmp") == 0)) {
+            width = 1;
+        }
     }
     char hook_name[32];
     if (width == 1 || width == 2 || width == 4 || width == 8) {

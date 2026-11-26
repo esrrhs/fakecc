@@ -115,13 +115,18 @@ static void heap_grow(size_t need) {
 static struct chunk *__fakecc_alloc_take_fit(size_t n) {
     int b = __fakecc_alloc_floor_bin(n);
     struct chunk *c = bins[b];
-    if (c && c->size >= n) return c;
+    int steps = 0;
     if (b == 20) {
         while (c) {
             if (c->size >= n) return c;
             c = c->next_free;
         }
         return 0;
+    }
+    while (c && steps < 8) {
+        if (c->size >= n) return c;
+        c = c->next_free;
+        steps = steps + 1;
     }
     b = b + 1;
     while (b < 21) {
@@ -132,11 +137,10 @@ static struct chunk *__fakecc_alloc_take_fit(size_t n) {
 }
 
 void *malloc(size_t n) {
-    size_t orig_n = n;
+    size_t req = n ? n : 1;
     struct chunk *c;
     void *ret;
-    if (n == 0) n = 1;
-    n = __fakecc_alloc_align16(n);
+    n = __fakecc_alloc_align16(req);
     c = __fakecc_alloc_take_fit(n);
     if (c == 0) {
         heap_grow(n);
@@ -156,7 +160,7 @@ void *malloc(size_t n) {
         __fakecc_alloc_bin_push(rest);
     }
     c->state = 0;
-    c->user_size = orig_n;
+    c->user_size = req;
     ret = (char *)c + sizeof(struct chunk);
     __asan_unpoison_memory_region(ret, n);
     memset(ret, 0, n);
@@ -210,8 +214,9 @@ void *realloc(void *p, size_t n) {
     }
     c = (struct chunk *)((char *)p - sizeof(struct chunk));
     if (c->size >= n) {
-        c->user_size = n;
+        __asan_poison_memory_region(p, c->size);
         __asan_unpoison_memory_region(p, n);
+        c->user_size = n;
         return p;
     }
     q = malloc(n);
