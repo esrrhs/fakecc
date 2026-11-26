@@ -8,6 +8,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Host buffer for one initialized object.  Larger than this, calloc is
+ * big enough that the OOM killer SIGKILLs the process (and, on Linux CI,
+ * the GitHub runner) before malloc can return NULL.  16 MiB is well above
+ * every initializer in the test suite. */
+enum { FAKECC_MAX_INIT_BYTES = 16 * 1024 * 1024 };
+
 /* File-scope handles used by lower_expr when it needs to allocate a new
  * anonymous rodata global for a string literal.  Set at the start of
  * ir_generate; cleared at the end.
@@ -10890,8 +10896,21 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         } else if (s->u.decl.storage_class == 1) {
             int sz = type_size(dty);
             if (sz <= 0) sz = 8;
-            char *bytes = calloc(sz, 1);
-            if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            /* A zero-initialized static bigger than the host buffer cap
+             * stays in .bss (init_bytes == NULL).  calloc of
+             * `static char buf[2000000000]` is the fuzz OOM.  A small
+             * static still materializes its zeros, matching previous
+             * .data emission. */
+            char *bytes = NULL;
+            if (s->u.decl.init && sz > FAKECC_MAX_INIT_BYTES) {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "object initializer is too large");
+                break;
+            }
+            if (s->u.decl.init || sz <= FAKECC_MAX_INIT_BYTES) {
+                bytes = calloc((size_t)sz, 1);
+                if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
+            }
             char mangled[256];
             snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
                      s->u.decl.name);
@@ -12550,7 +12569,12 @@ static char *materialize_compound_literal(const IRModule *ir, const Expr *e)
     Type target = e->u.compound.target_type;
     int sz = type_size(target);
     if (sz <= 0) sz = 8;
-    char *bytes = calloc(sz, 1);
+    if (sz > FAKECC_MAX_INIT_BYTES) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "object initializer is too large");
+        return NULL;
+    }
+    char *bytes = calloc((size_t)sz, 1);
     if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
     char name[32];
     snprintf(name, sizeof name, "__clit.%d", g_str_counter++);
@@ -13279,10 +13303,17 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
          * uninitialized global must have init_bytes == NULL so codegen
          * places it in .bss (SHT_NOBITS); calloc'ing `sz` here for a huge
          * array (e.g. pr65680.c's a[10^18][3]) would allocate tens of GB
-         * and then emit it all into .data. */
+         * and then emit it all into .data.  An initializer still has to
+         * be capped: `char buf[2000000000] = "x"` skips the dense AST
+         * expansion and would calloc the same multi-GB buffer. */
         char *bytes = NULL;
         if (s->u.decl.init) {
-            bytes = calloc(sz, 1);
+            if (sz > FAKECC_MAX_INIT_BYTES) {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "object initializer is too large");
+                continue;
+            }
+            bytes = calloc((size_t)sz, 1);
             if (!bytes) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }
         }
         /* Create the global FIRST so pack_init can attach pointer fixups to it

@@ -3456,6 +3456,13 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
                "initialization of an incomplete array");
         return;
     }
+    /* One pointer per element.  `char buf[2000000000] = {1}` would calloc
+     * about 16 GB here; Linux overcommit lets the call succeed and the OOM
+     * killer then SIGKILLs the fuzz runner before malloc can return NULL. */
+    if ((target->kind == TY_ARRAY || target->is_vector) && N > (1 << 20)) {
+        die_at(loc.file, loc.line, loc.col, "array initializer is too large");
+        return;
+    }
     Expr **out = calloc((size_t)N, sizeof(Expr *));
     if (!out) { fprintf(stderr, "fakecc: OOM\n"); exit(1); }    if (target->kind != TY_ARRAY && !target->is_vector) {
         for (int i = 0; i < N; i++)
