@@ -526,9 +526,9 @@ def main(argv):
             builds = [
                 ("fccO0", [args.fakecc, "-O0", src, "-o", os.path.join(work, name + ".fcc.O0")]),
                 ("fccO1", [args.fakecc, "-O1", src, "-o", os.path.join(work, name + ".fcc.O1")]),
-                ("gccO0", [args.gcc, "-std=gnu99", "-O0", gcc_src, "-o", os.path.join(work, name + ".gcc.O0")]),
-                ("gccO1", [args.gcc, "-std=gnu99", "-O1", gcc_src, "-o", os.path.join(work, name + ".gcc.O1")]),
-                ("gccO2", [args.gcc, "-std=gnu99", "-O2", gcc_src, "-o", os.path.join(work, name + ".gcc.O2")]),
+                ("gccO0", [args.gcc, "-std=gnu99", "-ffp-contract=off", "-O0", gcc_src, "-o", os.path.join(work, name + ".gcc.O0")]),
+                ("gccO1", [args.gcc, "-std=gnu99", "-ffp-contract=off", "-O1", gcc_src, "-o", os.path.join(work, name + ".gcc.O1")]),
+                ("gccO2", [args.gcc, "-std=gnu99", "-ffp-contract=off", "-O2", gcc_src, "-o", os.path.join(work, name + ".gcc.O2")]),
             ]
             for key, cmd in builds:
                 dest = cmd[-1]

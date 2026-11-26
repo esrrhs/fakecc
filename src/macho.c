@@ -3797,20 +3797,38 @@ int macho_codesign(const char *path) {
      * like a compiler bug.  codesign(1) swaps in a fresh inode for exactly
      * this reason -- `codesign -f` reports "replacing existing signature"
      * because it really does write a new file -- and so do we. */
-    remove(path);
-    f = fopen(path, "wb");
-    if (!f) { free(buf); return -1; }
+    /* Write to a sibling path while `path` still holds its old inode, then
+     * rename over `path`.  Unlinking before opening lets APFS recycle the
+     * freed inode number immediately, leaving XNU's cached vnode signature
+     * attached to the new image (sporadic exit 137 / SIGKILL before main). */
+    size_t plen = strlen(path);
+    char *tmp_path = xmalloc(plen + 16);
+    snprintf(tmp_path, plen + 16, "%s.cs.tmp", path);
+    remove(tmp_path);
+    f = fopen(tmp_path, "wb");
+    if (!f) { free(tmp_path); free(buf); return -1; }
     size_t wrote = fwrite(buf, 1, (size_t)total, f);
     fclose(f);
     /* A file created afresh carries the umask, not the exec bit the linker
      * just put on the image it wrote. */
 #if !defined(_WIN32)
-    chmod(path, 0755);
+    chmod(tmp_path, 0755);
 #endif
     free(buf);
     if (wrote != (size_t)total) {
+        remove(tmp_path);
+        free(tmp_path);
         fprintf(stderr, "fakecc: short write signing '%s'\n", path);
         return -1;
     }
+    if (rename(tmp_path, path) != 0) {
+        remove(path);
+        if (rename(tmp_path, path) != 0) {
+            remove(tmp_path);
+            free(tmp_path);
+            return -1;
+        }
+    }
+    free(tmp_path);
     return 0;
 }
