@@ -50,23 +50,20 @@ static int compile_and_run_ex(const char *source, char *const extra_argv[],
     emit_module_init(&em);
     codegen(&ir, &em, 0);
 
-    static int test_seq = 0;
-    char path[128];
-    snprintf(path, sizeof path, "/tmp/fakecc_cg64_native_%ld_%d",
-             (long)getpid(), ++test_seq);
+    const char *path = "/tmp/fakecc_cg64_native_test";
     if (macho_write_exec(&em, macho_text_offset(), path, 0, NULL) != 0)
         return -1005;
     emit_module_free(&em);
     ir_module_free(&ir);
     tu_free(&tu);
     token_array_free(&tokens);
-    if (macho_codesign(path) != 0) { unlink(path); return -1006; }
+    if (macho_codesign(path) != 0) return -1006;
 
     int pipefd[2] = {-1, -1};
-    if (out && pipe(pipefd) != 0) { unlink(path); return -1009; }
+    if (out && pipe(pipefd) != 0) return -1009;
 
     pid_t pid = fork();
-    if (pid < 0) { unlink(path); return -1007; }
+    if (pid < 0) return -1007;
     if (pid == 0) {
         if (out) {
             dup2(pipefd[1], 1);
@@ -76,7 +73,7 @@ static int compile_and_run_ex(const char *source, char *const extra_argv[],
         int n = 0;
         while (extra_argv && extra_argv[n]) n++;
         char **av = malloc((size_t)(n + 2) * sizeof(char *));
-        av[0] = path;
+        av[0] = (char *)path;
         for (int i = 0; i < n; i++) av[i + 1] = extra_argv[i];
         av[n + 1] = NULL;
         execv(path, av);
@@ -97,7 +94,6 @@ static int compile_and_run_ex(const char *source, char *const extra_argv[],
     }
     int st;
     waitpid(pid, &st, 0);
-    unlink(path);
     if (WIFEXITED(st)) return WEXITSTATUS(st);
     if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
     return -1008;

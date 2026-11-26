@@ -1158,9 +1158,14 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
 #undef APPEND_ZERO
 
     size_t total_size = out.len;
+    size_t plen = strlen(path);
+    char *tmp_path = xmalloc(plen + 16);
+    snprintf(tmp_path, plen + 16, "%s.wx.tmp", path);
+    remove(tmp_path);
 
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen(tmp_path, "wb");
     if (!f) {
+        free(tmp_path);
         fprintf(stderr, "fakecc: cannot create '%s'\n", path);
         buffer_free(&out);
         return -1;
@@ -1168,14 +1173,26 @@ int macho_write_exec(const EmitModule *em, uint64_t entry_off,
     size_t written = fwrite(out.data, 1, out.len, f);
     fclose(f);
 #if !defined(_WIN32)
-    chmod(path, 0755);
+    chmod(tmp_path, 0755);
 #endif
     buffer_free(&out);
     if (written != total_size) {
+        remove(tmp_path);
+        free(tmp_path);
         fprintf(stderr, "fakecc: short write on '%s' (%zu != %zu)\n",
                 path, written, total_size);
         return -1;
     }
+    if (rename(tmp_path, path) != 0) {
+        remove(path);
+        if (rename(tmp_path, path) != 0) {
+            remove(tmp_path);
+            free(tmp_path);
+            fprintf(stderr, "fakecc: cannot create '%s'\n", path);
+            return -1;
+        }
+    }
+    free(tmp_path);
     return 0;
 }
 
