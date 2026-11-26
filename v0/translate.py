@@ -42,7 +42,8 @@ static void __fakecc_va_copy(void *dst, void *src){
 
 def preprocess(path):
     """Run gcc -E -P with fake system headers; return preprocessed text."""
-    cmd = ["gcc", "-E", "-P", "-nostdinc", "-DFAKECC_SELFHOST",
+    cc = os.environ.get("BENCH_GCC") or "gcc"
+    cmd = [cc, "-E", "-P", "-nostdinc", "-DFAKECC_SELFHOST",
            "-I", FAKE, "-I", INC, path]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
@@ -777,17 +778,18 @@ def strip_type_definitions(body):
 
 
 def main():
-    os.makedirs(OUT, exist_ok=True)
+    out_dir = sys.argv[1] if len(sys.argv) > 1 else OUT
+    os.makedirs(out_dir, exist_ok=True)
     files = sorted(f for f in os.listdir(SRC) if f.endswith(".c"))
     # ir.c owns all ir.h type definitions; every other file strips them.
     # The compiler pre-scans all package files for types, so stripping is
     # safe regardless of compilation order.
     for f in files:
         src = os.path.join(SRC, f)
-        dst = os.path.join(OUT, f)
+        dst = os.path.join(out_dir, f)
         print(f"translate {f}", flush=True)
         translate_file(src, dst, strip_types=(f != "ir.c"))
-    print(f"done: {len(files)} files -> {OUT}")
+    print(f"done: {len(files)} files -> {out_dir}")
 
 
 if __name__ == "__main__":

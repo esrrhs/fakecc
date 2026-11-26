@@ -2,9 +2,9 @@
 
 [中文说明 (Chinese Documentation)](README_zh.md)
 
-Separate from the `test/` self-check suite: not part of CTest, and not wired into CI functional-regression jobs.
+Separate from the `test/` CTest suite, and run in CI by the `benchmark` job with red-line regression gates.
 
-What is compared is the **runtime of binaries built by fakecc** versus **binaries built by gcc**, not the compilers' own compile times. When a bootstrap artifact is available, prefer `v0/fakecc-1`.
+What is compared is the **runtime of binaries built by fakecc** versus **binaries built by gcc** (including the compiler binary itself under `-O0` in the `selfhost` case), rather than host build time. When a bootstrap artifact is available, prefer `v0/fakecc-1`.
 
 ```
 bench/
@@ -51,15 +51,21 @@ bench/
 ```
 
 ```bash
-# host fakecc
+# host fakecc (37 microbenchmarks + selfhost -O0 compiler benchmark)
 bash bench/run_bench.sh ./build/fakecc
+
+# enforce red-line thresholds (-O0 geomean <= 1.15x, -O1 geomean <= 4.00x, selfhost -O0 <= 1.15x)
+bash bench/run_bench.sh ./build/fakecc --gate
+
+# run only the selfhost -O0 compiler self-compile benchmark
+bash bench/run_bench.sh ./build/fakecc --only selfhost --gate
 
 # bootstrap compiler
 bash v0/stage2_check.sh
 bash bench/run_bench.sh v0/fakecc-1
 ```
 
-Each case is built once with fakecc `-O0`/`-O1` and once with gcc `-O0`/`-O1`/`-O2`. stdout must match exactly or the whole suite fails; speed differences are printed only and are never treated as failures.
+Each microbenchmark case is built once with fakecc `-O0`/`-O1` and once with gcc `-O0`/`-O1`/`-O2`; stdout must match exactly. In addition, the `selfhost` case builds both `fakecc -O0` and `gcc -O0` compiler binaries, times each compiling the full translated compiler source tree, and verifies that the resulting compiler binaries are byte-identical (`--no-selfhost` skips this step). Passing `--gate` (or `--max-o0-geomean`, `--max-o1-geomean`, `--max-selfhost-o0`) fails the run when any ratio crosses its red line.
 
 Timing follows [Google Benchmark](https://github.com/google/benchmark)-style repeated trials rather than a fixed three wall-clock runs:
 

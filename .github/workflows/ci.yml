@@ -931,3 +931,40 @@ jobs:
               exit 2
               ;;
           esac
+
+  # Performance regression gate: run the 37 microbenchmarks (bench/cases/*.c)
+  # plus the self-host -O0 compiler self-compile benchmark, comparing CPU time
+  # against gcc and failing on checksum/binary mismatch or red-line regression.
+  # Stock Ubuntu 24.04 gcc (13.x) is used rather than the toolchain-test PPA
+  # snapshot, which miscompiles Stage 0 -O0 rbp displacements in tan().
+  benchmark:
+    name: benchmark (red-line gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable perf task-clock if available
+        run: |
+          if ! perf stat -e task-clock -- true >/dev/null 2>&1; then
+            sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 || true
+            sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" || true
+            sudo sysctl -w kernel.perf_event_paranoid=-1 || true
+          fi
+          perf stat -e task-clock -- true 2>&1 || echo "perf unavailable; measure.py will use rusage CPU time"
+
+      - name: Build host fakecc (-O2)
+        run: |
+          gcc --version | head -1
+          cmake -S . -B build -DCMAKE_C_COMPILER=gcc -DCMAKE_C_FLAGS="-O2"
+          cmake --build build --parallel --target fakecc
+
+      - name: Run benchmarks with red-line gates
+        run: |
+          bash bench/run_bench.sh ./build/fakecc \
+            --min-time 0.3 \
+            --min-reps 3 \
+            --max-reps 10 \
+            --max-o0-geomean 1.15 \
+            --max-o1-geomean 4.00 \
+            --max-selfhost-o0 1.15
