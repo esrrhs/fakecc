@@ -239,6 +239,21 @@ static void emit_cmp_rr_w(Buffer *b, int dst, int src, int width) {
     emit_modrm(b, 3, src, dst);
 }
 
+/* CMP r, [base+off]: flags are reg - mem.  gcc -O0 leaves the other
+ * operand in its frame slot instead of loading it into a scratch. */
+static void emit_cmp_r_disp(Buffer *b, int reg, int base, int off, int width) {
+    emit_rex_if(b, alu_w64(width), reg, 0, base);
+    emit_byte(b, 0x3B);
+    emit_modrm_disp(b, reg, base, off);
+}
+
+/* CMP [base+off], r: flags are mem - reg. */
+static void emit_cmp_disp_r(Buffer *b, int base, int off, int reg, int width) {
+    emit_rex_if(b, alu_w64(width), reg, 0, base);
+    emit_byte(b, 0x39);
+    emit_modrm_disp(b, reg, base, off);
+}
+
 static void emit_cmp_imm_w(Buffer *b, int dst, int32_t imm, int width) {
     emit_rex_if(b, alu_w64(width), 0, 0, dst);
     if (imm >= -128 && imm <= 127) {
@@ -1804,12 +1819,29 @@ static size_t emit_arith_r16_rip(Buffer *b, int op, int src) {
     return patch;
 }
 
+/* addq/subq $imm, off(%base).  imm32 is sign-extended (gcc -O0 i++). */
+static void emit_arith_imm64_disp(Buffer *b, int ext, int base, int32_t imm,
+                                  int off) {
+    emit_rex_wrb(b, 1, 0, base);
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(b, 0x83);
+        emit_modrm_disp(b, ext, base, off);
+        emit_byte(b, (uint8_t)imm);
+    } else {
+        emit_byte(b, 0x81);
+        emit_modrm_disp(b, ext, base, off);
+        emit_int32(b, imm);
+    }
+}
+
 static void emit_arith_imm_disp_w(Buffer *b, int ext, int base, int32_t imm,
                                   int off, int width) {
     if (width == 1)
         emit_arith_imm8_disp(b, ext, base, imm, off);
     else if (width == 2)
         emit_arith_imm16_disp(b, ext, base, imm, off);
+    else if (width == 8)
+        emit_arith_imm64_disp(b, ext, base, imm, off);
     else
         emit_arith_imm32_disp(b, ext, base, imm, off);
 }
@@ -7407,6 +7439,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         char *mask_nop = xmalloc(ninst_f);
         int *fused_cmp_at = xmalloc(ninst_f * sizeof(int));
         char *fused_inv_at = xmalloc(ninst_f);
+        char *fused_cmp_mem = xmalloc(ninst_f);
+        int *fused_cmp_mem_off = xmalloc(ninst_f * sizeof(int));
         int *fused_ovf_at = xmalloc(ninst_f * sizeof(int));
         /* EQ/NE vs 0 of a sole-use ZF ALU → xor; alu; setcc (no test). */
         int *alu_setcc_at = xmalloc(ninst_f * sizeof(int));
@@ -7428,6 +7462,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         memset(ovf_wrap_w, 0, ninst_f * sizeof(int));
         for (size_t uj = 0; uj < ninst_f; uj++) {
             fused_cmp_at[uj] = -1;
+            fused_cmp_mem[uj] = 0;
+            fused_cmp_mem_off[uj] = 0;
             fused_ovf_at[uj] = -1;
             alu_setcc_at[uj] = -1;
             alu_mem_off[uj] = 0;
@@ -7505,6 +7541,67 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     && !skip_body[li] && !fused_skip[li]
                     && fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &loff, 0))
                     fused_skip[li] = 1;
+            }
+            /* Sole-use frame load on one side of a fused compare stays in
+             * its slot (`cmp %reg, off(%rbp)`).  Only when nothing between
+             * the load and the compare can write. */
+            if (!cb_imm && !cmp->is_float) {
+                int cwidth = cmp->width > 0 ? cmp->width : 8;
+                IRValue side[2];
+                side[0] = cmp->b;
+                side[1] = cmp->a;
+                for (int s = 0; s < 2; s++) {
+                    IRValue sv = side[s];
+                    if (sv < 0 || sv >= nvals_f || raw_uses[sv] != 1) continue;
+                    if (!value_unique_def(fn, sv) || ssa_def[sv] < 0) continue;
+                    int li = ssa_def[sv];
+                    if (li < 0 || li >= ci || skip_body[li] || fused_skip[li])
+                        continue;
+                    const IRInst *ld = &fn->insts.data[li];
+                    int loff = 0;
+                    int dirty = 0;
+                    int k;
+                    if (ld->is_volatile) continue;
+                    if ((ld->op != IR_LOAD && ld->op != IR_LOAD_PTR)
+                        || (ld->width != 4 && ld->width != 8)
+                        || ld->width != cwidth) continue;
+                    if (!fold_ptr_off(fn, ssa_def, alloca_off, ld->a, &loff, 0)
+                        || loff == 0)
+                        continue;
+                    for (k = li + 1; k < ci; k++) {
+                        IROpcode kop;
+                        if (skip_body[k] || fused_skip[k]) continue;
+                        if (fn->insts.data[k].is_volatile) {
+                            dirty = 1;
+                            break;
+                        }
+                        kop = fn->insts.data[k].op;
+                        /* Address math for the other operand (un->degree)
+                         * sits between the frame load and the compare.
+                         * Anything that can write memory blocks the fold. */
+                        switch (kop) {
+                        case IR_LOAD: case IR_LOAD_PTR: case IR_CONST:
+                        case IR_COPY: case IR_ZEXT: case IR_SEXT: case IR_TRUNC:
+                        case IR_DBG_VALUE: case IR_ADD: case IR_SUB: case IR_MUL:
+                        case IR_DIV: case IR_MOD: case IR_NEG: case IR_BAND:
+                        case IR_BOR: case IR_BXOR: case IR_BNOT: case IR_SHL:
+                        case IR_SHR: case IR_ADDR: case IR_GADDR:
+                        case IR_GADDR_TLS: case IR_FADDR: case IR_PARAM:
+                        case IR_EQ: case IR_NE: case IR_LT: case IR_LE:
+                        case IR_GT: case IR_GE:
+                            continue;
+                        default:
+                            dirty = 1;
+                            break;
+                        }
+                        if (dirty) break;
+                    }
+                    if (dirty) continue;
+                    fused_skip[li] = 1;
+                    fused_cmp_mem[uj] = (char)(s == 0 ? 1 : 2);
+                    fused_cmp_mem_off[uj] = loff;
+                    break;
+                }
             }
         }
         /* ADDO/SUBO/MULO → CBR: keep CF/OF and jcc (skip setcc+test when
@@ -7888,7 +7985,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
             /* Width 4: addl/andl mem.  Width 2: addw/xorw.  Width 1: andb/orb
              * for bit clears (sieve bits[0] &= ~3, bitfields).  Indexed
              * abs32 covers clear_prime: andb %reg, bits(,%idx,1). */
-            if (st->width != 4 && st->width != 2 && st->width != 1) continue;
+            if (st->width != 4 && st->width != 2 && st->width != 1
+                && st->width != 8) continue;
             int poff = 0;
             const char *st_gname = NULL;
             IRValue st_idx = -1;
@@ -8037,6 +8135,29 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 break;
             }
             if (li < 0 || other < 0) continue;
+            /* Width 8 is addq/subq $imm on frame slots only; RIP-relative and
+             * reg-form emitters remain 32-bit. */
+            if (st->width == 8) {
+                int dirty = 0;
+                if (st_gname || (ad->op != IR_ADD && ad->op != IR_SUB))
+                    continue;
+                if (st->is_volatile || fn->insts.data[li].is_volatile)
+                    continue;
+                for (int k = li + 1; k < (int)uj; k++) {
+                    IROpcode kop;
+                    if (skip_body[k] || fused_skip[k]) continue;
+                    if (fn->insts.data[k].is_volatile) { dirty = 1; break; }
+                    kop = fn->insts.data[k].op;
+                    if (kop == IR_CONST || kop == IR_COPY || kop == IR_ZEXT
+                        || kop == IR_SEXT || kop == IR_TRUNC || kop == IR_ADD
+                        || kop == IR_SUB || kop == IR_ADDR
+                        || kop == IR_DBG_VALUE)
+                        continue;
+                    dirty = 1;
+                    break;
+                }
+                if (dirty) continue;
+            }
             /* Indexed abs32 RMW needs a rematable index: the GEP dies
              * at the folded address, so ensure_index would see a stale
              * home (mat[i*N+j]). */
@@ -8059,6 +8180,9 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                      && ssa_const_imm_chain(fn, ssa_def, other, &immv)) {
                 got_imm = 1;
             } else {
+                int ext_ops[3];
+                int ext_w[3];
+                int next_ops = 0;
                 for (int depth = 0; imm_src >= 0 && imm_src < nvals_f && depth < 3;
                      depth++) {
                     if (!value_unique_def(fn, imm_src)) { imm_src = -1; break; }
@@ -8070,7 +8194,31 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     const IRInst *d = &fn->insts.data[ssa_def[imm_src]];
                     if (d->op != IR_ZEXT && d->op != IR_SEXT && d->op != IR_COPY)
                         { imm_src = -1; break; }
+                    if (st->width == 8 && (d->op == IR_ZEXT || d->op == IR_SEXT)) {
+                        int sw = 0;
+                        if (d->a >= 0 && d->a < nvals_f && ssa_def[d->a] >= 0)
+                            sw = fn->insts.data[ssa_def[d->a]].width;
+                        ext_ops[next_ops] = (int)d->op;
+                        ext_w[next_ops] = sw;
+                        next_ops++;
+                    }
                     imm_src = d->a;
+                }
+                if (got_imm && st->width == 8) {
+                    for (int ei = next_ops - 1; ei >= 0; ei--) {
+                        int sw = ext_w[ei];
+                        if (ext_ops[ei] == (int)IR_ZEXT) {
+                            if (sw == 1) immv = (int64_t)(uint8_t)immv;
+                            else if (sw == 2) immv = (int64_t)(uint16_t)immv;
+                            else if (sw == 4) immv = (int64_t)(uint32_t)immv;
+                            else if (sw != 8) { got_imm = 0; break; }
+                        } else if (ext_ops[ei] == (int)IR_SEXT) {
+                            if (sw == 1) immv = (int64_t)(int8_t)immv;
+                            else if (sw == 2) immv = (int64_t)(int16_t)immv;
+                            else if (sw == 4) immv = (int64_t)(int32_t)immv;
+                            else if (sw != 8) { got_imm = 0; break; }
+                        }
+                    }
                 }
             }
             /* Imm form: embed the constant even if the CONST SSA is shared.
@@ -8131,7 +8279,7 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                 }
                 if (st_idx >= 0)
                     mark_reg(needed, ssa_uses_f, nvals_f, st_idx);
-            } else if (raw_uses[other] >= 1 && commutative) {
+            } else if (st->width != 8 && raw_uses[other] >= 1 && commutative) {
                 /* reg form: addl/xorl %reg, mem.  Keep SUB as load/op/store. */
                 mem_rmw[uj] = (char)(10 + (rop & 0x3f)); /* mark reg form */
                 mem_rmw_imm[uj] = other; /* reuse as IRValue */
@@ -10988,8 +11136,12 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                             && cimmv >= 0 && imm_fits_i32(cimmv))
                             cfb = 1;
                     }
-                    /* cmpl $imm, off(%rbp) when a is a sole-use frame load. */
+                    /* cmpl $imm, off(%rbp) when a is a sole-use frame load.
+                     * Same for a register/local pair: one side stays in its
+                     * slot (gcc -O0 `cmp %eax, -4(%rbp)`). */
                     int a_off = 0, a_mem = 0;
+                    int b_off = 0, b_mem = 0;
+                    int a_rm_off = 0, a_rm = 0;
                     if (cfb && cmp->a >= 0
                         && cmp->a < fn->next_value_id
                         && raw_uses[cmp->a] == 1 && ssa_def[cmp->a] >= 0
@@ -11001,12 +11153,23 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                                             &a_off, 0))
                             a_mem = 1;
                     }
+                    if (!cfb && fused_cmp_mem[j] == 1) {
+                        b_mem = 1;
+                        b_off = fused_cmp_mem_off[j];
+                    } else if (!cfb && fused_cmp_mem[j] == 2) {
+                        a_rm = 1;
+                        a_rm_off = fused_cmp_mem_off[j];
+                    }
                     int ah = gp_home(ra, cmp->a);
                     int ar = (ah >= 0) ? ah : REG_RAX;
-                    if (!a_mem) {
+                    int bh = gp_home(ra, cmp->b);
+                    int br = (bh >= 0) ? bh : REG_RCX;
+                    if (!a_mem && !a_rm) {
                         ensure_reg(&out->text, cmp->a, ar, ra);
-                        if (!cfb)
+                        if (!cfb && !b_mem)
                             ensure_reg(&out->text, cmp->b, REG_RCX, ra);
+                    } else if (a_rm) {
+                        ensure_reg(&out->text, cmp->b, br, ra);
                     }
                     /* ir_cmp_to_setcc yields the SETcc opcode (0x90+cc);
                      * jcc rel32 wants the near-branch opcode (0x80+cc). */
@@ -11017,6 +11180,10 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
                     if (a_mem)
                         emit_arith_imm32_disp(&out->text, 7, REG_RBP,
                                               (int32_t)cimmv, a_off);
+                    else if (b_mem)
+                        emit_cmp_r_disp(&out->text, ar, REG_RBP, b_off, cwidth);
+                    else if (a_rm)
+                        emit_cmp_disp_r(&out->text, REG_RBP, a_rm_off, br, cwidth);
                     else if (cfb && cimmv == 0)
                         emit_test_r_w(&out->text, ar, cwidth);
                     else if (cfb)
@@ -13049,6 +13216,8 @@ void codegen(const IRModule *ir, EmitModule *out, int want_debug) {
         free(mul_hi_at);
         free(fused_cmp_at);
         free(fused_inv_at);
+        free(fused_cmp_mem);
+        free(fused_cmp_mem_off);
         free(fused_ovf_at);
         free(alu_setcc_at);
         free(alu_mem_off);

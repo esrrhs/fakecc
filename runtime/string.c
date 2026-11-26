@@ -1,33 +1,65 @@
 /* Builtin freestanding string/memory routines — FakeCC dialect, no libc. */
 package runtime;
 
-void *memcpy(void *dst, const void *src, size_t n) {
-    char *d = (char *)dst;
-    const char *s = (const char *)src;
-    size_t i = 0;
-    while (i < n) {
-        d[i] = s[i];
-        i = i + 1;
+/* Word copies. x86-64 and arm64 both allow unaligned accesses, and a
+ * self-hosted compile spends most of its time in these loops (malloc
+ * zeroes every block, regalloc copies bitsets). A byte loop there is
+ * several times slower than the libc the gcc-built compiler links. */
+
+static void copy_words(unsigned char *d, const unsigned char *s, size_t n) {
+    while (n >= 32) {
+        unsigned long long w0 = *(unsigned long long *)s;
+        unsigned long long w1 = *(unsigned long long *)(s + 8);
+        unsigned long long w2 = *(unsigned long long *)(s + 16);
+        unsigned long long w3 = *(unsigned long long *)(s + 24);
+        *(unsigned long long *)d = w0;
+        *(unsigned long long *)(d + 8) = w1;
+        *(unsigned long long *)(d + 16) = w2;
+        *(unsigned long long *)(d + 24) = w3;
+        d = d + 32;
+        s = s + 32;
+        n = n - 32;
     }
+    while (n >= 8) {
+        *(unsigned long long *)d = *(unsigned long long *)s;
+        d = d + 8;
+        s = s + 8;
+        n = n - 8;
+    }
+    while (n > 0) {
+        *d = *s;
+        d = d + 1;
+        s = s + 1;
+        n = n - 1;
+    }
+}
+
+void *memcpy(void *dst, const void *src, size_t n) {
+    copy_words((unsigned char *)dst, (const unsigned char *)src, n);
     return dst;
 }
 
 void *memmove(void *dst, const void *src, size_t n) {
-    char *d = (char *)dst;
-    const char *s = (const char *)src;
-    if (d == s) return dst;
-    if ((unsigned long)d < (unsigned long)s) {
-        size_t i = 0;
-        while (i < n) {
-            d[i] = s[i];
-            i = i + 1;
-        }
-    } else {
-        size_t i = n;
-        while (i > 0) {
-            i = i - 1;
-            d[i] = s[i];
-        }
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    if (d == s || n == 0) return dst;
+    if ((size_t)d < (size_t)s) {
+        copy_words(d, s, n);
+        return dst;
+    }
+    d = d + n;
+    s = s + n;
+    while (n >= 8) {
+        d = d - 8;
+        s = s - 8;
+        n = n - 8;
+        *(unsigned long long *)d = *(unsigned long long *)s;
+    }
+    while (n > 0) {
+        d = d - 1;
+        s = s - 1;
+        n = n - 1;
+        *d = *s;
     }
     return dst;
 }
@@ -35,10 +67,27 @@ void *memmove(void *dst, const void *src, size_t n) {
 void *memset(void *dst, int c, size_t n) {
     unsigned char *d = (unsigned char *)dst;
     unsigned char b = (unsigned char)c;
-    size_t i = 0;
-    while (i < n) {
-        d[i] = b;
-        i = i + 1;
+    unsigned long long w = (unsigned long long)b;
+    w = w | (w << 8);
+    w = w | (w << 16);
+    w = w | (w << 32);
+    while (n >= 32) {
+        *(unsigned long long *)d = w;
+        *(unsigned long long *)(d + 8) = w;
+        *(unsigned long long *)(d + 16) = w;
+        *(unsigned long long *)(d + 24) = w;
+        d = d + 32;
+        n = n - 32;
+    }
+    while (n >= 8) {
+        *(unsigned long long *)d = w;
+        d = d + 8;
+        n = n - 8;
+    }
+    while (n > 0) {
+        *d = b;
+        d = d + 1;
+        n = n - 1;
     }
     return dst;
 }
@@ -46,24 +95,55 @@ void *memset(void *dst, int c, size_t n) {
 int memcmp(const void *a, const void *b, size_t n) {
     const unsigned char *x = (const unsigned char *)a;
     const unsigned char *y = (const unsigned char *)b;
-    size_t i = 0;
-    while (i < n) {
-        if (x[i] != y[i]) return (int)x[i] - (int)y[i];
-        i = i + 1;
+    while (n >= 8) {
+        unsigned long long wx = *(const unsigned long long *)x;
+        unsigned long long wy = *(const unsigned long long *)y;
+        if (wx != wy) break;
+        x = x + 8;
+        y = y + 8;
+        n = n - 8;
+    }
+    while (n > 0) {
+        if (*x != *y) return (int)*x - (int)*y;
+        x = x + 1;
+        y = y + 1;
+        n = n - 1;
     }
     return 0;
 }
 
+/* True when an already-loaded aligned word contains a zero byte. */
+static int word_has_zero(unsigned long long w) {
+    unsigned long long m = w - 0x0101010101010101ULL;
+    return (m & ~w & 0x8080808080808080ULL) != 0;
+}
+
 size_t strlen(const char *s) {
-    size_t n = 0;
-    while (s[n] != 0) n = n + 1;
-    return n;
+    const char *p = s;
+    while (((size_t)p & 7) != 0) {
+        if (*p == 0) return (size_t)(p - s);
+        p = p + 1;
+    }
+    while (!word_has_zero(*(const unsigned long long *)p)) p = p + 8;
+    while (*p != 0) p = p + 1;
+    return (size_t)(p - s);
 }
 
 int strcmp(const char *a, const char *b) {
-    size_t i = 0;
-    while (a[i] != 0 && a[i] == b[i]) i = i + 1;
-    return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
+    if (((size_t)a & 7) == 0 && ((size_t)b & 7) == 0) {
+        while (1) {
+            unsigned long long wa = *(const unsigned long long *)a;
+            unsigned long long wb = *(const unsigned long long *)b;
+            if (wa != wb || word_has_zero(wa)) break;
+            a = a + 8;
+            b = b + 8;
+        }
+    }
+    while (*a != 0 && *a == *b) {
+        a = a + 1;
+        b = b + 1;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
 int strncmp(const char *a, const char *b, size_t n) {

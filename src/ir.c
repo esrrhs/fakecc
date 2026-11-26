@@ -1084,6 +1084,7 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         const char *fn_name = g_ir_cur_fd->name;
         if (strncmp(fn_name, "__asan_", 7) == 0 ||
             strncmp(fn_name, "asan_", 5) == 0 ||
+            strncmp(fn_name, "__fakecc_alloc_", 15) == 0 ||
             strcmp(fn_name, "malloc") == 0 ||
             strcmp(fn_name, "free") == 0 ||
             strcmp(fn_name, "realloc") == 0 ||
