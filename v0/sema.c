@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -666,7 +665,6 @@ struct TranslationUnit {
 };typedef struct TranslationUnit TranslationUnit;
 void tu_init(TranslationUnit *tu);
 void tu_free(TranslationUnit *tu);
-
 struct PkgContext;
 int sema_check(const TranslationUnit *tu, int require_main);
 int sema_check_in_pkg(const TranslationUnit *tu, int require_main,
@@ -3756,6 +3754,10 @@ static void normalize_init_list(Type *target, Expr *list, SourceLoc loc, int is_
     if (N < 0) {
         die_at(loc.file, loc.line, loc.col,
                "initialization of an incomplete array");
+        return;
+    }
+    if ((target->kind == TY_ARRAY || target->is_vector) && N > (1 << 20)) {
+        die_at(loc.file, loc.line, loc.col, "array initializer is too large");
         return;
     }
     Expr **out = runtime.calloc((size_t)N, sizeof(Expr *));

@@ -76,6 +76,11 @@ void __asan_poison_memory_region(void *addr, size_t size) {
     unsigned long shadow_end = ((u + size + 7) >> 3) + 0x100000000000UL;
     char *s = (char *)shadow_start;
     char *e = (char *)shadow_end;
+    unsigned long long fill = 0xffffffffffffffffULL;
+    while (s + 8 <= e) {
+        *(unsigned long long *)s = fill;
+        s = s + 8;
+    }
     while (s < e) {
         *s = (char)0xff;
         s = s + 1;
@@ -91,6 +96,10 @@ void __asan_unpoison_memory_region(void *addr, size_t size) {
     unsigned long shadow_end = ((u + size) >> 3) + 0x100000000000UL;
     char *s = (char *)shadow_start;
     char *e = (char *)shadow_end;
+    while (s + 8 <= e) {
+        *(unsigned long long *)s = 0;
+        s = s + 8;
+    }
     while (s < e) {
         *s = 0;
         s = s + 1;

@@ -1,8 +1,8 @@
 # Benchmark
 
-独立于 `test/` 自测体系：不进 CTest，也不挂在 CI 的功能回归 job 上。
+独立于 `test/` CTest 套件，在 CI 中由独立的 `benchmark` 任务运行并执行性能红线门禁。
 
-比较的是 **fakecc 编出来的二进制** 和 **gcc 编出来的二进制** 的运行时间，不是编译器本身的耗时。有自举产物时优先用 `v0/fakecc-1`。
+比较的是 **fakecc 编出来的二进制** 和 **gcc 编出来的二进制** 的运行时间（含 `selfhost` 用例下两个 `-O0` 编译器产物编译编译器自身的耗时），有自举产物时优先用 `v0/fakecc-1`。
 
 ```
 bench/
@@ -49,15 +49,21 @@ bench/
 ```
 
 ```bash
-# host fakecc
+# host fakecc（37 个微基准 + selfhost -O0 编译器自编译基准）
 bash bench/run_bench.sh ./build/fakecc
+
+# 开启红线门禁（-O0 几何平均 <= 1.15x，-O1 几何平均 <= 4.00x，selfhost -O0 <= 1.15x）
+bash bench/run_bench.sh ./build/fakecc --gate
+
+# 单独跑 selfhost -O0 编译器自编译基准并开启红线门禁
+bash bench/run_bench.sh ./build/fakecc --only selfhost --gate
 
 # 自举后的编译器
 bash v0/stage2_check.sh
 bash bench/run_bench.sh v0/fakecc-1
 ```
 
-每个 case 用 fakecc `-O0`/`-O1` 和 gcc `-O0`/`-O1`/`-O2` 各编一份。stdout 必须一致，否则整套失败；快慢只打印，不当失败条件。
+每个微基准 case 用 fakecc `-O0`/`-O1` 和 gcc `-O0`/`-O1`/`-O2` 各编一份，stdout 必须一致；`selfhost` 用例额外分别用 fakecc `-O0` 与 gcc `-O0` 编出两个编译器，对比两者编译整棵编译器源码树的 CPU 时间并校验产物字节级一致（`--no-selfhost` 可跳过）。传入 `--gate`（或 `--max-o0-geomean`、`--max-o1-geomean`、`--max-selfhost-o0`）时，超出性能红线直接判败。
 
 计时对齐 [Google Benchmark](https://github.com/google/benchmark) 的重复试验，而不是固定 3 次墙钟：
 

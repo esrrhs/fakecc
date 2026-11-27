@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 enum TokenKind {
     TK_KW_PACKAGE,
     TK_KW_IMPORT,
@@ -701,7 +700,6 @@ const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
 const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
-
 typedef struct FILE FILE;
 typedef long fpos_t;
 Type type_clone(Type t) {
@@ -788,31 +786,37 @@ static const StructRegistry *current_structs(void) {
     if (!reg) reg = get_ir_structs();
     return reg;
 }
+static long long size_mul(long long count, long long elem) {
+    if (count < 0 || elem < 0) return -1;
+    if (elem != 0 && count > (9223372036854775807LL / elem)) return -1;
+    return count * elem;
+}
 long long type_size(Type t) {
     if (t.is_vector) return t.width;
     const Type *p = &t;
     long long count = 1;
     while (p->kind == TY_ARRAY && p->elem_type) {
         if (p->vla_dim || p->length < 0) return -1;
-        count *= p->length;
+        count = size_mul(count, p->length);
+        if (count < 0) return -1;
         p = p->elem_type;
     }
-    if (p->is_vector) return count * p->width;
+    if (p->is_vector) return size_mul(count, p->width);
     switch (p->kind) {
     case TY_VOID: return 0;
-    case TY_INT: return count * p->width;
-    case TY_FLOAT: return count * p->width;
-    case TY_PTR: return count * 8;
+    case TY_INT: return size_mul(count, p->width);
+    case TY_FLOAT: return size_mul(count, p->width);
+    case TY_PTR: return size_mul(count, 8);
     case TY_ARRAY: return 0;
     case TY_STRUCT: {
         if (p->tag) {
             const StructRegistry *reg = current_structs();
             if (reg) {
                 const StructDef *sd = struct_registry_find_c(reg, p->tag);
-                if (sd && sd->size > 0) return count * sd->size;
+                if (sd && sd->size > 0) return size_mul(count, sd->size);
             }
         }
-        return count * p->width;
+        return size_mul(count, p->width);
     }
     case TY_FUNC: return 0;
     }

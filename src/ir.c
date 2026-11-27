@@ -1084,6 +1084,7 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         const char *fn_name = g_ir_cur_fd->name;
         if (strncmp(fn_name, "__asan_", 7) == 0 ||
             strncmp(fn_name, "asan_", 5) == 0 ||
+            strncmp(fn_name, "__fakecc_alloc_", 15) == 0 ||
             strcmp(fn_name, "malloc") == 0 ||
             strcmp(fn_name, "free") == 0 ||
             strcmp(fn_name, "realloc") == 0 ||
@@ -1091,6 +1092,14 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
             strcmp(fn_name, "heap_grow") == 0 ||
             strcmp(fn_name, "map_anon") == 0) {
             return;
+        }
+        /* Word-at-a-time string scans load an 8-byte aligned granule that may
+         * extend past the NUL inside a partial shadow granule (1..7); check
+         * the granule's leading byte here and let the byte tail check up to
+         * the terminating NUL or mismatch. */
+        if (!is_write && width == 8 &&
+            (strcmp(fn_name, "strlen") == 0 || strcmp(fn_name, "strcmp") == 0)) {
+            width = 1;
         }
     }
     char hook_name[32];

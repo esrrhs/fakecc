@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -52,7 +51,6 @@ typedef short int16_t;
 typedef int int32_t;
 typedef long int64_t;
 typedef int bool;
-
 struct EmitModule;
 struct MachoDebug {
     Buffer abbrev;
@@ -523,7 +521,6 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
                                    const DebugCallSite *cs);
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
-
 typedef int IRValue;
 enum IROpcode {
     IR_CONST,
@@ -1447,7 +1444,6 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
-
 enum A64GpReg {
     A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
     A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,
@@ -2322,21 +2318,38 @@ Buffer trieblob;
     data_img = ((void*)0);
     if (built_dbg) macho_debug_free(&built);
     size_t total_size = out.len;
-    FILE *f = runtime.fopen(path, "wb");
+    size_t plen = runtime.strlen(path);
+    char *tmp_path = xmalloc(plen + 16);
+    runtime.snprintf(tmp_path, plen + 16, "%s.wx.tmp", path);
+    runtime.remove(tmp_path);
+    FILE *f = runtime.fopen(tmp_path, "wb");
     if (!f) {
+        runtime.free(tmp_path);
         runtime.fprintf(runtime.stderr, "fakecc: cannot create '%s'\n", path);
         buffer_free(&out);
         return -1;
     }
     size_t written = runtime.fwrite(out.data, 1, out.len, f);
     runtime.fclose(f);
-    runtime.chmod(path, 0755);
+    runtime.chmod(tmp_path, 0755);
     buffer_free(&out);
     if (written != total_size) {
+        runtime.remove(tmp_path);
+        runtime.free(tmp_path);
         runtime.fprintf(runtime.stderr, "fakecc: short write on '%s' (%zu != %zu)\n",
                 path, written, total_size);
         return -1;
     }
+    if (runtime.rename(tmp_path, path) != 0) {
+        runtime.remove(path);
+        if (runtime.rename(tmp_path, path) != 0) {
+            runtime.remove(tmp_path);
+            runtime.free(tmp_path);
+            runtime.fprintf(runtime.stderr, "fakecc: cannot create '%s'\n", path);
+            return -1;
+        }
+    }
+    runtime.free(tmp_path);
     return 0;
 }
 static int macho_sym_ok(const EmitSymbol *s, const uint8_t *sect_of) {
@@ -4492,16 +4505,30 @@ int macho_codesign(const char *path) {
         sha256_buf(buf + (size_t)start, n,
                    cd + hash_off + (size_t)i * 32);
     }
-    runtime.remove(path);
-    f = runtime.fopen(path, "wb");
-    if (!f) { runtime.free(buf); return -1; }
+    size_t plen = runtime.strlen(path);
+    char *tmp_path = xmalloc(plen + 16);
+    runtime.snprintf(tmp_path, plen + 16, "%s.cs.tmp", path);
+    runtime.remove(tmp_path);
+    f = runtime.fopen(tmp_path, "wb");
+    if (!f) { runtime.free(tmp_path); runtime.free(buf); return -1; }
     size_t wrote = runtime.fwrite(buf, 1, (size_t)total, f);
     runtime.fclose(f);
-    runtime.chmod(path, 0755);
+    runtime.chmod(tmp_path, 0755);
     runtime.free(buf);
     if (wrote != (size_t)total) {
+        runtime.remove(tmp_path);
+        runtime.free(tmp_path);
         runtime.fprintf(runtime.stderr, "fakecc: short write signing '%s'\n", path);
         return -1;
     }
+    if (runtime.rename(tmp_path, path) != 0) {
+        runtime.remove(path);
+        if (runtime.rename(tmp_path, path) != 0) {
+            runtime.remove(tmp_path);
+            runtime.free(tmp_path);
+            return -1;
+        }
+    }
+    runtime.free(tmp_path);
     return 0;
 }

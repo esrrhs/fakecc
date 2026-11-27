@@ -1,176 +1,227 @@
-/* mmap-backed freelist allocator — FakeCC dialect. */
+/* mmap-backed freelist allocator — FakeCC dialect.
+ *
+ * free() used to walk an address-ordered list to coalesce. A self-hosted
+ * compile frees millions of blocks and that walk was the whole profile.
+ * Chunks carry a footer and a doubly-linked size-class bin, so free finds
+ * the physical neighbours and unlinks them in constant time. malloc still
+ * returns zeroed memory: a self-hosted compiler must not observe leftover
+ * bytes from a recycled block. */
 package runtime;
 
 struct chunk {
-    size_t size;
+    size_t size;             /* usable bytes; multiple of 16 */
     size_t user_size;
     struct chunk *next_free;
-    /* Doubles as the alignment padding that keeps the user pointer 16-byte
-     * aligned (the header has to stay 32 bytes) and as the free flag below.
-     * Checking a flag beats walking freelist_head: a caller that frees in a
-     * loop otherwise pays one full list traversal per free, and a self-hosted
-     * compile was spending 2.4e10 steps there. */
-    size_t state;
+    struct chunk *prev_free;
+    size_t state;            /* 1 on a bin, 0 once handed out */
+    size_t pad;              /* header is 48 bytes, so the user pointer is 16-aligned */
 };
 
-/* state == 1 while a chunk sits on freelist_head, 0 once malloc hands it out.
- * Reading it is how free() recognises a double free in O(1); a chunk carved
- * out of a bigger one is born 0.  (No #define here: runtime/ is written in
- * the FakeCC dialect, which has no preprocessor.) */
+/* 16, 32, ... and a final bin for everything >= 16MB. */
+static struct chunk *bins[21];
 
-static struct chunk *freelist_head;
-
-static size_t align16(size_t n) {
+static size_t __fakecc_alloc_align16(size_t n) {
     if (n > ((size_t)-16)) return (size_t)-16;
     return (n + 15) & ~((size_t)15);
 }
 
-/* The flags are per-target: MAP_ANONYMOUS is 0x20 on Linux and 0x1000 on
- * Darwin, so Linux's 0x22 names an undefined bit to Darwin and the mapping
- * is refused.  The address is left to the kernel here, so only MAP_PRIVATE
- * and MAP_ANONYMOUS are needed. */
+static int __fakecc_alloc_floor_bin(size_t sz) {
+    int b = 0;
+    size_t s = 16;
+    int best = 0;
+    while (b < 20 && (s + s) <= sz) {
+        s = s + s;
+        b = b + 1;
+        best = b;
+    }
+    return best;
+}
+
 static void *map_anon(size_t n) {
     long p = __syscall(9, 0, (long)n, 3, __fakecc_map_private_anon, -1, 0);
     if (p < 0) return 0;
     return (void *)p;
 }
 
-static int chunks_adjacent(struct chunk *a, struct chunk *b) {
-    return (char *)a + sizeof(struct chunk) + a->size == (char *)b;
+static size_t *__fakecc_alloc_footer_of(struct chunk *c) {
+    return (size_t *)((char *)c + sizeof(struct chunk) + c->size);
+}
+
+static void __fakecc_alloc_write_footer(struct chunk *c) {
+    *__fakecc_alloc_footer_of(c) = c->size;
+}
+
+static struct chunk *__fakecc_alloc_phys_next(struct chunk *c) {
+    return (struct chunk *)((char *)__fakecc_alloc_footer_of(c) + 16);
+}
+
+static struct chunk *__fakecc_alloc_phys_prev(struct chunk *c) {
+    size_t prev_sz = *(size_t *)((char *)c - 16);
+    if (prev_sz == 0) return 0;
+    return (struct chunk *)((char *)c - 16 - prev_sz - sizeof(struct chunk));
+}
+
+static void __fakecc_alloc_bin_unlink(struct chunk *c) {
+    int b = __fakecc_alloc_floor_bin(c->size);
+    if (c->prev_free) c->prev_free->next_free = c->next_free;
+    else bins[b] = c->next_free;
+    if (c->next_free) c->next_free->prev_free = c->prev_free;
+    c->next_free = 0;
+    c->prev_free = 0;
+    c->state = 0;
+}
+
+static void __fakecc_alloc_bin_push(struct chunk *c) {
+    int b = __fakecc_alloc_floor_bin(c->size);
+    c->prev_free = 0;
+    c->next_free = bins[b];
+    if (bins[b]) bins[b]->prev_free = c;
+    bins[b] = c;
+    c->state = 1;
+    __fakecc_alloc_write_footer(c);
 }
 
 static void heap_grow(size_t need) {
-    size_t extra = sizeof(struct chunk) + 64;
-    if (need > ((size_t)-1) - extra) return;
-    size_t region = need + extra;
+    /* Overhead in a fresh mapping: 16-byte leading dummy footer + chunk header
+     * + 16-byte chunk footer + end sentinel header. */
+    size_t extra = 2 * sizeof(struct chunk) + 32;
+    size_t region;
+    char *p;
+    struct chunk *c;
+    struct chunk *end;
+    if (need > ((size_t)-1) - extra - 4095) return;
+    region = need + extra;
     region = (region + 4095) & ~((size_t)4095);
     if (region < 1048576) region = 1048576;
-    char *p = (char *)map_anon(region);
+    p = (char *)map_anon(region);
     if (p == 0) return;
     __asan_unpoison_memory_region(p, region);
-    struct chunk *c = (struct chunk *)p;
-    c->size = region - sizeof(struct chunk);
+    /* 16-byte dummy footer so the first chunk has no physical predecessor. */
+    *(size_t *)p = 0;
+    c = (struct chunk *)(p + 16);
+    end = (struct chunk *)(p + region - sizeof(struct chunk));
+    c->size = (size_t)((char *)end - ((char *)c + sizeof(struct chunk)) - 16);
     c->user_size = 0;
-    c->state = 1;
-    /* Insert by address so later frees can coalesce with this region. */
-    struct chunk **prev = &freelist_head;
-    struct chunk *n = freelist_head;
-    while (n && n < c) {
-        prev = &n->next_free;
-        n = n->next_free;
-    }
-    c->next_free = n;
-    *prev = c;
-    if (n && chunks_adjacent(c, n)) {
-        c->size = c->size + sizeof(struct chunk) + n->size;
-        c->next_free = n->next_free;
-        n->state = 0; /* absorbed: no longer a chunk of its own */
-    }
+    c->pad = 0;
+    end->size = 0;
+    end->user_size = 0;
+    end->next_free = 0;
+    end->prev_free = 0;
+    end->state = 0; /* sentinel: allocated, so free() never coalesces past the mapping */
+    end->pad = 0;
+    __fakecc_alloc_bin_push(c);
 }
 
-/* O(1) double-free guard.  The old version walked the whole freelist, which
- * turned every free into a traversal of it. */
-static int already_free(struct chunk *c) {
-    return c->state == 1;
+static struct chunk *__fakecc_alloc_take_fit(size_t n) {
+    int b = __fakecc_alloc_floor_bin(n);
+    struct chunk *c = bins[b];
+    int steps = 0;
+    if (b == 20) {
+        while (c) {
+            if (c->size >= n) return c;
+            c = c->next_free;
+        }
+        return 0;
+    }
+    while (c && steps < 8) {
+        if (c->size >= n) return c;
+        c = c->next_free;
+        steps = steps + 1;
+    }
+    b = b + 1;
+    while (b < 21) {
+        if (bins[b]) return bins[b];
+        b = b + 1;
+    }
+    return 0;
 }
 
 void *malloc(size_t n) {
-    size_t orig_n = n;
-    if (n == 0) n = 1;
-    n = align16(n);
-    if (freelist_head == 0) heap_grow(n);
-    struct chunk **prev = &freelist_head;
-    struct chunk *c = freelist_head;
-    while (c) {
-        if (c->size >= n) break;
-        prev = &c->next_free;
-        c = c->next_free;
-    }
+    size_t req = n ? n : 1;
+    struct chunk *c;
+    void *ret;
+    n = __fakecc_alloc_align16(req);
+    c = __fakecc_alloc_take_fit(n);
     if (c == 0) {
         heap_grow(n);
-        prev = &freelist_head;
-        c = freelist_head;
-        while (c) {
-            if (c->size >= n) break;
-            prev = &c->next_free;
-            c = c->next_free;
-        }
+        c = __fakecc_alloc_take_fit(n);
         if (c == 0) return 0;
     }
-    if (c->size >= n + sizeof(struct chunk) + 16) {
-        char *base = (char *)c;
-        struct chunk *rest = (struct chunk *)(base + sizeof(struct chunk) + n);
-        rest->size = c->size - n - sizeof(struct chunk);
-        rest->user_size = 0;
-        rest->state = 1;
-        rest->next_free = c->next_free;
-        *prev = rest;
+    __fakecc_alloc_bin_unlink(c);
+    if (c->size >= n + sizeof(struct chunk) + 32) {
+        size_t old = c->size;
+        struct chunk *rest;
         c->size = n;
-    } else {
-        *prev = c->next_free;
+        rest = (struct chunk *)((char *)c + sizeof(struct chunk) + n + 16);
+        rest->size = old - n - sizeof(struct chunk) - 16;
+        rest->user_size = 0;
+        rest->pad = 0;
+        __fakecc_alloc_write_footer(c);
+        __fakecc_alloc_bin_push(rest);
     }
-    c->next_free = 0;
     c->state = 0;
-    c->user_size = orig_n;
-    void *ret = (char *)c + sizeof(struct chunk);
+    c->user_size = req;
+    ret = (char *)c + sizeof(struct chunk);
     __asan_unpoison_memory_region(ret, n);
-    /* Recycled freelist chunks keep previous contents.  Zero so a self-hosted
-     * compiler's unread fields do not depend on ASLR / allocation reuse. */
     memset(ret, 0, n);
     return ret;
 }
 
 void free(void *p) {
+    struct chunk *c;
+    struct chunk *n;
+    struct chunk *left;
     if (p == 0) return;
-    struct chunk *c = (struct chunk *)((char *)p - sizeof(struct chunk));
-    if (already_free(c)) return;
+    c = (struct chunk *)((char *)p - sizeof(struct chunk));
+    if (c->state == 1) return;
     __asan_poison_memory_region(p, c->size);
-    struct chunk *left = 0;
-    struct chunk *n = freelist_head;
-    while (n && n < c) {
-        left = n;
-        n = n->next_free;
+    n = __fakecc_alloc_phys_next(c);
+    if (n->state == 1) {
+        __fakecc_alloc_bin_unlink(n);
+        c->size = c->size + 16 + sizeof(struct chunk) + n->size;
     }
-    c->state = 1;
-    c->next_free = n;
-    if (left) left->next_free = c;
-    else freelist_head = c;
-    if (n && chunks_adjacent(c, n)) {
-        c->size = c->size + sizeof(struct chunk) + n->size;
-        c->next_free = n->next_free;
-        n->state = 0; /* absorbed into c */
+    left = __fakecc_alloc_phys_prev(c);
+    if (left && left->state == 1) {
+        __fakecc_alloc_bin_unlink(left);
+        left->size = left->size + 16 + sizeof(struct chunk) + c->size;
+        left->user_size = 0;
+        __fakecc_alloc_bin_push(left);
+        return;
     }
-    if (left && chunks_adjacent(left, c)) {
-        left->size = left->size + sizeof(struct chunk) + c->size;
-        left->next_free = c->next_free;
-        c->state = 0; /* absorbed into left */
-    }
+    c->user_size = 0;
+    __fakecc_alloc_bin_push(c);
 }
 
 void *calloc(size_t n, size_t m) {
+    size_t total;
+    void *p;
     if (m != 0 && n > ((size_t)-1) / m) return 0;
-    size_t total = n * m;
-    void *p = malloc(total);
+    total = n * m;
+    p = malloc(total);
     if (p == 0) return 0;
     memset(p, 0, total);
     return p;
 }
 
 void *realloc(void *p, size_t n) {
+    struct chunk *c;
+    void *q;
+    size_t copy;
     if (p == 0) return malloc(n);
     if (n == 0) {
         free(p);
         return 0;
     }
-    struct chunk *c = (struct chunk *)((char *)p - sizeof(struct chunk));
+    c = (struct chunk *)((char *)p - sizeof(struct chunk));
     if (c->size >= n) {
-        c->user_size = n;
+        __asan_poison_memory_region(p, c->size);
         __asan_unpoison_memory_region(p, n);
+        c->user_size = n;
         return p;
     }
-    void *q = malloc(n);
+    q = malloc(n);
     if (q == 0) return 0;
-    size_t copy = c->user_size;
+    copy = c->user_size;
     if (copy == 0 || copy > c->size) copy = c->size;
     if (copy > n) copy = n;
     memcpy(q, p, copy);

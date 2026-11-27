@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -346,7 +345,6 @@ void emit_module_add_dbg_call_site(EmitModule *m, int func_idx,
                                    const DebugCallSite *cs);
 void debug_var_release(DebugVar *v);
 void debug_call_site_release(DebugCallSite *cs);
-
 enum TargetArch {
     TARGET_ARCH_UNKNOWN = 0,
     TARGET_ARCH_X86_64 = 1,
@@ -382,7 +380,6 @@ const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
 const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
-
 typedef struct FILE FILE;
 typedef long fpos_t;
 struct FuncDieRef { char *name; uint32_t off; };

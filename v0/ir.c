@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -924,7 +923,6 @@ static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
 }
-
 enum TargetArch {
     TARGET_ARCH_UNKNOWN = 0,
     TARGET_ARCH_X86_64 = 1,
@@ -960,7 +958,6 @@ const TargetDesc *target_x86_64_linux(void);
 const TargetDesc *target_arm64_macos(void);
 const TargetDesc *target_x86_64_windows(void);
 int target_backend_ready(const TargetDesc *t);
-
 int dfp_from_str(const char *text, int width,
                  unsigned long long *lo, unsigned long long *hi);
 void dfp_neg_bits(int width, unsigned long long *lo, unsigned long long *hi);
@@ -977,9 +974,9 @@ int dfp_from_int(unsigned long long val, unsigned long long val_hi,
 int dfp_convert_width(int src_w, unsigned long long slo, unsigned long long shi,
                       int dst_w, unsigned long long *dlo, unsigned long long *dhi);
 enum { DFP_ADD = 0, DFP_SUB = 1, DFP_MUL = 2, DFP_DIV = 3 };
-
 typedef struct FILE FILE;
 typedef long fpos_t;
+enum { FAKECC_MAX_INIT_BYTES = 16 * 1024 * 1024 };
 IRModule *g_ir_module = ((void*)0);
 int g_str_counter = 0;
 int g_flt_counter = 0;
@@ -1899,6 +1896,7 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
         const char *fn_name = g_ir_cur_fd->name;
         if (runtime.strncmp(fn_name, "__asan_", 7) == 0 ||
             runtime.strncmp(fn_name, "asan_", 5) == 0 ||
+            runtime.strncmp(fn_name, "__fakecc_alloc_", 15) == 0 ||
             runtime.strcmp(fn_name, "malloc") == 0 ||
             runtime.strcmp(fn_name, "free") == 0 ||
             runtime.strcmp(fn_name, "realloc") == 0 ||
@@ -1906,6 +1904,10 @@ static void emit_asan_check(IRFunction *fn, IRValue addr, int width, int is_writ
             runtime.strcmp(fn_name, "heap_grow") == 0 ||
             runtime.strcmp(fn_name, "map_anon") == 0) {
             return;
+        }
+        if (!is_write && width == 8 &&
+            (runtime.strcmp(fn_name, "strlen") == 0 || runtime.strcmp(fn_name, "strcmp") == 0)) {
+            width = 1;
         }
     }
     char hook_name[32];
@@ -10771,8 +10773,16 @@ static void lower_stmt(IRFunction *fn, IRSymTable *st, const Stmt *s,
         } else if (s->u.decl.storage_class == 1) {
             int sz = type_size(dty);
             if (sz <= 0) sz = 8;
-            char *bytes = runtime.calloc(sz, 1);
-            if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            char *bytes = ((void*)0);
+            if (s->u.decl.init && sz > FAKECC_MAX_INIT_BYTES) {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "object initializer is too large");
+                break;
+            }
+            if (s->u.decl.init || sz <= FAKECC_MAX_INIT_BYTES) {
+                bytes = runtime.calloc((size_t)sz, 1);
+                if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
+            }
             char mangled[256];
             runtime.snprintf(mangled, sizeof mangled, "%s.%s", cur_fd->name,
                      s->u.decl.name);
@@ -12231,7 +12241,12 @@ static char *materialize_compound_literal(const IRModule *ir, const Expr *e)
     Type target = e->u.compound.target_type;
     int sz = type_size(target);
     if (sz <= 0) sz = 8;
-    char *bytes = runtime.calloc(sz, 1);
+    if (sz > FAKECC_MAX_INIT_BYTES) {
+        die_at(e->loc.file, e->loc.line, e->loc.col,
+               "object initializer is too large");
+        return ((void*)0);
+    }
+    char *bytes = runtime.calloc((size_t)sz, 1);
     if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
     char name[32];
     runtime.snprintf(name, sizeof name, "__clit.%d", g_str_counter++);
@@ -12875,7 +12890,12 @@ int ir_generate(const TranslationUnit *tu, IRModule *ir, int pin_locals) {
         int is_static = (s->u.decl.storage_class == 1);
         char *bytes = ((void*)0);
         if (s->u.decl.init) {
-            bytes = runtime.calloc(sz, 1);
+            if (sz > FAKECC_MAX_INIT_BYTES) {
+                die_at(s->loc.file, s->loc.line, s->loc.col,
+                       "object initializer is too large");
+                continue;
+            }
+            bytes = runtime.calloc((size_t)sz, 1);
             if (!bytes) { runtime.fprintf(runtime.stderr, "fakecc: OOM\n"); runtime.exit(1); }
         }
         IRGlobal *g = ir_module_push_global(ir, s->u.decl.name, sz, bytes,

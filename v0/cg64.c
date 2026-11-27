@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -1191,7 +1190,6 @@ static inline int ir_call_ret_ptr_live_after(const IRInst *inst) {
 static inline int ir_op_with_overflow(IROpcode op) {
     return op == IR_ADDO || op == IR_SUBO || op == IR_MULO;
 }
-
 void codegen64(const IRModule *ir, EmitModule *out, int want_debug);
 enum {
     A64_EQ = 0, A64_NE = 1, A64_CS = 2, A64_CC = 3,
@@ -1447,7 +1445,6 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
-
 enum A64GpReg {
     A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
     A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,
@@ -1472,7 +1469,6 @@ enum A64VecReg {
     A64_V_NONE = -1,
 };typedef enum A64VecReg A64VecReg;
 const RaRegClasses *ra_classes_arm64(void);
-
 enum TargetArch {
     TARGET_ARCH_UNKNOWN = 0,
     TARGET_ARCH_X86_64 = 1,
@@ -5169,9 +5165,15 @@ static int c64_eval_offset(C64 *c, int v, int64_t *out, int depth) {
     if (s->op == IR_MUL || s->op == IR_ADD) {
 int64_t x;
 int64_t y;
+int64_t r;
         if (!c64_eval_offset(c, s->a, &x, depth + 1)) return 0;
         if (!c64_eval_offset(c, s->b, &y, depth + 1)) return 0;
-        *out = (s->op == IR_MUL) ? x * y : x + y;
+        if (s->op == IR_MUL) {
+            if (__builtin_mul_overflow(x, y, &r)) return 0;
+        } else if (__builtin_add_overflow(x, y, &r)) {
+            return 0;
+        }
+        *out = r;
         return 1;
     }
     return 0;

@@ -42,7 +42,6 @@ int fakecc_had_error(void);
 int fakecc_error_code(void);
 const char *fakecc_error_message(void);
 SourceLoc fakecc_error_loc(void);
-
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -975,7 +974,6 @@ RAResult *reg_alloc(const IRFunction *fn);
 RAResult *reg_alloc_xmm(const IRFunction *fn);
 void ra_result_free(RAResult *ra);
 void ra_set_reserve_va_scratch(int on);
-
 enum A64GpReg {
     A64_X0 = 0, A64_X1 = 1, A64_X2 = 2, A64_X3 = 3,
     A64_X4 = 4, A64_X5 = 5, A64_X6 = 6, A64_X7 = 7,

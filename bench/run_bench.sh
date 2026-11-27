@@ -7,8 +7,9 @@
 #
 # Usage: run_bench.sh [FAKECC] [measure.py flags...]
 #
-# Exits 0 when every bench's fakecc and gcc binaries print the same output.
-# Performance ratios are reported, never used as a pass/fail gate.
+# Exits 0 when every bench's fakecc and gcc binaries produce identical output
+# (including byte-identical compiler binaries in the selfhost -O0 case) and all
+# configured red-line ratio gates (--gate / --max-*) are satisfied.
 #
 # BENCH_GCC selects the oracle.  BENCH_RUNS, when set, forces that many
 # measured repetitions (the old fixed-count knob).  Otherwise measure.py

@@ -335,7 +335,6 @@ int iasm_assemble_body(EmitModule *out, const char *body,
 int assemble_s_file(const char *src, const char *filename, EmitModule *out);
 typedef struct FILE FILE;
 typedef long fpos_t;
-
 struct Macro {
     char *name;
     char **formals;
